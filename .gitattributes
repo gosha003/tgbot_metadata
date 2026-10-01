@@ -1,0 +1,15 @@
+# Переводы строк в репозитории всегда LF, даже когда работаем на Windows:
+# иначе каждый коммит с другой машины даёт мусорный дифф на весь файл.
+* text=auto eol=lf
+
+# Бинарные фикстуры и тестовые образцы не трогать.
+*.doc  binary
+*.xls  binary
+*.ppt  binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
