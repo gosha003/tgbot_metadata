@@ -66,9 +66,9 @@ TG_BOT_TOKEN=123456:ABC...
 PYTHONIOENCODING=utf-8 python -m tests.test_inspect
 ```
 
-**4821 проверка**: 424 на инспекцию (`tests.test_inspect`), 1327 на чистку
+**4818 проверок**: 424 на инспекцию (`tests.test_inspect`), 1325 на чистку
 (`tests.test_clean`), 1637 в самопроверке `core.zipfix`, 1289 в
-`core.clean_ooxml`, 84 в `core.clean --selftest`, 60 в `bot.py --selftest`.
+`core.clean_ooxml`, 80 в `core.clean --selftest`, 63 в `bot.py --selftest`.
 Фикстуры синтетические, с заранее известными метаданными.
 
 ```bash

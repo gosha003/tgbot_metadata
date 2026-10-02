@@ -5,7 +5,8 @@
                verify=True) -> DispatchResult
 
 Определяет формат через core.sniff и маршрутизирует по core.sniff.family:
-pdf -> clean_pdf, image -> clean_image, ooxml -> clean_ooxml, rtf -> clean_rtf.
+pdf -> clean_pdf, image -> clean_image, ooxml -> clean_ooxml, rtf -> clean_rtf,
+odf -> clean_odf.
 Остальные форматы честно
 отклоняются: чистки для них ещё нет, и делать вид, что почистили, нельзя.
 Отдать пользователю файл, который он считает почищенным, а он не почищен, --
@@ -60,6 +61,7 @@ from enum import Enum
 from . import sniff
 from .clean_image import clean_image
 from .clean_ooxml import clean_ooxml
+from .clean_odf import clean_odf
 from .clean_pdf import clean_pdf
 from .clean_rtf import clean_rtf
 from .cleanmodel import ACT_TITLE, Act, CleanResult, Profile
@@ -83,11 +85,8 @@ _LEAKY = (Risk.IDENTITY, Risk.ENVIRONMENT)
 #
 # В фазу 4 формат попадает тогда, когда почистить его на месте нельзя в принципе.
 # Легаси OLE2 -- так: метаданные и история правок вшиты в контейнер, в потоках
-# 1Table/0Table лежит удалённый текст прошлых версий. ODF ещё не чистится, но
-# чистится на месте (тот же ZIP, zipfix его уже умеет), поэтому фаза 2, не 4.
-# RTF уже чистится: плоский текст, control words правятся напрямую.
+# 1Table/0Table лежит удалённый текст прошлых версий. ODF и RTF чистятся на месте.
 _PLANNED = {
-    "odf": (2, "Чистка ODF -- фаза 2."),
     "ole": (4, "Легаси OLE2 (doc/xls/ppt) на месте не чистится в принципе: метаданные и "
                "история правок вшиты в сам контейнер, нужна конвертация через стоковое "
                "приложение -- фаза 4."),
@@ -230,6 +229,7 @@ _CLEANERS = {
     "ooxml": lambda s, d, prof, keep, force: clean_ooxml(
         s, d, prof, keep, force_signed=force),
     "rtf": lambda s, d, prof, keep, force: clean_rtf(s, d, prof, keep),
+    "odf": lambda s, d, prof, keep, force: clean_odf(s, d, prof, keep),
 }
 
 
@@ -590,8 +590,7 @@ def _selftest() -> int:
         d = os.path.join(tmp, "refuse")
         os.makedirs(d)
         # docx/xlsx/pptx убраны из отказов: с фазы 2 они чистятся (см. пункт 3b).
-        cases = [(fx.make_odt, "odt", 2),
-                 (fx.make_doc, "doc", 4), (fx.make_xls, "xls", 4), (fx.make_ppt, "ppt", 4)]
+        cases = [(fx.make_doc, "doc", 4), (fx.make_xls, "xls", 4), (fx.make_ppt, "ppt", 4)]
         for maker, name, phase in cases:
             sub = os.path.join(d, name)
             os.makedirs(sub)
@@ -614,6 +613,10 @@ def _selftest() -> int:
         path, _exp = fx.make_rtf(d)
         res = clean_file(path, os.path.join(d, "clean.rtf"))
         _check("rtf: файл выдан и исходные значения не выжили",
+               res.ok and res.verified and res.clean, (res.ok, res.clean, res.errors[:2]))
+        path, _exp = fx.make_odt(d)
+        res = clean_file(path, os.path.join(d, "clean.odt"))
+        _check("odt: файл выдан и исходные значения не выжили",
                res.ok and res.verified and res.clean, (res.ok, res.clean, res.errors[:2]))
 
         # 4. dst == src при любом написании пути.

@@ -114,11 +114,13 @@ _NEUTRAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,40}$")
 
 _PROFILES = {"cl:stealth": Profile.STEALTH, "cl:paranoid": Profile.PARANOID}
 _EXT = {"pdf": ".pdf", "jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif",
-        "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "rtf": ".rtf"}
+        "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "rtf": ".rtf",
+        "odt": ".odt", "ods": ".ods", "odp": ".odp"}
 # Основа нейтрального имени: родовое слово по типу файла, без картинки как
 # умолчания -- иначе docx уехал бы с именем image_*.docx.
 _STEM = {"pdf": "document", "docx": "document", "xlsx": "spreadsheet",
-         "pptx": "presentation", "rtf": "document"}
+         "pptx": "presentation", "rtf": "document", "odt": "document",
+         "ods": "spreadsheet", "odp": "presentation"}
 
 HELP_TEXT = (
     "Это инспектор и чистильщик метаданных документов.\n\n"
@@ -126,7 +128,7 @@ HELP_TEXT = (
     "картинку) -- бот покажет, что сейчас лежит внутри: автор, приложение, "
     "даты, локальные пути, GPS в фото и т.п. Файл при этом <b>не меняется "
     "и не сохраняется</b>.\n\n"
-    "Для <b>PDF, картинок (JPEG, PNG, WebP, GIF), docx/xlsx/pptx и RTF</b> после "
+    "Для <b>PDF, картинок (JPEG, PNG, WebP, GIF), docx/xlsx/pptx, RTF и ODF</b> после "
     "отчёта появятся кнопки чистки: <b>Stealth</b> (убирает личность и "
     "окружение, оставляет приложение и версию) или <b>Paranoid</b> (убирает "
     "всё, но результат выглядит обработанным). Бот пришлёт отчёт о чистке и "
@@ -134,7 +136,7 @@ HELP_TEXT = (
     "У docx/xlsx/pptx полной незаметности не даёт даже Stealth: пустой автор "
     "сам по себе признак чистки. Бот честно пишет это в отчёте, а не "
     "умалчивает.\n\n"
-    "Для остальных форматов (doc/xls/ppt, ODF) чистки <b>пока нет</b>: "
+    "Для остальных форматов (doc/xls/ppt) чистки <b>пока нет</b>: "
     "бот так и напишет и укажет, в какой фазе она запланирована. Такой файл "
     "он не меняет.\n\n"
     "Главное условие: отправляйте файл через скрепку → <b>Файл</b> "
@@ -829,6 +831,16 @@ async def _selftest() -> int:
                   len(d) == 1 and re.fullmatch(r"document_[0-9a-f]{6}\.rtf", d[0].name) is not None,
                   [x.name for x in d])
             check("rtf: исходные значения ушли", d and survivors(src, d[0].data, "rtf") == [])
+
+        src, exp, ev, ch = await send(fx.make_odt, "odt")
+        check("odt: кнопки чистки показаны", ch is not None and ch.markup is not None)
+        if ch is not None:
+            await click(ch, "cl:stealth")
+            d = docs(ev)
+            check("odt: файл отправлен как document_*.odt",
+                  len(d) == 1 and re.fullmatch(r"document_[0-9a-f]{6}\.odt", d[0].name) is not None,
+                  [x.name for x in d])
+            check("odt: исходные значения ушли", d and survivors(src, d[0].data, "odt") == [])
 
         for maker, nm, phase in ((fx.make_doc, "doc", 4),):
             _, _, ev, ch = await send(maker, nm)
