@@ -1284,10 +1284,8 @@ def _phases(text):
 # (docs/ROADMAP.md). Для RTF и ODF ROADMAP однозначного номера не даёт: допускаем
 # 2 или 4, но номер обязан быть ОДИН и тот же везде, где он назван (см. ниже).
 _REFUSED = (
-    ("docx", fixtures.make_docx, (2,)),
-    ("docx_wordlike", fixtures.make_docx_wordlike, (2,)),
-    ("xlsx", fixtures.make_xlsx, (2,)),
-    ("pptx", _make_pptx, (2,)),
+    # docx, docx_wordlike, xlsx, pptx убраны: с фазы 2 они ЧИСТЯТСЯ, а не
+    # отказываются. Их поведение проверяется в тестах чистки OOXML ниже.
     ("doc", fixtures.make_doc, (4,)),
     ("doc_active", fixtures.make_doc_active, (4,)),
     ("xls", fixtures.make_xls, (4,)),
@@ -1342,6 +1340,12 @@ def test_11_refusals_unsupported_formats(tmp):
         _check("%s: сводка начинается с «НЕ почищен»" % name, summ.startswith("НЕ почищен"), summ)
         _check("%s: отчёт нигде не называет файл чистым" % name,
                not _claims_clean(plain) and not _claims_clean(tg))
+        # Предусловие равенства ниже: файл ОТКАЗАН, и номер фазы в отчёте --
+        # причина отказа. У почищенного файла planned_phase == 0, а фаза в его
+        # отчёте называется информационно (предупреждение про Regenerate как
+        # путь к незаметности), и равенство к нему не применимо.
+        _check("%s: предусловие -- файл отказан и у отказа есть номер фазы" % name,
+               not res.ok and res.planned_phase > 0, (res.ok, res.planned_phase))
         ph = _phases(plain) | _phases(tg)
         _check("%s: отчёт cleanreport и диспетчер называют ОДНУ И ТУ ЖЕ фазу (пользователь видит оба текста)" % name,
                ph == {res.planned_phase}, "фазы в отчёте: %s, planned_phase=%s" % (sorted(ph), res.planned_phase))
@@ -1657,13 +1661,117 @@ def test_97_cli_verdict_text(tmp):
     _check("CLI, обычный PDF: код возврата 0 и итог «ПОЧИЩЕНО: ни одно исходное значение»",
            rc == 0 and "ПОЧИЩЕНО: ни одно исходное значение" in text and "НЕ ПОЛНОСТЬЮ" not in text, (rc, text[:200]))
 
+    # С фазы 2 docx чистится. Отказ с номером фазы остаётся у форматов,
+    # чистки которых ещё нет: легаси OLE2 (фаза 4), ODF и RTF.
     rc, text, out = run_cli(fixtures.make_docx(tmp)[0])
-    _check("CLI, docx: код возврата 1, файла нет, «НЕ ПОЧИЩЕНО», фаза названа",
-           rc == 1 and not os.path.exists(out) and "НЕ ПОЧИЩЕНО" in text and _phases(text) != set(),
+    _check("CLI, docx: код возврата 0, файл выдан, «ПОЧИЩЕНО»",
+           rc == 0 and os.path.isfile(out) and "ПОЧИЩЕНО" in text and "НЕ ПОЧИЩЕНО" not in text,
+           (rc, text[:300]))
+
+    rc, text, out = run_cli(fixtures.make_doc(tmp)[0])
+    _check("CLI, legacy .doc: код возврата 1, файла нет, «НЕ ПОЧИЩЕНО», названа фаза 4",
+           rc == 1 and not os.path.exists(out) and "НЕ ПОЧИЩЕНО" in text and 4 in _phases(text),
            (rc, text[:300]))
 
 
 # ===========================================================================
+# 20. Фаза 2: чистка OOXML
+# ===========================================================================
+
+_WORD_EPOCH = (1980, 1, 1, 0, 0, 0)   # что Office ставит всем записям ZIP
+
+
+@_with_tmp
+def test_20_ooxml_cleaning(tmp):
+    """Фаза 2: чистка docx/xlsx/pptx поверх байт-точной пересборки ZIP.
+
+    Заменяет проверки, которые раньше утверждали, что эти форматы ОТКАЗЫВАЮТ.
+    Главное здесь -- не только «утечек не осталось», но и «пакет остался
+    пакетом Office»: порядок записей, DOS-таймстемпы, Application. Наивная
+    пересборка их ломает, и файл Word превращается в файл-от-библиотеки,
+    который наш же инспектор опознаёт сигналом ai.
+    """
+    import zipfile
+
+    for maker, name in ((fixtures.make_docx, "docx"),
+                        (fixtures.make_docx_wordlike, "docx_wordlike"),
+                        (fixtures.make_xlsx, "xlsx")):
+        src, _exp = maker(tmp)
+        src_ts = {i.filename: i.date_time for i in zipfile.ZipFile(src).infolist()}
+        src_order = [i.filename for i in zipfile.ZipFile(src).infolist()]
+        src_had_app = bool([f for f in inspect_file(src).findings
+                            if "Application" in (f.label or "")])
+
+        for profile in (STEALTH, PARANOID):
+            tag = "%s/%s" % (name, _pname(profile))
+            res, dst = _clean(name, tmp, src, profile)
+            if res is None:
+                continue
+            _check("%s: файл выдан и признан чистым" % tag,
+                   res.ok and res.clean, (res.ok, res.errors[:1]))
+            _check("%s: ни одно исходное значение не выжило" % tag,
+                   not res.survived, [s_.value for s_ in res.survived][:3])
+
+            if not os.path.isfile(dst):
+                continue
+            with zipfile.ZipFile(dst) as z:
+                _check("%s: результат открывается, testzip проходит" % tag, z.testzip() is None)
+                out_order = [i.filename for i in z.infolist()]
+                out_ts = {i.filename: i.date_time for i in z.infolist()}
+            _check("%s: [Content_Types].xml остался первой записью" % tag,
+                   out_order and out_order[0] == "[Content_Types].xml", out_order[:2])
+            kept = [n for n in src_order if n in set(out_order)]
+            _check("%s: порядок уцелевших записей не изменился" % tag, out_order == kept,
+                   (out_order[:4], kept[:4]))
+            # Таймстемпы ZIP -- канал утечки сам по себе (docs/METADATA.md): Word
+            # ставит всем записям 1980-01-01, библиотеки -- реальное время
+            # сохранения. Поэтому «сохранить как было» верно ТОЛЬКО для пакета от
+            # Word; у пакета с реальным временем сохранять его означало бы оставить
+            # утечку, и чистильщик обязан привести всё к 1980-01-01. Запрещено
+            # ровно одно: вынести реальное время в результат.
+            real_out = [n for n, t in out_ts.items() if tuple(t) != _WORD_EPOCH]
+            if all(tuple(t) == _WORD_EPOCH for t in src_ts.values()):
+                bad_ts = [n for n in out_ts if n in src_ts and out_ts[n] != src_ts[n]]
+                _check("%s: пакет от Word -- DOS-таймстемпы записей не тронуты" % tag,
+                       not bad_ts, bad_ts[:3])
+            else:
+                _check("%s: реальное время записей приведено к 1980-01-01 (иначе время "
+                       "сохранения утекает через контейнер)" % tag, not real_out, real_out[:3])
+            _check("%s: реального времени сохранения в таймстемпах результата нет" % tag,
+                   not real_out, real_out[:3])
+
+            after = inspect_file(dst)
+            app = [f.value for f in after.findings if "Application" in (f.label or "")]
+            # Если в исходнике Application не было (xlsx-фикстура идёт без
+            # docProps/app.xml), сохранять нечего и появиться он не имеет права:
+            # дописанный Application -- подделка провенанса.
+            if profile is STEALTH:
+                _check("%s: Application сохранён как есть -- это правда о файле "
+                       "(в исходнике %s)" % (tag, "был" if src_had_app else "не было"),
+                       bool(app) == src_had_app, app)
+            _check("%s: word/people.xml с userId не осталось" % tag,
+                   "word/people.xml" not in out_order)
+            _check("%s: printerSettings с именем принтера не осталось" % tag,
+                   not [n for n in out_order if "printerSettings" in n], out_order[:0])
+
+        # Честность про незаметность: для OOXML stealth файл опознаётся как
+        # чищеный, и отчёт ОБЯЗАН это сказать. Пустые dc:creator и
+        # cp:lastModifiedBy вместе -- сами по себе признак; это предел формата,
+        # а не дефект, см. docs/ROADMAP.md.
+        res, dst = _clean(name + "_warn", tmp, src, STEALTH)
+        if res is None:
+            continue
+        kinds = [k for k, _d in getattr(res, "new_signals", [])]
+        if kinds:
+            plain = cleanreport.render_plain(res)
+            tg = "\n".join(cleanreport.render_telegram(res))
+            _check("%s: отчёт предупреждает, что файл опознаётся как чищеный" % name,
+                   "ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ" in plain and "ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ" in tg,
+                   plain[:200])
+            _check("%s: предупреждение называет Regenerate как решение" % name,
+                   "Regenerate" in plain, plain[:200])
+
+
 # 98. Вердикты диспетчера и отчёта не противоречат друг другу
 # ===========================================================================
 

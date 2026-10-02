@@ -40,13 +40,15 @@ TG_LIMIT = 4096
 TG_BUDGET = TG_LIMIT - 64      # запас под префикс нумерации частей
 WIDTH = 100
 
-# Форматы, для которых чистильщик есть (clean_pdf, clean_image).
-CLEANABLE = frozenset({"pdf", "jpeg", "png", "webp", "gif"})
+# Форматы, для которых чистильщик есть (clean_pdf, clean_image, clean_ooxml).
+# Должно совпадать с ключами core.clean._CLEANERS, развёрнутыми до форматов:
+# по этому множеству бот решает, показывать ли кнопки чистки.
+CLEANABLE = frozenset({"pdf", "jpeg", "png", "webp", "gif", "docx", "xlsx", "pptx"})
 
 # Чистильщика нет, фаза по docs/ROADMAP.md. RTF в плане отдельно не назван;
-# он отнесён к фазе 4 вместе с легаси и ODF.
+# он отнесён к фазе 4 вместе с легаси и ODF. OOXML здесь больше нет: с фазы 2
+# docx/xlsx/pptx чистятся, см. CLEANABLE.
 _PHASE = {
-    "docx": 2, "xlsx": 2, "pptx": 2,
     "doc": 4, "xls": 4, "ppt": 4, "ole": 4, "odt": 4, "ods": 4, "odp": 4, "rtf": 4,
 }
 # TIFF/HEIC clean_image отклоняет намеренно (риск испортить файл), это не «ещё не дошли».
@@ -174,6 +176,14 @@ def _snap(result):
     except Exception:
         s.errs.append("доказательство диспетчера не прочиталось: вердикт по эвристике")
     s.planned_phase = _num(_g(result, "planned_phase", 0))
+    # Сигналы, появившиеся ПОСЛЕ чистки: файл теперь опознаётся как обработанный.
+    s.new_signals = []
+    try:
+        for item in (_g(result, "new_signals", None) or []):
+            kind = _c(_val(item[0]), 40)
+            s.new_signals.append(kind)
+    except Exception:
+        s.errs.append("список новых сигналов не прочитался")
 
     entries, bad = [], 0
     raw, got = _try(result, "actions")
@@ -306,6 +316,18 @@ def _verdict(s):
         was = _pair(s.cb, s.ca, " -> ")
         lines = ["Доказательство: ни одно исходное чувствительное значение не "
                  "найдено в результате. Сверка идёт значениями, а не счётчиками."]
+        if s.new_signals:
+            lines.append(
+                "НО ФАЙЛ ТЕПЕРЬ ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ. Утечки нет, однако после "
+                "чистки появились признаки обработки (%s), которых в исходнике не "
+                "было. Если вам важно, чтобы сам факт чистки не был виден, этого "
+                "результата недостаточно." % ", ".join(sorted(set(s.new_signals))))
+            lines.append(
+                "Для docx, xlsx и pptx это предел формата, а не недоработка: пустые "
+                "dc:creator и cp:lastModifiedBy вместе сами являются признаком, а "
+                "оставить настоящее имя значит не почистить, подставить чужое -- "
+                "подделать провенанс. Незаметность даёт только пересоздание файла "
+                "стоковым приложением (режим Regenerate, фаза 4).")
         if s.ca > 0:
             lines.append("Критичных находок в результате: %d. Это НОВЫЕ значения, "
                          "которых в исходнике не было -- например перегенерированный "
@@ -877,23 +899,28 @@ def _demo():
 
     # 6. Форматы без чистильщика: не врать.
     print("\n=== 6. форматы без чистильщика ===")
-    for fmt, ok, phase in (("docx", False, "фазе 2"), ("xls", False, "фазе 4"), ("odt", False, "фазе 4"),
-                           ("rtf", False, "фазе 4"), ("docx", True, "фазе 2")):
+    # docx/xlsx/pptx здесь больше нет: с фазы 2 чистильщик для них ЕСТЬ
+    # (CLEANABLE). Остались форматы, у которых его правда нет.
+    for fmt, ok, phase in (("doc", False, "фазе 4"), ("xls", False, "фазе 4"), ("odt", False, "фазе 4"),
+                           ("rtf", False, "фазе 4"), ("doc", True, "фазе 4")):
         r = mk(fmt=fmt, ok=ok, cb=-1, ca=0 if ok else -1)
         m = check_tg("%s ok=%s" % (fmt, ok), r)
         check("%s ok=%s: НЕ ПОЧИЩЕН + только инспекция + %s" % (fmt, ok, phase),
               "ФАЙЛ НЕ ПОЧИЩЕН" in m[0] and "только инспектируется" in m[0] and phase in m[0]
               and not claims_clean(m[0]), m[0][:300])
-        if fmt == "docx" and not ok:
+        if fmt == "doc" and not ok:
             print(m[0])
         print("summary:", summary_line(r))
     tiff = mk(fmt="tiff", ok=False, cb=-1, ca=-1)
     tiff.err("TIFF: чистка не поддерживается")
     m = check_tg("tiff", tiff)
     check("tiff: намеренный отказ, не «фаза»", "намеренно не берёт" in m[0] and "фазе" not in m[0])
-    future = mk(fmt="docx", ok=True, ca=0)
-    future.act("removed", "docProps/core.xml", "dc:creator", "Иванов")
-    check("docx ok=True с действиями (будущий чистильщик): отчёт строится как обычно",
+    # Формат без чистильщика, но с действиями и ok=True: отчёт строится как
+    # обычно, а не отказом. Страховка на случай, когда чистильщик для формата
+    # появится раньше, чем его впишут в CLEANABLE.
+    future = mk(fmt="odt", ok=True, ca=0)
+    future.act("removed", "meta.xml", "dc:creator", "Иванов")
+    check("odt ok=True с действиями (чистильщик вне CLEANABLE): отчёт строится как обычно",
           claims_clean(render_telegram(future)[0]))
 
     # 7. 500 действий, значения по 5000 символов.
