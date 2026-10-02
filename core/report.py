@@ -19,11 +19,19 @@ import textwrap
 from core import sniff
 from core.model import RISK_ICON, RISK_ORDER, RISK_TITLE, Risk, clip
 
-__all__ = ["render_telegram", "render_plain", "summary_line"]
+__all__ = ["render_telegram", "render_plain", "summary_line", "spoiler", "MASK_VALUES"]
 
 # Лимит одного сообщения Telegram. Запас -- на префикс нумерации частей.
 TG_LIMIT = 4096
 TG_BUDGET = TG_LIMIT - 64
+
+# Значения из файла в Telegram уходят под спойлер. Защищает от случайного
+# просмотра: превью в списке чатов, скриншот, взгляд через плечо, пересланное
+# сообщение. НЕ защищает от самого Telegram -- текст всё равно ушёл на его
+# серверы и лежит в истории чата. Границу надо называть вслух (это делает
+# _tg_footer), а не делать вид, что спойлер её снимает.
+# Политика общая на оба рендерера: core/cleanreport.py читает этот же флаг.
+MASK_VALUES = True
 
 # Ширина plain-отчёта для CLI.
 WIDTH = 100
@@ -69,6 +77,23 @@ def _esc(value, cap: int = 400) -> str:
     HTML-сущность пополам.
     """
     return html.escape(clip(value, cap), quote=False)
+
+
+def spoiler(fragment: str) -> str:
+    """Готовый HTML-фрагмент -> он же под спойлером Telegram.
+
+    Принимает УЖЕ экранированный HTML, в отличие от _esc(): оборачивать надо
+    вместе с <code>, а не внутри него. Telegram не допускает вложенных
+    сущностей внутри code и pre, зато внутри spoiler допускает -- поэтому
+    порядок именно такой и переставлять его нельзя.
+
+    fragment: кусок HTML (обычно "<code>значение</code>").
+    Возврат: тот же кусок в <tg-spoiler>, либо без изменений, если маскировка
+    выключена через MASK_VALUES или фрагмент пуст.
+    """
+    if not MASK_VALUES or not fragment:
+        return fragment
+    return "<tg-spoiler>%s</tg-spoiler>" % fragment
 
 
 def _plain(value, cap: int = 400) -> str:
@@ -318,7 +343,10 @@ def _tg_signals(report):
 
 
 def _tg_finding(f):
-    value = "<i>(пусто)</i>" if f.empty else "<code>%s</code>" % _esc(f.value)
+    # Пустое значение под спойлер не прячем: скрывать нечего, а лишний тап
+    # только мешает читать отчёт.
+    value = ("<i>(пусто)</i>" if f.empty
+             else spoiler("<code>%s</code>" % _esc(f.value)))
     line = "• %s: %s" % (_esc(f.label, 120), value)
     note = _esc(f.note, 160)
     if f.removable:
@@ -374,11 +402,16 @@ def _tg_footer(report=None):
     first = ("Это фаза инспекции: файл прочитан и не изменён."
              if read_ok else
              "Это фаза инспекции. Файл не изменён, но и прочитать его не удалось.")
-    return [
-        "———",
-        "<i>%s</i>" % first,
-        "<i>Кнопки чистки появятся в следующих фазах.</i>",
-    ]
+    lines = ["———", "<i>%s</i>" % first]
+    if MASK_VALUES:
+        # Честная граница: спойлер прячет значение от взгляда, но не от
+        # Telegram. Промолчать об этом в инструменте приватности нельзя --
+        # пользователь решит, что значения никуда не уходили.
+        lines.append(
+            "<i>Значения скрыты — нажмите, чтобы показать. Но текст отчёта уже "
+            "ушёл на серверы Telegram и лежит в истории чата: если находки "
+            "чувствительные, удалите переписку, а разбор делайте через CLI.</i>")
+    return lines
 
 
 def render_telegram(report) -> list:
@@ -561,7 +594,7 @@ def _render_plain(report):
     out.append("Фаза инспекции: файл прочитан и не изменён."
                if (getattr(report, "fmt", "") or "") != "unreadable"
                else "Фаза инспекции. Файл не изменён, но прочитать его не удалось.")
-    out.append("Кнопки чистки появятся в следующих фазах.")
+    out.append("Чистка -- отдельная команда: python -m core.clean <файл>.")
     out.append(rule)
     return "\n".join(out)
 
@@ -660,6 +693,8 @@ def _demo_report():
 def _demo():
     from core.model import Report
 
+    global MASK_VALUES          # самопроверка выключателя маскировки, см. ниже
+
     r = _demo_report()
 
     msgs = render_telegram(r)
@@ -671,6 +706,29 @@ def _demo():
     assert "<script>" not in joined, "сырой тег утёк в Telegram-HTML"
     assert "<i>(пусто)</i>" in joined
     assert "убрать нельзя" in joined
+
+    # Маскировка значений. Считаем спойлеры поштучно, а не ищем один тег:
+    # пропущенная площадка рендера иначе не видна -- в отчёте и так есть
+    # спойлеры от других находок, и проверка становится вакуумной.
+    assert MASK_VALUES, "по умолчанию маскировка обязана быть включена"
+    n_values = sum(1 for f in r.findings if not f.empty)
+    assert joined.count("<tg-spoiler><code>") == n_values, (
+        "спойлеров %d, а непустых значений %d"
+        % (joined.count("<tg-spoiler><code>"), n_values))
+    assert "<tg-spoiler><i>(пусто)</i>" not in joined, (
+        "пустое значение прятать не надо -- скрывать нечего")
+    assert "ушёл на серверы Telegram" in joined, (
+        "оговорка про хранение в Telegram обязательна: спойлер прячет "
+        "значение от взгляда, но не от Telegram")
+    # Выключатель обязан действительно выключать: иначе рендер без маскировки
+    # проверить нечем.
+    MASK_VALUES = False
+    try:
+        bare = "\n".join(render_telegram(r))
+        assert "tg-spoiler" not in bare, "MASK_VALUES=False не отключил спойлер"
+        assert "<code>" in bare, "без маскировки значение обязано остаться в <code>"
+    finally:
+        MASK_VALUES = True
 
     print("=== render_telegram: %d сообщение(й) ===" % len(msgs))
     for i, m in enumerate(msgs, 1):

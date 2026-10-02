@@ -95,6 +95,18 @@ _CLEAN_TIMEOUT = 360
 _PENDING_TTL = 30 * 60  # секунд
 _PENDING_MAX = 50       # записей; старейшие вытесняются
 
+# Сколько сообщений отчёта бот готов отправить за один раз. Рендерер нарезает
+# отчёт по лимиту Telegram в 4096 символов и числа сообщений не ограничивает:
+# на патологическом входе с сотнями находок получается несколько десятков
+# сообщений, а Telegram отвечает на такой поток 429 и временно банит бота --
+# то есть бот ломает себя сам, и именно на том файле, который интереснее всего.
+# Лимит ставит хендлер: он один знает, что получатель -- чат, а не консоль.
+_MAX_PARTS = 12
+# Пауза между сообщениями. Личный чат терпит примерно одно сообщение в секунду;
+# 0.35 с -- компромисс между «не ждать минуту на длинном отчёте» и «не собрать
+# 429». Задержка срабатывает только на реально длинных отчётах.
+_SEND_PAUSE = 0.35
+
 # ponytail: грубая эвристика "похоже на авто-имя" по алфавиту символов
 # (буквы/цифры/подчёркивание/дефис), а не по смыслу слова. Усложнять до
 # словаря типичных личных имён -- только если эвристика реально подведёт.
@@ -212,6 +224,57 @@ async def _say(msg, text: str) -> None:
         await msg.edit_text(text)
     except Exception:
         await _quiet(msg.answer(text))
+
+
+def _trim_parts(parts: list, how: str) -> list:
+    """Отчёт -> не больше _MAX_PARTS сообщений, с честной пометкой об обрезке.
+
+    parts: список готовых сообщений от рендерера (HTML).
+    how: чем получить полный отчёт -- подставляется в текст пометки.
+    Возврат: новый список; последним элементом добавлена пометка, если обрезали.
+    Молчаливая обрезка здесь была бы хуже отсутствия лимита: пользователь
+    инструмента приватности решил бы, что находок больше нет.
+    """
+    if len(parts) <= _MAX_PARTS:
+        return list(parts)
+    kept = list(parts[:_MAX_PARTS])
+    kept.append(
+        "⚠ <b>Отчёт обрезан</b>: показаны первые %d сообщений из %d.\n"
+        "Остальное не потерялось -- оно есть в полном отчёте: <code>%s</code>.\n"
+        "<i>Лимит стоит, чтобы бот не был заблокирован Telegram за поток "
+        "сообщений.</i>" % (_MAX_PARTS, len(parts), html.escape(how, quote=False))
+    )
+    return kept
+
+
+async def _send_parts(target, parts: list, how: str) -> None:
+    """Отправить отчёт с лимитом и паузами.
+
+    target: сообщение, в ответ на которое пишем (нужен только .answer).
+    parts: готовые сообщения от рендерера.
+    how: команда CLI для пометки об обрезке.
+
+    Сбой на одном сообщении не съедает остальные -- отчёт уже построен, и
+    показать его частично полезнее, чем не показать вовсе. Но промолчать о
+    потере нельзя: недосланный кусок читается как «больше находок нет».
+    """
+    parts = _trim_parts(parts, how)
+    failed = 0
+    for n, part in enumerate(parts):
+        if n:
+            await asyncio.sleep(_SEND_PAUSE)
+        try:
+            await target.answer(part)
+        except Exception as exc:
+            # Приватность: только тип сбоя. В тексте исключения Telegram
+            # возвращает фрагмент сообщения, а в нём -- значения из файла.
+            failed += 1
+            log.error("сообщение отчёта не отправлено: %s", type(exc).__name__)
+    if failed:
+        await _quiet(target.answer(
+            "⚠ <b>Отчёт дошёл не полностью</b>: не отправлено сообщений -- %d из %d.\n"
+            "Считайте отчёт неполным, а не пустым. Полный: <code>%s</code>."
+            % (failed, len(parts), html.escape(how, quote=False))))
 
 
 # ============================================================================
@@ -402,8 +465,7 @@ async def _inspect_and_reply(message: Message, doc: Document) -> None:
         )
 
         await _quiet(status.delete())
-        for part in parts:
-            await message.answer(part)
+        await _send_parts(message, parts, "python -m core.inspect <файл>")
 
         if not _looks_neutral(doc.file_name or ""):
             await message.answer(
@@ -526,8 +588,8 @@ async def _clean_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
         else:
             await _say(msg, "⛔ <b>Файл НЕ почищен</b> -- чистка не удалась, почищенной копии нет, "
                             "бот никакой файл не отправляет. Причина и подробности ниже.")
-        for part in cleanreport.render_telegram(res):
-            await msg.answer(part)
+        await _send_parts(msg, cleanreport.render_telegram(res),
+                          "python -m core.clean <файл>")
         if ok:
             await msg.answer_document(
                 FSInputFile(dst, filename=name),
@@ -858,6 +920,45 @@ async def _selftest() -> int:
         check("прежние критичные при пустом survived -> warn",
               _verdict(mk(verified=True, residual=[("/Info", "Автор", False)]))[0] == "warn")
         check("не verified -> warn", _verdict(mk())[0] == "warn")
+
+        print("10. лимит сообщений: без него бот ловит 429 на длинном отчёте")
+        short = ["a", "b", "c"]
+        check("короткий отчёт не тронут", _trim_parts(short, "cli") == short)
+        long_ = ["часть %d" % i for i in range(_MAX_PARTS + 40)]
+        cut = _trim_parts(long_, "python -m core.inspect <файл>")
+        check("длинный обрезан до лимита плюс пометка", len(cut) == _MAX_PARTS + 1, len(cut))
+        check("сохранены именно первые сообщения", cut[:_MAX_PARTS] == long_[:_MAX_PARTS])
+        check("пометка называет оба числа и способ получить полное",
+              "первые %d" % _MAX_PARTS in cut[-1] and "из %d" % len(long_) in cut[-1]
+              and "core.inspect" in cut[-1], cut[-1][:200])
+        check("пометка не ломает HTML: угловые скобки экранированы",
+              "&lt;файл&gt;" in cut[-1] and "<файл>" not in cut[-1], cut[-1][-200:])
+        check("исходный список не изменён на месте", len(long_) == _MAX_PARTS + 40)
+        # Граница ровно на лимите: обрезка на единицу раньше молча съела бы
+        # последнее сообщение отчёта, а это как раз подвал с оговорками.
+        edge = ["x"] * _MAX_PARTS
+        check("ровно лимит -- без пометки", _trim_parts(edge, "cli") == edge)
+
+        # Потеря сообщения обязана быть названа: недосланный кусок отчёта
+        # читается как «больше находок нет», а это ровно та ошибка, из-за
+        # которой пользователь сочтёт файл чистым.
+        class _Flaky:
+            def __init__(self, fail_on):
+                self.fail_on, self.n, self.sent = fail_on, 0, []
+
+            async def answer(self, text):
+                self.n += 1
+                if self.n in self.fail_on:
+                    raise RuntimeError("boom")
+                self.sent.append(text)
+
+        g["_SEND_PAUSE"] = 0
+        fl = _Flaky({2})
+        await _send_parts(fl, ["один", "два", "три"], "python -m core.inspect <файл>")
+        check("сбой одного сообщения не съел остальные", "три" in fl.sent, fl.sent)
+        check("о потере сказано, и отчёт назван неполным, а не пустым",
+              any("дошёл не полностью" in s and "1 из 3" in s for s in fl.sent), fl.sent)
+        g["_SEND_PAUSE"] = _SEND_PAUSE
     finally:
         g["clean_file"], g["_CLEAN_TIMEOUT"] = saved[0], saved[1]
         core_clean._CLEANERS.clear()
