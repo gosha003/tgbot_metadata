@@ -1275,7 +1275,6 @@ _REFUSED = (
     ("doc_active", fixtures.make_doc_active, (4,)),
     ("xls", fixtures.make_xls, (4,)),
     ("ppt", fixtures.make_ppt, (4,)),
-    ("rtf", fixtures.make_rtf, (2,)),
     ("odt", fixtures.make_odt, (2,)),
 )
 
@@ -1332,6 +1331,33 @@ def test_15_customxml_namespaces_agree():
            % (sorted(insp_c - clean_c), sorted(clean_c - insp_c)))
     _check("корень не может быть одновременно утечкой SharePoint и содержимым",
            not (insp_sp & insp_c), sorted(insp_sp & insp_c))
+
+
+@_with_tmp
+def test_16_rtf_cleaning(tmp):
+    """RTF чистится на месте. Оракул -- повторная инспекция, не список действий.
+
+    STEALTH оставляет генератор: пустая строка приложения сама след чистки.
+    PARANOID убирает и его. Путь в теле документа -- утечка окружения, он
+    уходит в обоих профилях.
+    """
+    path, _exp = fixtures.make_rtf(tmp)
+    before = open(path, "rb").read()
+    for prof in PROFILES:
+        res, dst = _clean("rtf", tmp, path, prof)
+        _check("rtf/%s: ok и файл создан" % _pname(prof), res.ok and os.path.exists(dst), res.errors)
+        _check("rtf/%s: вход не изменён" % _pname(prof), open(path, "rb").read() == before)
+        if not res.ok:
+            continue
+        src_rep, dst_rep = inspect_file(path), inspect_file(dst)
+        lived = survived_values(src_rep, dst_rep)
+        _check("rtf/%s: ни одно исходное значение не выжило" % _pname(prof), not lived,
+               [(s.label, s.value[:40]) for s in lived])
+        blob = " ".join(f.value or "" for f in dst_rep.findings)
+        if prof is Profile.STEALTH:
+            _check("rtf/stealth: генератор на месте", fixtures.RTF_GENERATOR in blob, blob[:200])
+        else:
+            _check("rtf/paranoid: генератора нет", fixtures.RTF_GENERATOR not in blob)
 
 
 @_with_tmp
