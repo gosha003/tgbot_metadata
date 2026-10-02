@@ -44,19 +44,19 @@ WIDTH = 100
 # Форматы, для которых чистильщик есть (clean_pdf, clean_image, clean_ooxml).
 # Должно совпадать с ключами core.clean._CLEANERS, развёрнутыми до форматов:
 # по этому множеству бот решает, показывать ли кнопки чистки.
-CLEANABLE = frozenset({"pdf", "jpeg", "png", "webp", "gif", "docx", "xlsx", "pptx"})
+CLEANABLE = frozenset({"pdf", "jpeg", "png", "webp", "gif", "docx", "xlsx", "pptx", "rtf"})
 
 # Чистильщика нет, фаза по docs/ROADMAP.md. Запасной путь: основной номер даёт
 # диспетчер через planned_phase, см. _no_cleaner(). Держать эти числа
 # согласованными с core.clean._PLANNED обязательно -- иначе пользователь увидит
 # в одном сообщении две разные фазы для одного формата.
 # OOXML здесь больше нет: с фазы 2 docx/xlsx/pptx чистятся, см. CLEANABLE.
-# ODF и RTF -- фаза 2: они чистятся на месте (ODF -- тот же ZIP, RTF -- плоский
-# текст). В фазе 4 остаётся только то, что на месте не чистится в принципе:
+# ODF ещё фаза 2: тот же ZIP, чистильщика пока нет. RTF чистится, см. CLEANABLE.
+# В фазе 4 остаётся только то, что на месте не чистится в принципе:
 # легаси OLE2 с историей правок, вшитой в контейнер.
 _PHASE = {
     "doc": 4, "xls": 4, "ppt": 4, "ole": 4,
-    "odt": 2, "ods": 2, "odp": 2, "rtf": 2,
+    "odt": 2, "ods": 2, "odp": 2,
 }
 # TIFF/HEIC clean_image отклоняет намеренно (риск испортить файл), это не «ещё не дошли».
 _REFUSED = frozenset({"tiff", "heic"})
@@ -938,7 +938,7 @@ def _demo():
     # docx/xlsx/pptx здесь больше нет: с фазы 2 чистильщик для них ЕСТЬ
     # (CLEANABLE). Остались форматы, у которых его правда нет.
     for fmt, ok, phase in (("doc", False, "фазе 4"), ("xls", False, "фазе 4"), ("odt", False, "фазе 2"),
-                           ("rtf", False, "фазе 2"), ("doc", True, "фазе 4")):
+                           ("doc", True, "фазе 4")):
         r = mk(fmt=fmt, ok=ok, cb=-1, ca=0 if ok else -1)
         m = check_tg("%s ok=%s" % (fmt, ok), r)
         check("%s ok=%s: НЕ ПОЧИЩЕН + только инспекция + %s" % (fmt, ok, phase),
