@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Тесты чистки (фаза 1): PDF и картинки, диспетчер core.clean, рендер core.cleanreport.
+"""Тесты чистки (фазы 1-2): PDF, картинки, OOXML, диспетчер core.clean,
+рендер core.cleanreport.
 
 Главная мысль та же, что в core/cleanmodel.py: инспектор -- ОРАКУЛ. Результат
 чистки проверяется не по списку действий чистильщика, а повторным
@@ -9,8 +10,8 @@ inspect_file() по выходному файлу, плюс независимы
 Главный инвариант, проверяется на КАЖДОМ запуске чистки через _clean():
 sha256 ВХОДНОГО файла до и после совпадает.
 
-Что здесь НЕ проверяется и почему: чистки OOXML, OLE2, ODF и RTF не существует
-(фазы 2 и 4), поэтому для них проверяется только честный ОТКАЗ -- файл не
+Что здесь НЕ проверяется и почему: чистки OLE2, ODF и RTF не существует
+(фаза 4), поэтому для них проверяется только честный ОТКАЗ -- файл не
 создан, номер фазы назван, отчёт не обещает чистоты. Подгонять тест под
 текущее поведение запрещено (AGENTS.md, п. 6): упавшая проверка здесь -- это
 найденный дефект модуля, а не повод ослабить проверку.
@@ -1295,6 +1296,34 @@ _REFUSED = (
 )
 
 
+def test_14_cleanable_matches_cleaners():
+    """cleanreport.CLEANABLE обязан совпадать с тем, что диспетчер реально умеет.
+
+    Это не придирка к дублированию, а защита от молчаливой дыры: кнопки чистки в
+    боте показываются по CLEANABLE, а не по core.clean._CLEANERS. Добавить
+    чистильщик и забыть про CLEANABLE -- значит получить бота, который
+    отказывает в чистке формата, уже умеющего чиститься, и никакой тест формата
+    этого не заметит. Ровно так фаза 2 и доехала до бота нерабочей.
+    """
+    families = set(clean_mod._CLEANERS)
+    expected = {fmt for fmt, fam in sniff.FAMILY.items() if fam in families}
+    # TIFF/HEIC clean_image отклоняет намеренно (риск испортить файл), поэтому
+    # они входят в семейство image, но чистимыми не считаются.
+    expected -= set(cleanreport._REFUSED)
+    _check("CLEANABLE == форматы семейств, у которых есть чистильщик, минус намеренно "
+           "отклонённые: %s" % ", ".join(sorted(expected)),
+           set(cleanreport.CLEANABLE) == expected,
+           "лишние в CLEANABLE: %s; недостающие: %s"
+           % (sorted(set(cleanreport.CLEANABLE) - expected),
+              sorted(expected - set(cleanreport.CLEANABLE))))
+    # Второй конец той же связи: формат с чистильщиком не имеет права
+    # одновременно числиться отказанным с номером фазы.
+    both = sorted(set(cleanreport.CLEANABLE) & set(cleanreport._PHASE))
+    _check("формат не может быть и чистимым, и ожидающим фазы", not both, both)
+    planned = sorted(f for f in cleanreport.CLEANABLE if sniff.FAMILY.get(f) in clean_mod._PLANNED)
+    _check("чистимый формат не стоит в таблице отказов диспетчера _PLANNED", not planned, planned)
+
+
 @_with_tmp
 def test_11_refusals_unsupported_formats(tmp):
     for name, maker, phases in _REFUSED:
@@ -1695,7 +1724,8 @@ def test_20_ooxml_cleaning(tmp):
 
     for maker, name in ((fixtures.make_docx, "docx"),
                         (fixtures.make_docx_wordlike, "docx_wordlike"),
-                        (fixtures.make_xlsx, "xlsx")):
+                        (fixtures.make_xlsx, "xlsx"),
+                        (_make_pptx, "pptx")):
         src, _exp = maker(tmp)
         src_ts = {i.filename: i.date_time for i in zipfile.ZipFile(src).infolist()}
         src_order = [i.filename for i in zipfile.ZipFile(src).infolist()]
