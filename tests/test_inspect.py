@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -249,6 +250,75 @@ def test_rtf(tmp):
 def test_odt(tmp):
     path, expected = fixtures.make_odt(tmp)
     _check_fixture("odt", path, expected, "odt")
+
+
+def _mini_docx(path, created, modified, total, words=23):
+    """Минимальный .docx только с core.xml и app.xml -- ровно то, на чём стоит
+    эвристика совпадающих дат. Фикстуры целиком для этого слишком крупные:
+    у них свои TotalTime и объём, и подкрутить одно поле в них нельзя."""
+    core_xml = (
+        '<?xml version="1.0"?><cp:coreProperties '
+        'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:dcterms="http://purl.org/dc/terms/">'
+        '<dc:creator>X</dc:creator>'
+        '<dcterms:created>%s</dcterms:created>'
+        '<dcterms:modified>%s</dcterms:modified>'
+        '<cp:revision>2</cp:revision></cp:coreProperties>' % (created, modified))
+    app_xml = (
+        '<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats'
+        '.org/officeDocument/2006/extended-properties">'
+        '<Application>Microsoft Office Word</Application>'
+        '<AppVersion>16.0000</AppVersion>'
+        '<TotalTime>%d</TotalTime><Words>%d</Words></Properties>' % (total, words))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml",
+                    '<?xml version="1.0"?><Types xmlns="http://schemas.'
+                    'openxmlformats.org/package/2006/content-types"/>')
+        zf.writestr("word/document.xml",
+                    '<?xml version="1.0"?><w:document xmlns:w="http://schemas.'
+                    'openxmlformats.org/wordprocessingml/2006/main"><w:body/>'
+                    '</w:document>')
+        zf.writestr("docProps/core.xml", core_xml)
+        zf.writestr("docProps/app.xml", app_xml)
+    return path
+
+
+@_with_tmp
+def test_equal_dates_need_corroboration(tmp):
+    """created == modified само по себе не противоречие.
+
+    Word пишет эти даты с точностью до минуты (секунды всегда 00), поэтому у
+    любого документа, сделанного одним заходом, они совпадают -- проверено на
+    файле от настоящего Word 16, где прежняя эвристика давала ложный плюс.
+    Улику даёт только TotalTime: заявленные минуты редактирования не влезают
+    в одну минуту жизни документа.
+    """
+    def dates_signal(rep):
+        return [s for s in rep.signals
+                if s.kind == "inconsistent" and "TotalTime заявляет" in s.detail]
+
+    same = "2024-03-01T10:00:00Z"
+    innocent = _mini_docx(os.path.join(tmp, "fresh.docx"), same, same, total=1)
+    rep = inspect_file(innocent)
+    _check("даты равны, TotalTime=1: подлинный свежий файл Word -- не сигнал",
+           not dates_signal(rep), [s.detail for s in rep.signals])
+
+    guilty = _mini_docx(os.path.join(tmp, "faked.docx"), same, same, total=137)
+    rep = inspect_file(guilty)
+    sig = dates_signal(rep)
+    _check("даты равны, TotalTime=137: противоречие названо", len(sig) == 1,
+           [s.detail for s in rep.signals])
+    if sig:
+        _check("в тексте сигнала есть и дата, и заявленные минуты",
+               same in sig[0].detail and "137" in sig[0].detail, sig[0].detail)
+        _check("уверенность высокая: противоречие арифметическое, не вкусовое",
+               sig[0].confidence == "high", sig[0].confidence)
+
+    moved = _mini_docx(os.path.join(tmp, "normal.docx"), same,
+                       "2024-03-05T14:30:00Z", total=137)
+    _check("даты разные при том же TotalTime: не сигнал",
+           not dates_signal(inspect_file(moved)))
 
 
 @_with_tmp
