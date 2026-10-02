@@ -137,11 +137,19 @@ _CUSTOMXML_RE = re.compile(r"^customXml/item\d*\.xml$")
 
 # Корни customXml, которые Office кладёт из SharePoint/СЭД: колонки библиотеки, схемы
 # типов контента, шаблоны форм. Содержимое обнуляется до пустого корня.
+# ДУБЛЬ ПО НЕОБХОДИМОСТИ: тот же список лежит в insp_ooxml._CX_SHAREPOINT_NS, и
+# списки обязаны совпадать. Инспектор -- оракул: если он считает утечкой корень,
+# который здесь не перечислен, правильно почищенный файл получит вердикт
+# «почищено не полностью». Этот дубль охраняется тестом.
 _SP_ROOT_NS = ("http://schemas.microsoft.com/office/2006/metadata/properties",
                "http://schemas.microsoft.com/office/2006/metadata/contentType",
                "http://schemas.microsoft.com/office/2006/metadata/longProperties",
                "http://schemas.microsoft.com/office/2006/metadata/customXsn",
                "http://schemas.microsoft.com/sharepoint/v3/contenttype/forms")
+
+# Корни, означающие СОДЕРЖИМОЕ документа: убрать нельзя, и это не утечка.
+# Библиография видна читателю в тексте; имена в ней -- авторы цитируемых работ.
+_CONTENT_ROOT_NS = ("http://schemas.openxmlformats.org/officeDocument/2006/bibliography",)
 _MACRO_CT = {
     "application/vnd.ms-word.document.macroEnabled.main+xml":
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
@@ -1692,8 +1700,15 @@ def _root_info(raw):
     return nodes[0] if nodes else None
 
 
+def _has_text(raw):
+    """Есть ли в части хоть какой-то текст между тегами. Нужно, чтобы различить
+    пустую часть (её можно честно оставить) и часть со значениями внутри
+    (её оставить можно, но называть это «сохранено намеренно» нельзя)."""
+    return bool(re.sub(rb"<[^>]*>", b"", raw).strip())
+
+
 def _sec_customxml(pkg):
-    other = 0
+    content, empty, opaque = 0, 0, 0
     for nm in pkg.names:
         if not (pkg.exists(nm) and _CUSTOMXML_RE.match(nm)):
             continue
@@ -1703,7 +1718,7 @@ def _sec_customxml(pkg):
         except _Bad:
             root = None                      # не XML: правок он не требует, инспектор сам покажет, что там
         if root is None:
-            other += 1
+            opaque += 1
             continue
         if root.ns.startswith("http://schemas.microsoft.com/DataMashup"):
             pkg.act(Act.UNREMOVABLE, nm, "Power Query (DataMashup)", "%d байт" % len(raw),
@@ -1711,14 +1726,26 @@ def _sec_customxml(pkg):
                     "названия источников. Чистка этого контейнера не реализована, метаданные остались.")
             continue
         if root.ns not in _SP_ROOT_NS:
-            other += 1
+            # Не SharePoint. Решение зависит от того, есть ли внутри значения:
+            # пустую часть можно честно назвать сохранённой, часть со
+            # значениями -- нет, даже если убрать её нельзя.
+            if root.ns in _CONTENT_ROOT_NS:
+                content += 1
+            elif _has_text(raw):
+                pkg.act(Act.UNREMOVABLE, nm, "Пользовательская XML-часть", "%d байт" % len(raw), "",
+                        "Корень «%s» не опознан, а внутри есть значения. Убрать вслепую нельзя: на "
+                        "customXml опирается привязка элементов содержимого (w:dataBinding), и "
+                        "обнуление части стёрло бы видимый текст документа. Значения остались в файле."
+                        % (root.ns or root.name.decode("utf-8", "replace")))
+            else:
+                empty += 1
             continue
         qn = _NAME_RE.match(raw[root.a:root.b]).group(0)[1:]
         prefix = qn.split(b":")[0] if b":" in qn else b""
         ns = root.ns.encode("ascii")
-        # У корня в пространстве имён по умолчанию объявление не пишем: пустому элементу оно ни к чему,
-        # а сам URI схемы -- публичный адрес, но инспектор принимает любую подстроку за утечку.
-        decl = (b" xmlns:" + prefix + b'="' + ns + b'"') if prefix else b""
+        # Объявление пространства имён сохраняем и у корня в namespace по умолчанию: корень
+        # FormTemplates без xmlns -- сам по себе след правки пакета, Office таких не пишет.
+        decl = (b" xmlns:" + prefix + b'="' + ns + b'"') if prefix else (b' xmlns="' + ns + b'"')
         m = re.match(rb"(\xef\xbb\xbf)?<\?xml[^>]*\?>(\r?\n)?", raw)
         body = b"<documentManagement/>" if root.name == "properties" else b""
         stub = (m.group(0) if m else b"") + b"<" + qn + decl + (
@@ -1731,10 +1758,18 @@ def _sec_customxml(pkg):
                     "Колонки библиотеки, схема типа контента, шаблоны форм: имена сотрудников, даты, адреса "
                     "портала. Содержимое обнулено до пустого корня, часть осталась на месте.")
         _strip_schema_refs(pkg, nm)
-    if other:
-        pkg.act(Act.KEPT, "customXml", "Прочие пользовательские XML-части", "%d шт." % other, "",
-                "Не SharePoint: привязка элементов содержимого, библиография. Это содержимое документа, не "
-                "трогаем.")
+    if content:
+        pkg.act(Act.KEPT, "customXml", "Библиография", "%d шт." % content, "",
+                "Список литературы документа: видимое содержимое, а не метаданные. Имена в нём -- авторы "
+                "цитируемых работ, а не ваши. Не трогаем намеренно.")
+    if empty:
+        pkg.act(Act.KEPT, "customXml", "Пустые пользовательские XML-части", "%d шт." % empty, "",
+                "Корень не опознан, значений внутри нет. Часть осталась на месте: её отсутствие само было бы "
+                "признаком правки пакета.")
+    if opaque:
+        pkg.act(Act.UNREMOVABLE, "customXml", "Пользовательские части, не разобранные как XML",
+                "%d шт." % opaque, "",
+                "Не XML, поэтому содержимое не проверено и не вычищено. Что там -- показывает инспектор.")
 
 
 def _strip_schema_refs(pkg, item):
