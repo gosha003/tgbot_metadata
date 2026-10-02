@@ -3602,6 +3602,24 @@ if __name__ == "__main__":
         print("патологии:")
         allgood &= _smoke_pathologies(print)
         sys.exit(0 if allgood else 1)
+    if args and args[0] == "--real-word":
+        # Приёмка на файле, который действительно сохранил Word. Синтетика
+        # проверяет, что код делает задуманное; только настоящий файл
+        # проверяет, что задумано верно. Office необязателен -- без него
+        # честный пропуск, а не провал.
+        from tests.real_office import Unavailable, make_word_files
+        try:
+            made = make_word_files()
+        except Unavailable as exc:
+            print("приёмка на настоящем файле пропущена: %s" % exc)
+            sys.exit(0)
+        allgood = True
+        for name in sorted(made):
+            if not name.endswith((".docx", ".xlsx", ".pptx")):
+                continue        # остальное чистят другие модули (фаза 2: ODF, RTF)
+            print("настоящий файл от Word (%s):" % name)
+            allgood &= _check_real(made[name], print)
+        sys.exit(0 if allgood else 1)
     if args and args[0] == "--real":
         allgood = True
         for n, p in enumerate(args[1:], 1):
