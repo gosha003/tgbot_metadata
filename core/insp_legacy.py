@@ -128,6 +128,21 @@ _PATH_RE = re.compile(
     r"|/(?:home|Users|mnt|media|srv|var/folders)/[^\s\"'<>{}|*?]{2,})"
 )
 
+# Тот же вопрос, но к УЖЕ декодированному значению. _PATH_RE ищет по сырому
+# RTF, где настоящий backslash записан двойным, а внутри совпадения могут
+# оказаться control words -- `_rtf_plain` их выбрасывает, и от совпадения
+# остаётся огрызок. На настоящем файле от Word так получалась находка
+# ENVIRONMENT со значением из одного символа "\". В отчёте о приватности
+# ложная находка дороже пропущенной, поэтому путь обязан остаться путём и
+# после декодирования: буква диска с разделителем, UNC ровно с двумя
+# backslash, file:// URI или корень юниксового домашнего каталога.
+_PATH_DECODED_RE = re.compile(
+    r"^(?:file:///[^\s]{3,}"
+    r"|[A-Za-z]:[\\/][^\s]{2,}"
+    r"|\\\\[A-Za-z0-9_.$-]+\\[^\s]{1,}"
+    r"|/(?:home|Users|mnt|media|srv|var)/[^\s]{2,})"
+)
+
 
 # ============================================================================
 #  А. OLE2 -- .doc / .xls / .ppt
@@ -1711,8 +1726,17 @@ def _rtf_revtbl(text, enc, report):
         names = []
         for _word, _content, inner in _subgroups(body):
             value = _rtf_plain(inner, enc).strip(" ;")
-            if value:
-                names.append(value)
+            if not value:
+                continue
+            # "Unknown" -- служебная нулевая запись, Word пишет её первой всегда,
+            # даже когда правок в файле нет. Личности она не несёт, а вреда даёт
+            # дважды: лишняя находка IDENTITY в отчёте и завышенный на единицу
+            # счётчик авторов в сигнале. Плюс она длиннее порога оракула чистки
+            # (clean.MIN_VALUE_LEN), то есть переживёт любую чистку и будет
+            # считаться утёкшим значением.
+            if value.lower() == "unknown":
+                continue
+            names.append(value)
         if not names and dest == "atrfstart":
             names = [_rtf_plain(body, enc).strip(" ;")]
         for value in names[:MAX_LIST]:
@@ -1767,7 +1791,9 @@ def _rtf_scan(path, enc, report):
                 if m.start() >= cut:
                     continue
                 value = _rtf_plain(m.group(0), enc)
-                if value and value not in seen_paths and len(seen_paths) < MAX_LIST:
+                if not _PATH_DECODED_RE.match(value or ""):
+                    continue
+                if value not in seen_paths and len(seen_paths) < MAX_LIST:
                     seen_paths.add(value)
                     paths.append(value)
             for m in re.finditer(r"\{\\\*\\objclass\s*([^}]{0,120})\}", text):
@@ -2002,6 +2028,10 @@ def _demo():
         r"{\*\revtbl {Unknown;}{Ivanov I.I.;}{Petrov P.P.;}}"
         r"{\*\template C:\\Users\\ivanov\\AppData\\Roaming\\Microsoft\\Templates\\Normal.dotm}"
         r"\par Text with a link to file:///C:/secret/plan.xlsx and C:\\Work\\old.doc"
+        # Приманка из настоящего файла Word: литерал backslash в тексте, за ним
+        # control words. _PATH_RE по сырому тексту это совпадение находит, но
+        # после декодирования остаётся один символ "\" -- не путь, а шум.
+        r"\par Literal backslash \\\hich\f37 in body"
         r"{\*\objclass Word.Document.8}{\object\objemb{\*\objdata 0105000002000000}}"
         r"{\*\datastore 00}\par}"
     )
@@ -2164,6 +2194,22 @@ def _demo():
                for f in r_rtf.findings)
     assert any("Абсолютный путь" == f.label and "secret" in f.value
                for f in r_rtf.findings), [f.value for f in r_rtf.findings]
+
+    # Ложные срабатывания, найденные на настоящем файле от Word.
+    rtf_paths = [f.value for f in r_rtf.findings if f.label == "Абсолютный путь"]
+    assert all(_PATH_DECODED_RE.match(v) for v in rtf_paths), rtf_paths
+    assert "\\" not in rtf_paths, (
+        "огрызок из одного backslash -- не путь: совпадение проверяется "
+        "после декодирования, а не до: %r" % (rtf_paths,))
+    assert len(rtf_paths) == 3, rtf_paths
+    rtf_revs = [f.value for f in r_rtf.findings if f.label == "Автор правки"]
+    assert "Unknown" not in rtf_revs, (
+        "служебная нулевая запись revtbl выдана за человека: %r" % (rtf_revs,))
+    assert sorted(rtf_revs) == ["Ivanov I.I.", "Petrov P.P."], rtf_revs
+    assert any(s.kind == "inconsistent" and "правок 2 автор" in s.detail
+               for s in r_rtf.signals), (
+        "счётчик авторов обязан считать людей, а не записи таблицы: %r"
+        % [s.detail for s in r_rtf.signals])
 
     # Многокусковый проход: маркер, попавший в нахлёст, не должен удвоиться.
     big_path = os.path.join(tmp, "big.rtf")
