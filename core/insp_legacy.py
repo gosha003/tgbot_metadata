@@ -739,6 +739,143 @@ def _parse_compobj(blob, codec):
     return out
 
 
+# Индекс пары fc/lcb таблицы авторов правок в FibRgFcLcb97 (MS-DOC 2.5.7).
+# У Word 2000 и новее структура только дописывается в конец, первые пары не
+# двигаются, поэтому индекс один на все версии начиная с Word 97.
+_FIB_STTBF_RMARK = 51
+_FIB_READ = 8 * 1024               # FIB целиком; текст документа начинается дальше
+_STTB_CAP = 64 * 1024              # таблица имён больше этого -- не таблица имён
+
+
+def _fib_pair(fib, index):
+    """Пара (fc, lcb) из FibRgFcLcb по индексу.
+
+    fib: байты начала потока WordDocument.
+    index: номер пары, как в MS-DOC 2.5.7 (fcSttbfRMark -- 51).
+    Возврат: (fc, lcb) либо None, если FIB короче или заявляет меньше пар.
+    Исключений не бросает.
+
+    База считается по фактическим csw и cslw, а не константой. У настоящего
+    Word она равна 154 (csw=14, cslw=22), но кривой файл имеет право соврать,
+    и тогда константа прочитала бы мусор по чужому смещению.
+    """
+    if len(fib) < 34 or index < 0:
+        return None
+    csw = int.from_bytes(fib[32:34], "little")
+    if csw > 64:
+        return None
+    at = 34 + csw * 2
+    if at + 2 > len(fib):
+        return None
+    cslw = int.from_bytes(fib[at:at + 2], "little")
+    if cslw > 128:
+        return None
+    at += 2 + cslw * 4
+    if at + 2 > len(fib):
+        return None
+    count = int.from_bytes(fib[at:at + 2], "little")
+    if index >= count or count > 4096:
+        return None
+    at += 2 + index * 8
+    if at + 8 > len(fib):
+        return None
+    fc, lcb = struct.unpack_from("<II", fib, at)
+    if lcb == 0 or lcb > _STTB_CAP or fc > 64 * 1024 * 1024:
+        return None
+    return fc, lcb
+
+
+def _sttb_strings(blob, limit=MAX_LIST):
+    """Строки из STTB (MS-DOC 2.9.272): и Unicode-форма (fExtend=0xFFFF),
+    которую пишет Word 97+, и прежняя однобайтовая.
+
+    blob: кусок потока таблицы ровно длины lcb.
+    limit: сколько строк забирать; остальное -- уже не таблица имён, а мусор
+        или бомба.
+    Возврат: список непустых строк без служебной записи "Unknown". Word пишет
+        её первой всегда, как и в RTF \\*\\revtbl, и личности она не несёт.
+    Исключений не бросает: битый блок даёт то, что успело разобраться.
+    """
+    if len(blob) < 4:
+        return []
+    word = int.from_bytes(blob[0:2], "little")
+    if word == 0xFFFF:
+        if len(blob) < 6:
+            return []
+        count = int.from_bytes(blob[2:4], "little")
+        extra = int.from_bytes(blob[4:6], "little")
+        pos, wide = 6, True
+    else:
+        count = word
+        extra = int.from_bytes(blob[2:4], "little")
+        pos, wide = 4, False
+    if count > 10000 or extra > 256:
+        return []
+    out = []
+    for _ in range(count):
+        if len(out) >= limit:
+            break
+        width = 2 if wide else 1
+        if pos + width > len(blob):
+            break
+        chars = int.from_bytes(blob[pos:pos + width], "little")
+        pos += width
+        if chars > 1024:
+            break
+        nbytes = chars * (2 if wide else 1)
+        raw = blob[pos:pos + nbytes]
+        if len(raw) < nbytes:
+            break
+        pos += nbytes + extra
+        text = (raw.decode("utf-16le", "replace") if wide
+                else raw.decode("cp1251", "replace"))
+        text = text.strip("\x00 ").strip()
+        if text and text.lower() != "unknown":
+            out.append(text)
+    return out
+
+
+def _ole_slice(ole, name, start, length) -> bytes:
+    """Кусок потока, а не поток целиком: таблица 1Table у настоящего файла
+    больше самой таблицы имён на порядки, и читать её всю незачем."""
+    with ole.openstream(name) as fh:
+        fh.seek(start)
+        return fh.read(length)
+
+
+def _ole_rmark(ole, report, fib, which):
+    """Имена из SttbfRMark -- кто правил документ, даже если правки приняты.
+
+    which: имя активного потока таблицы ("1Table" или "0Table").
+    Пишет находки IDENTITY по одному имени. Не бросает: сбой разбора --
+    запись в report.err(), общая находка про остаточный текст остаётся.
+    """
+    pair = _fib_pair(fib, _FIB_STTBF_RMARK)
+    if pair is None:
+        return []
+    fc, lcb = pair
+    try:
+        blob = _ole_slice(ole, which, fc, lcb)
+    except Exception as exc:  # noqa: BLE001
+        report.err("SttbfRMark не читается: %r" % (exc,))
+        return []
+    if len(blob) < lcb:
+        report.err("SttbfRMark короче, чем заявлено в FIB: %d из %d" % (len(blob), lcb))
+    names = _sttb_strings(blob)
+    for name in names:
+        report.add(Risk.IDENTITY, which, "Автор правки (SttbfRMark)", name,
+                   "Имя из таблицы авторов правок. Остаётся в файле и после "
+                   "того, как сами исправления приняты: правка свойств "
+                   "документа эту таблицу не трогает.", False)
+    if len(names) > 1:
+        report.signal(
+            "inconsistent",
+            "В таблице авторов правок %d человек(а): над файлом работал не "
+            "один, хотя в свойствах документа автор указан один." % len(names),
+            "medium")
+    return names
+
+
 def _ole_word(ole, report, flat):
     """Ядро модуля: остаточный текст и таблицы правок в .doc."""
     if not _top(flat, "WordDocument"):
@@ -747,7 +884,7 @@ def _ole_word(ole, report, flat):
     tables = [n for n in ("0Table", "1Table") if _top(flat, n)]
     fib = b""
     try:
-        fib = _ole_read(ole, "WordDocument", 64)
+        fib = _ole_read(ole, "WordDocument", _FIB_READ)
     except Exception as exc:
         report.err("FIB потока WordDocument не читается: %r" % (exc,))
 
@@ -771,8 +908,14 @@ def _ole_word(ole, report, flat):
                 report.add(Risk.STRUCTURAL, "WordDocument", "Документ зашифрован",
                            "флаг fEncrypted", "Содержимое зашифровано паролем; "
                            "разобрать его без пароля нельзя.", False)
+                encrypted = True
+            else:
+                encrypted = False
         except Exception as exc:
             report.err("флаги FIB не разобрались: %r" % (exc,))
+            encrypted = False
+    else:
+        encrypted = False
 
     # Главная находка модуля.
     note = (
@@ -814,6 +957,14 @@ def _ole_word(ole, report, flat):
                    "установлен",
                    "Документ сохранён в сложном (быстром) режиме: текст лежит "
                    "кусками вперемешку с удалёнными фрагментами.", False)
+
+    # Имена рецензентов. Сама таблица при зашифрованном файле -- шифротекст,
+    # и разбирать её как текст значит выдать шум за людей.
+    if not encrypted and which_table and _top(flat, which_table):
+        try:
+            _ole_rmark(ole, report, fib, which_table)
+        except Exception as exc:  # noqa: BLE001
+            report.err("таблица авторов правок не разобралась: %r" % (exc,))
 
     report.signal(
         "hazard",
@@ -1915,6 +2066,8 @@ def _demo_ole_real(tmp, show):
                if f.label.startswith("Польз."))
     assert any(not f.removable and "1Table" in f.value and
                "Остаточный текст" in f.label for f in rep.findings)
+    assert vals(rep, "Автор правки (SttbfRMark)") == list(fx.DOC_RMARK), (
+        vals(rep, "Автор правки (SttbfRMark)"))
     assert vals(rep, "Счётчик быстрых сохранений") == ["2"]
 
     # --- .xls: cp1251-секция пользовательских свойств, WRITEACCESS, листы ---
