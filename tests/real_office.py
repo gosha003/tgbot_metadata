@@ -300,6 +300,16 @@ def _demo():
         if not rep.findings:
             ok = False
             print("     НИ ОДНОЙ НАХОДКИ -- для файла от Office это дефект инспектора")
+        if name == "word_real.doc":
+            marks = [f.value for f in rep.findings if f.label == "Автор правки (SttbfRMark)"]
+            # Двое рецензентов заложены сценарием; первая запись таблицы --
+            # служебная "Unknown", и выдать её за человека нельзя.
+            if len(marks) == 2 and "Unknown" not in marks:
+                print("     SttbfRMark: 2 автора, служебная запись отброшена")
+            else:
+                ok = False
+                print("     SttbfRMark: ожидались 2 автора без Unknown, получено %d"
+                      % len(marks))
     print("каталог: %s" % (dest or "в %TEMP%, путь не печатаем"))
     return 0 if ok else 1
 
