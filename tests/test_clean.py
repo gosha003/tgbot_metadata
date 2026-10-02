@@ -1265,9 +1265,7 @@ def _phases(text):
 
 
 # (метка, фабрика, допустимые номера фазы). Легаси OLE2 -- фаза 4: на месте не
-# чистится в принципе, история правок вшита в контейнер. ODF и RTF -- фаза 2:
-# чистятся на месте, регенерация им не нужна (обоснование в core.clean._PLANNED).
-# Номер обязан быть ОДИН и тот же везде, где он назван (см. ниже).
+# чистится в принципе, история правок вшита в контейнер.
 _REFUSED = (
     # docx, docx_wordlike, xlsx, pptx убраны: с фазы 2 они ЧИСТЯТСЯ, а не
     # отказываются. Их поведение проверяется в тестах чистки OOXML ниже.
@@ -1275,7 +1273,6 @@ _REFUSED = (
     ("doc_active", fixtures.make_doc_active, (4,)),
     ("xls", fixtures.make_xls, (4,)),
     ("ppt", fixtures.make_ppt, (4,)),
-    ("odt", fixtures.make_odt, (2,)),
 )
 
 
@@ -1358,6 +1355,41 @@ def test_16_rtf_cleaning(tmp):
             _check("rtf/stealth: генератор на месте", fixtures.RTF_GENERATOR in blob, blob[:200])
         else:
             _check("rtf/paranoid: генератора нет", fixtures.RTF_GENERATOR not in blob)
+
+
+@_with_tmp
+def test_17_odf_cleaning(tmp):
+    """ODF чистится через zipfix. STEALTH оставляет генератор, PARANOID нет.
+
+    Таймстемпы ZIP не переписываются: у фикстуры они 1980-01-01, и после
+    чистки должны остаться теми же. Иначе файл от Word получит реальное
+    время, а файл от LibreOffice -- эпоху.
+    """
+    path, _exp = fixtures.make_odt(tmp)
+    before = open(path, "rb").read()
+
+    def times(p):
+        with zipfile.ZipFile(p) as zf:
+            return [i.date_time for i in zf.infolist()]
+
+    src_times = times(path)
+    for prof in PROFILES:
+        res, dst = _clean("odt", tmp, path, prof)
+        _check("odt/%s: ok и файл создан" % _pname(prof),
+               res.ok and os.path.exists(dst), res.errors)
+        _check("odt/%s: вход не изменён" % _pname(prof), open(path, "rb").read() == before)
+        if not res.ok:
+            continue
+        _check("odt/%s: время записей ZIP не переписано" % _pname(prof),
+               times(dst) == src_times, times(dst))
+        lived = survived_values(inspect_file(path), inspect_file(dst))
+        _check("odt/%s: ни одно исходное значение не выжило" % _pname(prof), not lived,
+               [(s.label, s.value[:40]) for s in lived])
+        blob = " ".join(f.value or "" for f in inspect_file(dst).findings)
+        if prof is Profile.STEALTH:
+            _check("odt/stealth: генератор на месте", fixtures.ODT_GENERATOR in blob)
+        else:
+            _check("odt/paranoid: генератора нет", fixtures.ODT_GENERATOR not in blob)
 
 
 @_with_tmp
