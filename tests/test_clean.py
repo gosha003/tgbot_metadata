@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pikepdf
 
 from core import clean as clean_mod
-from core import cleanreport, sniff
+from core import clean_ooxml, cleanreport, insp_ooxml, sniff
 from core.clean import DispatchResult, clean_file, survived_values
 from core.clean_image import clean_image, verify_image
 from core.clean_pdf import clean_pdf
@@ -1306,6 +1306,32 @@ def test_14_cleanable_matches_cleaners():
     _check("формат не может быть и чистимым, и ожидающим фазы", not both, both)
     planned = sorted(f for f in cleanreport.CLEANABLE if sniff.FAMILY.get(f) in clean_mod._PLANNED)
     _check("чистимый формат не стоит в таблице отказов диспетчера _PLANNED", not planned, planned)
+
+
+def test_15_customxml_namespaces_agree():
+    """Инспектор и чистильщик обязаны одинаково понимать корни customXml.
+
+    Инспектор -- оракул: что он относит к ENVIRONMENT, то чистильщик обязан
+    убрать. Корень, который инспектор считает утечкой SharePoint, а чистильщик
+    в своём списке не имеет, остаётся в файле -- и правильно почищенный файл
+    получает вердикт «почищено не полностью» на ровном месте. Списки лежат в
+    двух модулях (инспектор не имеет права зависеть от чистильщика), поэтому их
+    совпадение проверяется здесь, а не достигается общим импортом.
+    """
+    insp_sp = set(insp_ooxml._CX_SHAREPOINT_NS)
+    clean_sp = set(clean_ooxml._SP_ROOT_NS)
+    _check("список корней SharePoint у инспектора и чистильщика совпадает",
+           insp_sp == clean_sp,
+           "только у инспектора: %s; только у чистильщика: %s"
+           % (sorted(insp_sp - clean_sp), sorted(clean_sp - insp_sp)))
+    insp_c = set(insp_ooxml._CX_CONTENT_NS)
+    clean_c = set(clean_ooxml._CONTENT_ROOT_NS)
+    _check("список корней-содержимого у инспектора и чистильщика совпадает",
+           insp_c == clean_c,
+           "только у инспектора: %s; только у чистильщика: %s"
+           % (sorted(insp_c - clean_c), sorted(clean_c - insp_c)))
+    _check("корень не может быть одновременно утечкой SharePoint и содержимым",
+           not (insp_sp & insp_c), sorted(insp_sp & insp_c))
 
 
 @_with_tmp
