@@ -390,16 +390,44 @@ PPTX_CM_AUTHOR = "\u0413\u0440\u043e\u043c\u043e\u0432 \u0414.\u0410."
 # Имя принтера из DEVMODE: 32 WCHAR в UTF-16LE в начале структуры. Здесь оно
 # несёт номер кабинета -- то, из-за чего это поле и попало в METADATA.md.
 PPTX_PRINTER = "Xerox WC7845 (KAB-312)"
+PPTX_FORM = "A4"
+PPTX_PAPER_CODE = 9                      # dmPaperSize: DMPAPER_A4
+PPTX_PRINT_UNC = "\\\\PRINTSRV01\\WC7845-BUH"
+
+# Смещения в DEVMODEW -- структура фиксированная, см. core/insp_ooxml.py.
+_DM_SIZE = 220
 
 
-def _devmode(device_name):
-    """Минимальный правдоподобный DEVMODEW: dmDeviceName -- 32 WCHAR в UTF-16LE
-    с NUL-добивкой, дальше хвост фиксированных полей (драйвер, лоток, формат).
-    Инспектор читает первые 64 байта, чистильщик выбрасывает часть целиком."""
-    blob = device_name.encode("utf-16le")
+def _wchar32(text):
+    """Поле WCHAR[32]: UTF-16LE с добивкой нулями до 64 байт."""
+    blob = text.encode("utf-16le")
     if len(blob) > 64:
-        raise ValueError("dmDeviceName длиннее 32 WCHAR")
-    return blob + b"\x00" * (64 - len(blob)) + b"\x00" * 156
+        raise ValueError("%r длиннее 32 WCHAR" % text)
+    return blob + b"\x00" * (64 - len(blob))
+
+
+def _devmode(device_name, form_name=PPTX_FORM, paper=PPTX_PAPER_CODE,
+             tail_unc=PPTX_PRINT_UNC):
+    """Правдоподобный DEVMODEW плюс приватный хвост драйвера.
+
+    Заполнены именно те поля, которые разбирает инспектор: dmDeviceName (0),
+    dmSize (68), dmDriverExtra (70), dmPaperSize (78), dmFormName (102).
+    Хвост после структуры несёт UNC-путь к серверу печати в UTF-16LE -- так его
+    и пишут драйверы, и именно поэтому хвост нельзя считать безобидным мусором.
+    """
+    tail = b"\x00\x00" + tail_unc.encode("utf-16le") + b"\x00\x00"
+    dm = bytearray(_DM_SIZE)
+    dm[0:64] = _wchar32(device_name)
+    struct.pack_into("<H", dm, 64, 0x0401)        # dmSpecVersion
+    struct.pack_into("<H", dm, 66, 0x0600)        # dmDriverVersion
+    struct.pack_into("<H", dm, 68, _DM_SIZE)      # dmSize
+    struct.pack_into("<H", dm, 70, len(tail))     # dmDriverExtra
+    struct.pack_into("<I", dm, 72, 0x000013FE)    # dmFields
+    struct.pack_into("<h", dm, 76, 1)             # dmOrientation: portrait
+    struct.pack_into("<h", dm, 78, paper)         # dmPaperSize
+    struct.pack_into("<h", dm, 86, 1)             # dmCopies
+    dm[102:166] = _wchar32(form_name)
+    return bytes(dm) + tail
 
 
 def make_pptx(dir):
@@ -484,10 +512,12 @@ def make_pptx(dir):
     _write_zip(path, parts, (1980, 1, 1, 0, 0, 0))
 
     expected = {
-        "values": [PPTX_CREATOR, PPTX_LASTBY, PPTX_COMPANY, PPTX_CM_AUTHOR, PPTX_PRINTER],
+        "values": [PPTX_CREATOR, PPTX_LASTBY, PPTX_COMPANY, PPTX_CM_AUTHOR,
+                   PPTX_PRINTER, PPTX_PRINT_UNC],
         "identity": [PPTX_CREATOR, PPTX_LASTBY, PPTX_CM_AUTHOR],
-        "environment": [PPTX_PRINTER],
-        "signals": ["producer"],
+        "environment": [PPTX_PRINTER, PPTX_PRINT_UNC],
+        # dating -- регион по формату бумаги (A4 => не Северная Америка).
+        "signals": ["producer", "dating"],
         # Пакет согласован сам с собой: таймстемпы 1980-01-01 при
         # Application=PowerPoint, автор заполнен. Ни «собрано библиотекой», ни
         # «уже чистили», ни «метаданные противоречат» здесь взяться не может.

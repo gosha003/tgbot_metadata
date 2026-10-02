@@ -194,6 +194,20 @@ def test_pptx(tmp):
            any("commentAuthors" in f.location and fixtures.PPTX_CM_AUTHOR in f.value
                for f in rep.findings),
            [f.location for f in rep.findings][:12])
+    # DEVMODE разобран не только до имени принтера: имя формы, код формата и
+    # приватный хвост драйвера с UNC-путём к серверу печати.
+    labels = {f.label: f.value for f in rep.findings if "printerSettings" in f.location}
+    _check("pptx: dmFormName прочитан", fixtures.PPTX_FORM in
+           labels.get("dmFormName — формат бумаги", ""), labels)
+    _check("pptx: dmPaperSize прочитан и расшифрован",
+           str(fixtures.PPTX_PAPER_CODE) in labels.get("dmPaperSize — код формата бумаги", ""),
+           labels)
+    _check("pptx: UNC-путь к серверу печати найден в приватном хвосте драйвера",
+           fixtures.PPTX_PRINT_UNC in labels.get("UNC-путь в данных драйвера печати", ""),
+           labels)
+    _check("pptx: формат бумаги дал сигнал dating о регионе",
+           any(s.kind == "dating" and "регион" in s.detail for s in rep.signals),
+           [(s.kind, s.detail[:60]) for s in rep.signals])
 
 
 @_with_tmp

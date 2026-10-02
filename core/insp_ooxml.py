@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import zipfile
 
@@ -993,6 +994,44 @@ def _sec_media(zf, rep, ctx):
 # === Л. printerSettings*.bin (DEVMODE) ====================================
 
 
+def _wchar32(blob: bytes, offset: int) -> str:
+    """Поле WCHAR[32] по смещению offset: 64 байта UTF-16LE до первого NUL.
+
+    Пустая строка, если поле не читается или не печатается -- недоверенные
+    байты, из них нельзя делать находку с мусором внутри.
+    """
+    if len(blob) < offset + 64:
+        return ""
+    text = blob[offset:offset + 64].decode("utf-16le", "ignore").split("\x00", 1)[0].strip()
+    return text if text and text.isprintable() else ""
+
+
+# Смещения в DEVMODEW. Структура фиксированная, это не эвристика:
+# dmDeviceName[32] WCHAR, затем служебные WORD/DWORD, затем dmFormName[32] WCHAR.
+# Полный размер DEVMODEW -- 220 байт, после него идут приватные данные драйвера
+# длиной dmDriverExtra.
+_DM_SIZE_OFF = 68          # dmSize: WORD, полная длина самой структуры
+_DM_DRIVER_EXTRA_OFF = 70  # dmDriverExtra: WORD, длина приватного хвоста драйвера
+_DM_PAPERSIZE_OFF = 78     # dmPaperSize: short, код формата бумаги
+_DM_FORMNAME_OFF = 102     # dmFormName[32] WCHAR
+_DEVMODEW_SIZE = 220
+
+# Коды dmPaperSize, по которым различается регион. Letter/Legal -- это Северная
+# Америка, A4 -- почти весь остальной мир. Контракт (docs/ARCHITECTURE.md) прямо
+# относит формат бумаги к сигналу kind="dating": геолокация по косвенным признакам.
+_PAPER_REGION = {
+    1: ("Letter 8.5x11in", "США и Канада"),
+    5: ("Legal 8.5x14in", "США и Канада"),
+    8: ("A3 297x420mm", "Европа и остальной мир"),
+    9: ("A4 210x297mm", "Европа и остальной мир"),
+    11: ("A5 148x210mm", "Европа и остальной мир"),
+}
+# Имена форм, по которым регион читается даже когда dmPaperSize не заполнен.
+_FORM_REGION = {"letter": "США и Канада", "legal": "США и Канада",
+                "a4": "Европа и остальной мир", "a3": "Европа и остальной мир",
+                "a5": "Европа и остальной мир"}
+
+
 def _device_name(blob: bytes) -> str:
     """dmDeviceName из начала DEVMODE.
 
@@ -1000,12 +1039,50 @@ def _device_name(blob: bytes) -> str:
     в UTF-16LE и обрывается NUL. Для старого DEVMODEA (32 однобайтовых
     символа) делаем запасной разбор.
     """
-    name = blob[:64].decode("utf-16le", "ignore").split("\x00", 1)[0].strip()
-    if not name or not name.isprintable():
-        name = blob[:32].decode("cp1251", "ignore").split("\x00", 1)[0].strip()
+    name = _wchar32(blob, 0)
+    if name:
+        return name
+    name = blob[:32].decode("cp1251", "ignore").split("\x00", 1)[0].strip()
     if not name.isprintable():
         return ""
     return name
+
+
+def _devmode_tail(blob: bytes):
+    """Приватные данные драйвера, лежащие ПОСЛЕ структуры DEVMODE.
+
+    Возвращает (смещение, байты) или (0, b""). Длину берём из dmSize, а не из
+    константы: у драйвера может быть своя версия структуры. Если dmSize
+    невменяемый, откатываемся на штатный размер DEVMODEW.
+    """
+    if len(blob) < _DEVMODEW_SIZE:
+        return 0, b""
+    size = struct.unpack_from("<H", blob, _DM_SIZE_OFF)[0]
+    if not (_DEVMODEW_SIZE <= size <= len(blob)):
+        size = _DEVMODEW_SIZE
+    return size, blob[size:]
+
+
+# Хост или UNC-путь в приватных данных драйвера: там регулярно оказывается
+# \\PRINTSRV01\HP4050 или имя порта. Ищем в UTF-16LE и в однобайтовой кодировке.
+_UNC_RE = re.compile(r"\\\\[A-Za-z0-9._-]{2,63}\\[A-Za-z0-9._$ -]{1,63}")
+
+
+def _tail_strings(tail: bytes, limit=6):
+    """UNC-пути из приватного хвоста драйвера. Хвост -- бинарный мусор, поэтому
+    ищем только то, что опознаётся однозначно, и не выдумываем «похожие на имена»
+    строки: ложная находка в отчёте о приватности дороже пропущенной."""
+    found, seen = [], set()
+    for raw in (tail.decode("utf-16le", "ignore"), tail.decode("cp1251", "ignore")):
+        for m in _UNC_RE.finditer(raw):
+            val = m.group(0).strip()
+            if val.lower() in seen:
+                continue
+            seen.add(val.lower())
+            found.append(val)
+            if len(found) >= limit:
+                return found
+    return found
 
 
 def _sec_printer(zf, rep, ctx):
@@ -1025,6 +1102,51 @@ def _sec_printer(zf, rep, ctx):
                 "физическое расположение автора.")
         rep.add(Risk.ENVIRONMENT, name, "Блок DEVMODE", "%d байт" % len(blob),
                 "Полный слепок настроек печати: драйвер, лоток, формат.")
+        _try(rep, name, _devmode_details, rep, name, blob)
+
+
+def _devmode_details(rep, name, blob):
+    """Поля DEVMODE за пределами dmDeviceName. Отдельной функцией, чтобы битое
+    поле не уносило с собой уже добытое имя принтера (оно добавлено выше)."""
+    form = _wchar32(blob, _DM_FORMNAME_OFF)
+    paper = None
+    if len(blob) >= _DM_PAPERSIZE_OFF + 2:
+        paper = struct.unpack_from("<h", blob, _DM_PAPERSIZE_OFF)[0]
+
+    region = None
+    if form:
+        region = _FORM_REGION.get(form.lower())
+        rep.add(Risk.ENVIRONMENT, name, "dmFormName — формат бумаги", form,
+                "Имя формы печати. Нестандартное значение бывает заведено "
+                "администратором и тогда несёт название организации или "
+                "отдела; стандартное выдаёт регион.")
+    if region is None and paper in _PAPER_REGION:
+        region = _PAPER_REGION[paper][1]
+    if paper in _PAPER_REGION:
+        rep.add(Risk.ENVIRONMENT, name, "dmPaperSize — код формата бумаги",
+                "%d (%s)" % (paper, _PAPER_REGION[paper][0]),
+                "Код формата бумаги из DEVMODE.")
+    if region:
+        rep.signal("dating",
+                   "Формат бумаги в настройках печати (%s) указывает на регион: %s. "
+                   "Косвенный признак: формат ставится по локали системы, а не "
+                   "выбирается осознанно."
+                   % (form or _PAPER_REGION.get(paper, ("?",))[0], region))
+
+    if len(blob) >= _DM_DRIVER_EXTRA_OFF + 2:
+        extra = struct.unpack_from("<H", blob, _DM_DRIVER_EXTRA_OFF)[0]
+        if extra:
+            rep.add(Risk.ENVIRONMENT, name, "dmDriverExtra — приватные данные драйвера",
+                    "%d байт" % extra,
+                    "Непрозрачный блок настроек конкретного драйвера. Формат "
+                    "недокументирован и у разных драйверов разный, поэтому "
+                    "разобран он не полностью — но очередь печати, порт и "
+                    "сервер печати обычно лежат именно здесь.")
+    offset, tail = _devmode_tail(blob)
+    for val in _tail_strings(tail):
+        rep.add(Risk.ENVIRONMENT, name, "UNC-путь в данных драйвера печати", val,
+                "Найден в приватном блоке драйвера (смещение %d). Имя сервера "
+                "печати и очереди: это имя хоста в вашей сети." % offset)
 
 
 # === М. специфика Excel ===================================================
@@ -1369,8 +1491,19 @@ def _build_sample(dest):
     import datetime
 
     now = datetime.datetime.now().timetuple()[:6]
-    devmode = "HP LaserJet M404 (BUH-01)".encode("utf-16le")
-    devmode = devmode + b"\x00" * (64 - len(devmode)) + b"\x00" * 156
+    # Правдоподобный DEVMODEW: заполнены dmDeviceName, dmSize, dmDriverExtra,
+    # dmPaperSize и dmFormName, плюс приватный хвост драйвера с UNC-путём --
+    # иначе разбор полей за пределами имени принтера проверять нечем.
+    _dm_tail = b"\x00\x00" + "\\\\PRINTSRV01\\HP4050-BUH".encode("utf-16le")
+    _devmode_buf = bytearray(_DEVMODEW_SIZE)
+    _dev = "HP LaserJet M404 (BUH-01)".encode("utf-16le")
+    _devmode_buf[0:len(_dev)] = _dev
+    struct.pack_into("<H", _devmode_buf, _DM_SIZE_OFF, _DEVMODEW_SIZE)
+    struct.pack_into("<H", _devmode_buf, _DM_DRIVER_EXTRA_OFF, len(_dm_tail))
+    struct.pack_into("<h", _devmode_buf, _DM_PAPERSIZE_OFF, 9)   # A4
+    _form = "A4".encode("utf-16le")
+    _devmode_buf[_DM_FORMNAME_OFF:_DM_FORMNAME_OFF + len(_form)] = _form
+    devmode = bytes(_devmode_buf) + _dm_tail
 
     parts = [
         ("[Content_Types].xml",
@@ -1465,10 +1598,13 @@ def demo():
                    "72f988bf-86f1-41af-91ab-2d7cd011db47", "ContentTypeId",
                    "HP LaserJet M404 (BUH-01)", "Otchet.dotm",
                    "a.kuznetsova@company.ru", "Кузнецова А.В.",
-                   "_GoBack", "00A12B34"):
+                   "_GoBack", "00A12B34",
+                   # DEVMODE за пределами имени принтера
+                   "A4 210x297mm", "\\\\PRINTSRV01\\HP4050-BUH"):
         assert expect in blob, "не найдено: %s" % expect
     kinds = {s.kind for s in rep.signals}
     assert "inconsistent" in kinds and "producer" in kinds, kinds
+    assert "dating" in kinds, "формат бумаги A4 обязан дать сигнал dating: %s" % kinds
     assert not rep.errors, rep.errors
 
     print("Файл: %s  (%d байт, fmt=%s)" % (rep.path, rep.size, rep.fmt))

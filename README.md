@@ -66,7 +66,7 @@ TG_BOT_TOKEN=123456:ABC...
 PYTHONIOENCODING=utf-8 python -m tests.test_inspect
 ```
 
-**4799 проверок**: 407 на инспекцию (`tests.test_inspect`), 1328 на чистку
+**4806 проверок**: 414 на инспекцию (`tests.test_inspect`), 1328 на чистку
 (`tests.test_clean`), 1637 в самопроверке `core.zipfix`, 1289 в
 `core.clean_ooxml`, 88 в `core.clean --selftest`, 50 в `bot.py --selftest`.
 Фикстуры синтетические, с заранее известными метаданными.
@@ -126,7 +126,7 @@ JPEG чистится **без перекодирования**: энтропи�
 
 | Где | Примеры |
 |---|---|
-| OOXML | автор, кто сохранял последним, `TotalTime`, метки Purview с email и GUID тенанта, `rsid`, путь к шаблону, **имя принтера из DEVMODE**, `refreshedBy` в pivotCache, строки подключения к БД, email в `people.xml`, таймстемпы ZIP как признак библиотечной генерации |
+| OOXML | автор, кто сохранял последним, `TotalTime`, метки Purview с email и GUID тенанта, `rsid`, путь к шаблону, **имя принтера из DEVMODE** вместе с форматом бумаги (это геолокация) и **UNC-путём к серверу печати**, `refreshedBy` в pivotCache, строки подключения к БД, email в `people.xml`, таймстемпы ZIP как признак библиотечной генерации |
 | PDF | `/Info`, XMP включая `xmpMM:DocumentID`/`History`, trailer `/ID`, **инкрементальные апдейты (прошлые версии и текст под «замазкой»)**, авторы аннотаций, вложения, JS, подписи, скрытые слои, датировка по шрифтам |
 | Картинки | EXIF с **GPS в десятичных градусах**, серийники камеры и объектива, `MakerNote`, XMP, IPTC, ICC, C2PA/Content Credentials, миниатюра до ретуши |
 | Легаси | SummaryInformation, `total_edit_time`, потоки `1Table`/`0Table` (хранят **удалённый текст** предыдущих версий), макросы |
