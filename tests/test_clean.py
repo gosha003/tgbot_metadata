@@ -670,23 +670,6 @@ def _trailer_ids(path):
     return None
 
 
-def _make_pptx(dir):
-    """Минимальный pptx: sniff определяет его как pptx по частям ppt/. -> (путь, ожидания)."""
-    path = os.path.join(dir, "deck.pptx")
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml",
-                    '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/'
-                    'content-types"><Override PartName="/ppt/presentation.xml" ContentType="application/'
-                    'vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/></Types>')
-        zf.writestr("ppt/presentation.xml",
-                    "<p:presentation xmlns:p='http://schemas.openxmlformats.org/presentationml/2006/main'/>")
-        zf.writestr("docProps/core.xml",
-                    '<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/'
-                    'package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">'
-                    "<dc:creator>Автор Презентации</dc:creator></cp:coreProperties>")
-    return path, {}
-
-
 # ===========================================================================
 # 1. ИНВАРИАНТ sha256 и ОРАКУЛ -- на каждой фикстуре и каждом профиле
 # ===========================================================================
@@ -1281,9 +1264,10 @@ def _phases(text):
     return {int(m) for m in re.findall(r"фаз[аеыу]\s+(\d+)", text)}
 
 
-# (метка, фабрика, допустимые номера фазы). OOXML -- фаза 2, легаси OLE2 -- фаза 4
-# (docs/ROADMAP.md). Для RTF и ODF ROADMAP однозначного номера не даёт: допускаем
-# 2 или 4, но номер обязан быть ОДИН и тот же везде, где он назван (см. ниже).
+# (метка, фабрика, допустимые номера фазы). Легаси OLE2 -- фаза 4: на месте не
+# чистится в принципе, история правок вшита в контейнер. ODF и RTF -- фаза 2:
+# чистятся на месте, регенерация им не нужна (обоснование в core.clean._PLANNED).
+# Номер обязан быть ОДИН и тот же везде, где он назван (см. ниже).
 _REFUSED = (
     # docx, docx_wordlike, xlsx, pptx убраны: с фазы 2 они ЧИСТЯТСЯ, а не
     # отказываются. Их поведение проверяется в тестах чистки OOXML ниже.
@@ -1291,8 +1275,8 @@ _REFUSED = (
     ("doc_active", fixtures.make_doc_active, (4,)),
     ("xls", fixtures.make_xls, (4,)),
     ("ppt", fixtures.make_ppt, (4,)),
-    ("rtf", fixtures.make_rtf, (2, 4)),
-    ("odt", fixtures.make_odt, (2, 4)),
+    ("rtf", fixtures.make_rtf, (2,)),
+    ("odt", fixtures.make_odt, (2,)),
 )
 
 
@@ -1725,7 +1709,7 @@ def test_20_ooxml_cleaning(tmp):
     for maker, name in ((fixtures.make_docx, "docx"),
                         (fixtures.make_docx_wordlike, "docx_wordlike"),
                         (fixtures.make_xlsx, "xlsx"),
-                        (_make_pptx, "pptx")):
+                        (fixtures.make_pptx, "pptx")):
         src, _exp = maker(tmp)
         src_ts = {i.filename: i.date_time for i in zipfile.ZipFile(src).infolist()}
         src_order = [i.filename for i in zipfile.ZipFile(src).infolist()]
@@ -1779,10 +1763,21 @@ def test_20_ooxml_cleaning(tmp):
                 _check("%s: Application сохранён как есть -- это правда о файле "
                        "(в исходнике %s)" % (tag, "был" if src_had_app else "не было"),
                        bool(app) == src_had_app, app)
-            _check("%s: word/people.xml с userId не осталось" % tag,
-                   "word/people.xml" not in out_order)
-            _check("%s: printerSettings с именем принтера не осталось" % tag,
-                   not [n for n in out_order if "printerSettings" in n], out_order[:0])
+            # Проверять «части больше нет» имеет смысл только если она БЫЛА:
+            # иначе утверждение выполняется вакуумно и ничего не охраняет.
+            # people.xml есть у make_docx, printerSettings -- только у make_pptx.
+            if "word/people.xml" in src_order:
+                _check("%s: word/people.xml с userId не осталось" % tag,
+                       "word/people.xml" not in out_order)
+            src_prn = [n for n in src_order if "printerSettings" in n]
+            if src_prn:
+                _check("%s: printerSettings с именем принтера (было %d шт.) не осталось"
+                       % (tag, len(src_prn)),
+                       not [n for n in out_order if "printerSettings" in n], out_order)
+                raw = _read(dst)
+                _check("%s: имя принтера не осталось и в сырых байтах результата" % tag,
+                       fixtures.PPTX_PRINTER.encode("utf-16le") not in raw
+                       and fixtures.PPTX_PRINTER.encode("utf-8") not in raw)
 
         # Честность про незаметность: для OOXML stealth файл опознаётся как
         # чищеный, и отчёт ОБЯЗАН это сказать. Пустые dc:creator и

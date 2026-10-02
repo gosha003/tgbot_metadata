@@ -735,7 +735,8 @@ async def _selftest() -> int:
 
         print("2b. OOXML (фаза 2): кнопки есть, файл выдан с правильным расширением")
         for maker, nm, pat in ((fx.make_docx, "docx", r"document_[0-9a-f]{6}\.docx"),
-                               (fx.make_xlsx, "xlsx", r"spreadsheet_[0-9a-f]{6}\.xlsx")):
+                               (fx.make_xlsx, "xlsx", r"spreadsheet_[0-9a-f]{6}\.xlsx"),
+                               (fx.make_pptx, "pptx", r"presentation_[0-9a-f]{6}\.pptx")):
             src, exp, ev, ch = await send(maker, nm)
             check("%s: кнопки чистки показаны" % nm, ch is not None and ch.markup is not None)
             if ch is None:
@@ -754,7 +755,10 @@ async def _selftest() -> int:
                       any("ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ" in t for t in texts(ev)), texts(ev)[-1][:200])
 
         print("3. форматы без чистки: кнопок нет, фаза названа")
-        for maker, nm, phase in ((fx.make_rtf, "rtf", 4), (fx.make_doc, "doc", 4)):
+        # Номер фазы здесь идёт из cleanreport._PHASE, а не от диспетчера:
+        # _no_clean_text() строит пустой CleanResult, у которого planned_phase=0.
+        # RTF -- фаза 2 (чистится на месте), легаси OLE2 -- фаза 4.
+        for maker, nm, phase in ((fx.make_rtf, "rtf", 2), (fx.make_doc, "doc", 4)):
             _, _, ev, ch = await send(maker, nm)
             last = texts(ev)[-1]
             check("%s: нет кнопок, нет файла, нет записи" % nm,
