@@ -26,22 +26,72 @@ ALLOWED_USER_IDS: list[int] = []
 EXIFTOOL_CANDIDATES = ("exiftool", os.path.join(ROOT, "tools", "exiftool.exe"))
 
 
+#  BOM -> кодировка. Windows PowerShell 5.1 на `>` и `Out-File` пишет UTF-16 LE,
+#  поэтому созданный там .env приезжает не в UTF-8. Читать его как UTF-8 значит
+#  получить UnicodeDecodeError трейсбеком вместо внятного «токен не найден» --
+#  именно так этот проект и спотыкнулся при первом живом запуске.
+_BOMS = (
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+)
+
+
+def _decode_env(raw: bytes) -> str:
+    """Байты .env -> текст. Кодировку определяем по BOM, иначе пробуем UTF-8,
+    затем UTF-16 без BOM (признак -- NUL-байты), затем cp1251."""
+    for bom, enc in _BOMS:
+        if raw.startswith(bom):
+            return raw.decode(enc, "replace").replace("﻿", "")
+    try:
+        text = raw.decode("utf-8")
+        # UTF-16 без BOM декодируется как UTF-8 УСПЕШНО: NUL -- валидный
+        # символ UTF-8. На выходе мусор вида 'T\x00G\x00_\x00', и запасной
+        # путь ниже без этой проверки недостижим.
+        if "\x00" not in text:
+            return text
+    except UnicodeDecodeError:
+        pass
+    # ponytail: берём первую кодировку, которая декодировалась. UTF-16 BE и
+    # UTF-32 БЕЗ BOM так не опознаются (decode как utf-16-le на них не бросает,
+    # а отдаёт мусор), и это осознанно: ни один редактор и ни одна оболочка
+    # такого .env не пишут, а деградация безопасная -- токен просто не найдётся
+    # и пользователь увидит инструкцию, а не трейсбек. Понадобится -- выбирать
+    # по позициям NUL-байтов (чётные/нечётные), а не по первому успеху.
+    if b"\x00" in raw:
+        for enc in ("utf-16-le", "utf-16-be"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+    return raw.decode("cp1251", "replace")
+
+
 def _parse_dotenv(path: str) -> dict:
-    """Простой парсер .env: строки KEY=VALUE, без python-dotenv."""
+    """Простой парсер .env: строки KEY=VALUE, без python-dotenv.
+
+    Никогда не бросает: нечитаемый или кривой .env -- это пустой словарь и
+    затем честное сообщение про отсутствующий токен, а не трейсбек.
+    """
     values: dict = {}
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
-                values[key.strip()] = value
+        with open(path, "rb") as fh:
+            text = _decode_env(fh.read())
     except OSError:
-        pass
+        return values
+    except Exception:
+        return values
+    for line in text.splitlines():
+        line = line.strip().lstrip("﻿")
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
     return values
 
 
