@@ -579,7 +579,7 @@ def _sec_raw(path, report, ctx):
     Работает на любом файле, в том числе на таком, который pikepdf не открывает.
     Читаем чанками с нахлёстом, ничего крупного в память не тянем.
     """
-    needles = re.compile(rb"%%EOF|startxref|/Prev|/ObjStm|/Linearized|/Encrypt|/XFA")
+    needles = re.compile(rb"%%EOF|startxref|/Prev|/ObjStm|/Linearized|/Encrypt|/XFA|trailer")
     banner = re.compile(rb"/PTEX\.Fullbanner\s*\(([^)]{0,400})\)")
     header = re.compile(rb"%PDF-(\d\.\d)")
 
@@ -612,7 +612,20 @@ def _sec_raw(path, report, ctx):
 
     n_eof = len(hits.get(b"%%EOF", ()))
     n_startxref = len(hits.get(b"startxref", ()))
-    n_prev = len(hits.get(b"/Prev", ()))
+    # /Prev НЕЛЬЗЯ считать по всему файлу: это штатный ключ элемента
+    # оглавления (ссылка на предыдущую закладку того же уровня), а не только
+    # ключ трейлера. На настоящем документе с 62 закладками голый счётчик
+    # давал 62 и поднимал ложный сигнал «в файле лежат прошлые версии
+    # страниц» на КАЖДОМ PDF с оглавлением.
+    # Считаем только те /Prev, что стоят вскоре после ключевого слова
+    # trailer, то есть внутри словаря трейлера.
+    prev_all = hits.get(b"/Prev", ())
+    trailers = hits.get(b"trailer", ())
+    n_prev_raw = len(prev_all)
+    n_prev = sum(
+        1 for p in prev_all
+        if any(0 <= p - t <= 400 for t in trailers)
+    )
     ctx["header_version"] = version
     ctx["objstm"] = bool(hits.get(b"/ObjStm"))
     ctx["raw_linearized"] = bool(hits.get(b"/Linearized"))
@@ -622,13 +635,21 @@ def _sec_raw(path, report, ctx):
                    note="Версия в заголовке часто расходится с возможностями файла: её "
                         "выставляет конкретный продюсер и по ней он опознаётся.")
 
-    report.add(Risk.PROVENANCE, "сырые байты", "Маркеров %%EOF / startxref / /Prev",
-               "%d / %d / %d" % (n_eof, n_startxref, n_prev),
+    report.add(Risk.PROVENANCE, "сырые байты", "Маркеров %%EOF / startxref",
+               "%d / %d" % (n_eof, n_startxref),
                note="Один %%EOF -- файл писали одним проходом.")
+    report.add(Risk.PROVENANCE, "сырые байты", "Вхождений /Prev",
+               "%d всего, из них в трейлере: %d" % (n_prev_raw, n_prev),
+               note="/Prev -- штатный ключ элемента оглавления (ссылка на предыдущую "
+                    "закладку), поэтому его вхождения по всему файлу о ревизиях НЕ "
+                    "говорят. О ревизиях говорит только /Prev внутри трейлера.")
 
-    if n_eof > 1 or n_startxref > 1 or n_prev > 0:
+    # Решающий признак -- число %%EOF/startxref. /Prev в трейлере лишь
+    # подтверждает. Одна ревизия инкрементальным апдейтом не является.
+    revisions = max(n_eof, n_startxref)
+    if revisions > 1 or n_prev > 0:
         report.add(Risk.IDENTITY, "сырые байты", "Инкрементальные апдейты",
-                   "%d ревизий (по %%EOF), /Prev в трейлере: %d" % (max(n_eof, n_startxref), n_prev),
+                   "%d ревизий (по %%EOF), /Prev в трейлере: %d" % (revisions, n_prev),
                    note="В файле ФИЗИЧЕСКИ ЛЕЖАТ ПРЕДЫДУЩИЕ ВЕРСИИ документа: старые объекты, "
                         "старые xref и, в частности, текст под «заредактированными» чёрными "
                         "прямоугольниками -- прямоугольник рисуется поверх, а текст остаётся "
@@ -636,8 +657,8 @@ def _sec_raw(path, report, ctx):
                         "Пересохранение с linearize (или полная перезапись объектов) выбрасывает "
                         "все прошлые ревизии -- это и есть способ их убрать.")
         report.signal("hazard",
-                      "PDF содержит %d инкрементальных ревизий: прошлые версии страниц и "
-                      "«зачёркнутый» текст извлекаются из файла напрямую" % max(n_eof, n_startxref),
+                      "PDF содержит %d ревизий: прошлые версии страниц и «зачёркнутый» "
+                      "текст извлекаются из файла напрямую" % revisions,
                       "high")
 
     if ctx["objstm"]:
