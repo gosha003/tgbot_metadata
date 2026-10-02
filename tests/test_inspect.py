@@ -180,6 +180,23 @@ def test_xlsx(tmp):
 
 
 @_with_tmp
+def test_pptx(tmp):
+    """pptx -- третий формат OOXML, и до этой фикстуры он не инспектировался
+    ни одной: покрытие шло только общими путями через docx и xlsx. Здесь же
+    единственная проверка DEVMODE на уровне фикстур."""
+    path, expected = fixtures.make_pptx(tmp)
+    rep = _check_fixture("pptx", path, expected, "pptx")
+    _check("pptx: имя принтера найдено именно в printerSettings*.bin",
+           any("printerSettings" in f.location and fixtures.PPTX_PRINTER in f.value
+               for f in rep.findings),
+           [f.location for f in rep.findings][:12])
+    _check("pptx: автор комментария найден в ppt/commentAuthors.xml",
+           any("commentAuthors" in f.location and fixtures.PPTX_CM_AUTHOR in f.value
+               for f in rep.findings),
+           [f.location for f in rep.findings][:12])
+
+
+@_with_tmp
 def test_pdf(tmp):
     path, expected = fixtures.make_pdf(tmp)
     _check_fixture("pdf", path, expected, "pdf")
@@ -286,8 +303,8 @@ def test_idempotent_all(tmp):
     """Read-only для ВСЕХ фикстур, не только тех, что проверены по дороге
     в test_* выше -- отдельный явный проход, как того просит задание."""
     makers = [fixtures.make_docx, fixtures.make_docx_wordlike, fixtures.make_xlsx,
-              fixtures.make_pdf, fixtures.make_pdf_incremental, fixtures.make_jpeg,
-              fixtures.make_png, fixtures.make_rtf, fixtures.make_odt]
+              fixtures.make_pptx, fixtures.make_pdf, fixtures.make_pdf_incremental,
+              fixtures.make_jpeg, fixtures.make_png, fixtures.make_rtf, fixtures.make_odt]
     for maker in makers:
         path, _ = maker(tmp)
         _check_idempotent(maker.__name__, path)

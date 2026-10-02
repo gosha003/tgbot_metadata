@@ -380,6 +380,123 @@ def make_xlsx(dir):
 
 
 # ===========================================================================
+# OOXML: pptx
+# ===========================================================================
+
+PPTX_CREATOR = "\u0421\u0432\u0435\u0442\u043b\u0430\u043d\u0430 \u041e\u0440\u043b\u043e\u0432\u0430"
+PPTX_LASTBY = "s.orlova@vector-ao.ru"
+PPTX_COMPANY = "\u0410\u041e \u0412\u0435\u043a\u0442\u043e\u0440"
+PPTX_CM_AUTHOR = "\u0413\u0440\u043e\u043c\u043e\u0432 \u0414.\u0410."
+# Имя принтера из DEVMODE: 32 WCHAR в UTF-16LE в начале структуры. Здесь оно
+# несёт номер кабинета -- то, из-за чего это поле и попало в METADATA.md.
+PPTX_PRINTER = "Xerox WC7845 (KAB-312)"
+
+
+def _devmode(device_name):
+    """Минимальный правдоподобный DEVMODEW: dmDeviceName -- 32 WCHAR в UTF-16LE
+    с NUL-добивкой, дальше хвост фиксированных полей (драйвер, лоток, формат).
+    Инспектор читает первые 64 байта, чистильщик выбрасывает часть целиком."""
+    blob = device_name.encode("utf-16le")
+    if len(blob) > 64:
+        raise ValueError("dmDeviceName длиннее 32 WCHAR")
+    return blob + b"\x00" * (64 - len(blob)) + b"\x00" * 156
+
+
+def make_pptx(dir):
+    """.pptx: автор и email в core.xml, Company и TitlesOfParts в app.xml,
+    автор комментария в ppt/commentAuthors.xml, ИМЯ ПРИНТЕРА в DEVMODE и превью.
+
+    Единственная фикстура с printerSettings*.bin. До её появления проверки вида
+    «имя принтера не осталось» проходили ВАКУУМНО: ни в одном docx/xlsx этой
+    части не было. Таймстемпы 1980-01-01 и Application=PowerPoint согласованы
+    между собой -- это пакет, похожий на настоящий, а не на библиотечный.
+    """
+    path = os.path.join(dir, "deck.pptx")
+
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Default Extension="jpeg" ContentType="image/jpeg"/>'
+        '<Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.presentationml.printerSettings"/>'
+        '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
+        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+        '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+        '</Types>'
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" Target="docProps/thumbnail.jpeg"/>'
+        '</Relationships>'
+    )
+    core_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">'
+        '<dc:creator>%s</dc:creator>'
+        '<cp:lastModifiedBy>%s</cp:lastModifiedBy>'
+        '<cp:revision>7</cp:revision>'
+        '<dcterms:created xsi:type="dcterms:W3CDTF" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">2026-03-02T09:14:00Z</dcterms:created>'
+        '</cp:coreProperties>'
+    ) % (PPTX_CREATOR, PPTX_LASTBY)
+    app_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">'
+        '<Application>Microsoft Office PowerPoint</Application><AppVersion>16.0000</AppVersion>'
+        '<Company>%s</Company><TotalTime>412</TotalTime>'
+        '<TitlesOfParts>\u0421\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u044f \u0434\u043e \u043a\u043e\u043d\u0446\u0430 \u0433\u043e\u0434\u0430</TitlesOfParts>'
+        '</Properties>'
+    ) % PPTX_COMPANY
+    presentation_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>'
+    )
+    slide_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+        '<p:cSld><p:spTree/></p:cSld></p:sld>'
+    )
+    # ppt/commentAuthors.xml -- площадка IDENTITY, специфичная для PowerPoint:
+    # у Word авторы комментариев лежат совсем в других частях.
+    comment_authors = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+        '<p:cmAuthor id="1" name="%s" initials="\u0413\u0414" lastIdx="3" clrIdx="0"/>'
+        '</p:cmAuthorLst>'
+    ) % PPTX_CM_AUTHOR
+
+    parts = [
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", rels),
+        ("docProps/core.xml", core_xml),
+        ("docProps/app.xml", app_xml),
+        ("docProps/thumbnail.jpeg", b"\xff\xd8\xff\xe0" + b"\x00" * 60 + b"\xff\xd9"),
+        ("ppt/presentation.xml", presentation_xml),
+        ("ppt/slides/slide1.xml", slide_xml),
+        ("ppt/commentAuthors.xml", comment_authors),
+        ("ppt/printerSettings/printerSettings1.bin", _devmode(PPTX_PRINTER)),
+    ]
+    _write_zip(path, parts, (1980, 1, 1, 0, 0, 0))
+
+    expected = {
+        "values": [PPTX_CREATOR, PPTX_LASTBY, PPTX_COMPANY, PPTX_CM_AUTHOR, PPTX_PRINTER],
+        "identity": [PPTX_CREATOR, PPTX_LASTBY, PPTX_CM_AUTHOR],
+        "environment": [PPTX_PRINTER],
+        "signals": ["producer"],
+        # Пакет согласован сам с собой: таймстемпы 1980-01-01 при
+        # Application=PowerPoint, автор заполнен. Ни «собрано библиотекой», ни
+        # «уже чистили», ни «метаданные противоречат» здесь взяться не может.
+        "not_signals": ["ai", "scrubbed", "inconsistent"],
+    }
+    return path, expected
+
+
+# ===========================================================================
 # PDF
 # ===========================================================================
 
