@@ -5,7 +5,8 @@
                verify=True) -> DispatchResult
 
 Определяет формат через core.sniff и маршрутизирует по core.sniff.family:
-pdf -> clean_pdf, image -> clean_image. Все остальные форматы честно
+pdf -> clean_pdf, image -> clean_image, ooxml -> clean_ooxml.
+Остальные форматы честно
 отклоняются: чистки для них ещё нет, и делать вид, что почистили, нельзя.
 Отдать пользователю файл, который он считает почищенным, а он не почищен, --
 худший исход для этого проекта.
@@ -58,6 +59,7 @@ from enum import Enum
 
 from . import sniff
 from .clean_image import clean_image
+from .clean_ooxml import clean_ooxml
 from .clean_pdf import clean_pdf
 from .cleanmodel import ACT_TITLE, Act, CleanResult, Profile
 from .inspect import inspect_file
@@ -77,7 +79,6 @@ _LEAKY = (Risk.IDENTITY, Risk.ENVIRONMENT)
 # ВНИМАНИЕ: docs/ROADMAP.md относит ODF к фазе 4, а здесь по заданию ODF и RTF --
 # фаза 2. Расхождение надо снять в одном из двух мест; номер фазы живёт только тут.
 _PLANNED = {
-    "ooxml": (2, "Чистка OOXML (docx/xlsx/pptx) -- фаза 2."),
     "odf": (2, "Чистка ODF -- фаза 2."),
     "rtf": (2, "Чистка RTF -- фаза 2."),
     "ole": (4, "Легаси OLE2 (doc/xls/ppt) на месте не чистится в принципе: метаданные и "
@@ -138,6 +139,16 @@ class DispatchResult(CleanResult):
     residual: list = dataclasses.field(default_factory=list)
     gaps: list = dataclasses.field(default_factory=list)       # чего инспектор не смог разобрать
     planned_phase: int = 0          # >0 -- формат отклонён: чистка будет в этой фазе
+    # Сигналы, которых в исходнике НЕ БЫЛО, а в результате появились. Прежде
+    # всего "scrubbed" и "ai": они означают, что файл теперь опознаётся как
+    # обработанный. Утечки в этом нет (clean остаётся True), но профиль
+    # STEALTH существует ради незаметности, и молча отдать такой файл --
+    # обмануть пользователя в том единственном, ради чего он выбрал STEALTH.
+    # На OOXML это не дефект чистки, а предел формата: пустые dc:creator и
+    # cp:lastModifiedBy вместе сами являются признаком, а любая альтернатива
+    # либо течёт, либо подделывает провенанс. Настоящее решение -- Regenerate
+    # (фаза 4), то есть пересоздание файла стоковым приложением.
+    new_signals: list = dataclasses.field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -209,6 +220,8 @@ def _same_file(a, b) -> bool:
 _CLEANERS = {
     "pdf": lambda s, d, prof, keep, force: clean_pdf(s, d, prof, keep, force),
     "image": lambda s, d, prof, keep, force: clean_image(s, d, prof, keep),
+    "ooxml": lambda s, d, prof, keep, force: clean_ooxml(
+        s, d, prof, keep, force_signed=force),
 }
 
 
@@ -299,10 +312,22 @@ def _run(res, tmpdirs, src, dst, profile, keep, force_signed, verify) -> None:
         res.critical_after, res.sensitive_after = after.critical, after.sensitive
         res.survived = survived_values(before, after)
         was = {_norm(f.value) for f in before.findings}
-        res.residual = [(g.location, g.label, _norm(g.value) not in was)
+        # Значение короче MIN_VALUE_LEN не может быть утечкой личности, и
+        # проверять его на вхождение в исходник бессмысленно: ПУСТАЯ строка
+        # встречается в исходнике всегда, поэтому обнулённые нами же поля
+        # (dc:creator, Company) засчитывались как «несут исходное значение» и
+        # отчёт пугал утечкой, которой нет. Короткое и пустое -- не исходное.
+        res.residual = [(g.location, g.label,
+                         len(_norm(g.value)) < MIN_VALUE_LEN or _norm(g.value) not in was)
                         for g in after.findings if g.risk in _LEAKY]
         res.gaps = (["до чистки: " + e for e in before.errors] +
                     ["после чистки: " + e for e in after.errors])
+        was_sig = {(sg.kind, sg.detail) for sg in before.signals}
+        was_kinds = {sg.kind for sg in before.signals}
+        res.new_signals = [(sg.kind, sg.detail) for sg in after.signals
+                           if (sg.kind, sg.detail) not in was_sig
+                           and sg.kind in ("scrubbed", "ai")
+                           and sg.kind not in was_kinds]
         res.verified = True
 
     # Вход не изменился за время работы: иначе «до» и «после» сравнивали разные байты.
@@ -556,10 +581,9 @@ def _selftest() -> int:
         print("3. отказы по форматам")
         d = os.path.join(tmp, "refuse")
         os.makedirs(d)
-        cases = [(fx.make_docx, "docx", 2), (fx.make_xlsx, "xlsx", 2), (fx.make_rtf, "rtf", 2),
-                 (fx.make_odt, "odt", 2), (fx.make_doc, "doc", 4), (fx.make_xls, "xls", 4),
-                 (fx.make_ppt, "ppt", 4), (fx.make_pptx if hasattr(fx, "make_pptx") else fx.make_docx_wordlike,
-                                           "docx2", 2)]
+        # docx/xlsx/pptx убраны из отказов: с фазы 2 они чистятся (см. пункт 3b).
+        cases = [(fx.make_rtf, "rtf", 2), (fx.make_odt, "odt", 2),
+                 (fx.make_doc, "doc", 4), (fx.make_xls, "xls", 4), (fx.make_ppt, "ppt", 4)]
         for maker, name, phase in cases:
             sub = os.path.join(d, name)
             os.makedirs(sub)
