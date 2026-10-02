@@ -1149,6 +1149,148 @@ def _devmode_details(rep, name, blob):
                 "печати и очереди: это имя хоста в вашей сети." % offset)
 
 
+# === М1. customXml ========================================================
+# Живёт в секции Excel по историческим причинам, но к Excel отношения не имеет:
+# customXml/ бывает в любом OOXML-пакете, и у настоящих .docx он есть чаще.
+
+# Корни SharePoint/СЭД: вот здесь и лежат имена сотрудников, даты и адрес
+# портала. Список обязан совпадать с core/clean_ooxml.py::_SP_ROOT_NS -- по
+# нему чистильщик решает, что обнулять. Расхождение между двумя списками делает
+# оракул ложноположительным: инспектор объявит утечкой то, что чистильщик
+# сознательно не трогает, и правильно почищенный файл получит вердикт
+# «почищено не полностью».
+_CX_SHAREPOINT_NS = frozenset((
+    "http://schemas.microsoft.com/office/2006/metadata/properties",
+    "http://schemas.microsoft.com/office/2006/metadata/contentType",
+    "http://schemas.microsoft.com/office/2006/metadata/longProperties",
+    "http://schemas.microsoft.com/office/2006/metadata/customXsn",
+    "http://schemas.microsoft.com/sharepoint/v3/contenttype/forms",
+))
+
+# Корни, которые означают СОДЕРЖИМОЕ документа, а не метаданные окружения.
+# Библиография -- это список литературы, он виден в тексте и его видит читатель;
+# убрать его значит испортить документ, а объявить утечкой -- соврать.
+_CX_CONTENT_NS = frozenset((
+    "http://schemas.openxmlformats.org/officeDocument/2006/bibliography",
+))
+
+# Публичные адреса схем: одинаковы у всех документов мира и об организации не
+# говорят ничего. Корпоративный URI в schemaRef -- наоборот, сразу выдаёт портал.
+_PUBLIC_SCHEMA_RE = re.compile(
+    r"^(https?://)?(schemas\.(openxmlformats\.org|microsoft\.com)"
+    r"|purl\.org|www\.w3\.org)/", re.I)
+
+
+def _xml_values(root, limit=400):
+    """Значения части: текст между тегами плюс значения атрибутов. Имена тегов и
+    объявления пространств имён отброшены намеренно -- они одинаковы у всех
+    документов такого типа, и сырой дамп XML делает оракул ложноположительным:
+    любая законно оставленная часть считалась бы «значением, пережившим чистку».
+    Атрибуты при этом нужны: contentTypeID с GUID сайта лежит именно там."""
+    out = []
+    for el in root.iter():
+        if not isinstance(el.tag, str):     # комментарии и PI значений не несут
+            continue
+        for key, val in el.attrib.items():
+            name = _ln(key)
+            if name in ("xmlns", "nil", "schemaLocation") or key.startswith("{http://www.w3.org/2000/xmlns/"):
+                continue
+            val = (val or "").strip()
+            if val:
+                out.append(val)
+        for part in (el.text, el.tail):
+            part = (part or "").strip()
+            if part:
+                out.append(part)
+    return " ".join(out)[:limit]
+
+
+def _customxml_item(zf, rep, name):
+    """customXml/item*.xml. Риск определяется корневым пространством имён, а не
+    самим фактом наличия части: SharePoint -- утечка, библиография -- контент."""
+    # Локальный try, хотя вызов и так обёрнут _try: при неразобранной части
+    # находку всё равно надо выдать. Молчание здесь читалось бы как «ничего
+    # подозрительного», а правильное прочтение -- «не проверено».
+    try:
+        root = _read_xml(zf, name, 2 * 1024 * 1024)
+    except Exception as exc:  # noqa: BLE001
+        rep.err("%s: %s" % (name, exc))
+        root = None
+    if root is None:
+        rep.add(Risk.ENVIRONMENT, name, "Данные customXml", "не разобрано как XML",
+                "Пользовательская XML-часть, которую не удалось разобрать. "
+                "Содержимое не проверено -- считаем худший случай.")
+        return
+    ns = (etree.QName(root).namespace or "").strip()
+    text = _xml_values(root)
+    n_el = sum(1 for _ in root.iter())
+
+    if ns in _CX_SHAREPOINT_NS:
+        # Пустая часть SharePoint -- не утечка, а провенанс. Разделение
+        # принципиально: риски IDENTITY и ENVIRONMENT проверяет оракул по
+        # совпадению значений, и слово-заглушка вместо значения совпала бы
+        # сама с собой -- правильно почищенный файл получил бы вердикт
+        # «значение пережило чистку».
+        if text:
+            rep.add(Risk.ENVIRONMENT, name, "Данные customXml (SharePoint/СЭД)", text,
+                    "Колонки библиотеки SharePoint: имена сотрудников, даты, "
+                    "адрес портала и тип контента организации.")
+        else:
+            rep.add(Risk.PROVENANCE, name, "Часть SharePoint/СЭД (пустая)",
+                    "значений нет",
+                    "Значений внутри нет, но сама часть осталась: документ "
+                    "лежал в библиотеке SharePoint или в СЭД.",
+                    removable=False)
+    elif ns in _CX_CONTENT_NS:
+        rep.add(Risk.STRUCTURAL, name, "Библиография (customXml)",
+                "элементов: %d" % n_el,
+                "Список литературы документа. Это содержимое, видимое "
+                "читателю, а не метаданные: чистка его не трогает намеренно. "
+                "Имена авторов здесь -- авторы цитируемых работ, не ваши.",
+                removable=False)
+    elif not text:
+        # Корень неизвестен, но значений внутри нет: сообщить стоит, пугать нечем.
+        rep.add(Risk.PROVENANCE, name, "Пользовательская XML-часть (пустая)",
+                ns or "без пространства имён",
+                "Часть есть, значений внутри нет. Сам факт её наличия говорит "
+                "о приложении или системе, которая файл создала.")
+    else:
+        rep.add(Risk.ENVIRONMENT, name, "Данные customXml", text,
+                "Пользовательская XML-часть неизвестного происхождения (%s). "
+                "Так хранят данные СЭД и привязку элементов содержимого; "
+                "убрать её вслепую нельзя -- на неё может опираться текст "
+                "документа." % (ns or "без пространства имён"))
+
+
+def _customxml_props(zf, rep, name):
+    """customXml/itemProps*.xml -- привязка к схеме. Утечка здесь только тогда,
+    когда адрес схемы корпоративный: публичные URI OOXML есть у всех."""
+    try:
+        root = _read_xml(zf, name, 2 * 1024 * 1024)
+    except Exception as exc:  # noqa: BLE001
+        rep.err("%s: %s" % (name, exc))
+        root = None
+    refs = []
+    if root is not None:
+        for el in _iter_tag(root, "schemaRef"):
+            uri = (_attr(el, "uri") or "").strip()
+            if uri:
+                refs.append(uri)
+    private = [r for r in refs if not _PUBLIC_SCHEMA_RE.match(r)]
+    if private:
+        rep.add(Risk.ENVIRONMENT, name, "Схема customXml", "; ".join(private),
+                "Привязка к нестандартной схеме: выдаёт портал SharePoint или "
+                "тип контента организации.")
+    elif refs:
+        rep.add(Risk.STRUCTURAL, name, "Схема customXml (стандартная)",
+                "; ".join(refs),
+                "Публичный адрес схемы OOXML. Одинаков у всех документов и об "
+                "организации не говорит ничего.", removable=False)
+    else:
+        rep.add(Risk.PROVENANCE, name, "Схема customXml", "без schemaRef",
+                "Часть привязки схемы есть, самой ссылки в ней нет.")
+
+
 # === М. специфика Excel ===================================================
 
 
@@ -1262,21 +1404,9 @@ def _sec_excel(zf, rep, ctx):
                     "Power Query хранит источник данных и путь к нему.")
         elif name.startswith("customXml/"):
             if "itemProps" in name:
-                root = _try(rep, name, _read_xml, zf, name, 2 * 1024 * 1024)
-                refs = []
-                if root is not None:
-                    for el in _iter_tag(root, "schemaRef"):
-                        refs.append(_attr(el, "uri") or "")
-                rep.add(Risk.ENVIRONMENT, name, "Схема customXml",
-                        "; ".join(r for r in refs if r) or "без schemaRef",
-                        "Привязка к схеме SharePoint/СЭД: выдаёт портал и "
-                        "тип контента организации.")
+                _try(rep, name, _customxml_props, zf, rep, name)
             elif re.match(r"^customXml/item\d*\.xml$", name):
-                raw = _try(rep, name, _read_part, zf, name, 2 * 1024 * 1024)
-                rep.add(Risk.ENVIRONMENT, name, "Данные customXml",
-                        (raw or b"").decode("utf-8", "replace"),
-                        "Пользовательская XML-часть: обычно колонки библиотеки "
-                        "SharePoint с именами сотрудников и датами.")
+                _try(rep, name, _customxml_item, zf, rep, name)
 
 
 # === Н. анализ отсутствующих частей =======================================
@@ -1570,6 +1700,33 @@ def _build_sample(dest):
          '<w15:presenceInfo w15:providerId="AD" '
          'w15:userId="a.kuznetsova@company.ru"/></w15:person></w15:people>'),
         ("word/printerSettings/printerSettings1.bin", devmode),
+        # Четыре площадки customXml разом: от корня зависит риск, и ровно здесь
+        # ошибка классификации отравляет оракул чистки (см. _customxml_item).
+        ("customXml/item1.xml",
+         '<?xml version="1.0"?><p:properties xmlns:p="http://schemas.microsoft'
+         '.com/office/2006/metadata/properties" xmlns:ma="http://schemas'
+         '.microsoft.com/office/2006/metadata/properties/metaAttributes" '
+         'ma:contentTypeID="0x010100DEADBEEF"><documentManagement>'
+         '<Reviewer>Кузнецова А.В.</Reviewer></documentManagement>'
+         '</p:properties>'),
+        ("customXml/itemProps1.xml",
+         '<?xml version="1.0"?><ds:datastoreItem xmlns:ds="http://schemas'
+         '.openxmlformats.org/officeDocument/2006/customXml" '
+         'ds:itemID="{00000001-AAAA-BBBB-CCCC-DDDDEEEEFFFF}"><ds:schemaRefs>'
+         '<ds:schemaRef ds:uri="http://sharepoint.romashka.local/sites/buh"/>'
+         '</ds:schemaRefs></ds:datastoreItem>'),
+        ("customXml/item2.xml",
+         '<?xml version="1.0"?><b:Sources xmlns:b="http://schemas'
+         '.openxmlformats.org/officeDocument/2006/bibliography"/>'),
+        ("customXml/itemProps2.xml",
+         '<?xml version="1.0"?><ds:datastoreItem xmlns:ds="http://schemas'
+         '.openxmlformats.org/officeDocument/2006/customXml" '
+         'ds:itemID="{00000002-AAAA-BBBB-CCCC-DDDDEEEEFFFF}"><ds:schemaRefs>'
+         '<ds:schemaRef ds:uri="http://schemas.openxmlformats.org/'
+         'officeDocument/2006/bibliography"/></ds:schemaRefs>'
+         '</ds:datastoreItem>'),
+        ("customXml/item3.xml",
+         '<?xml version="1.0"?><Root xmlns="urn:romashka:erp:card"/>'),
         ("word/media/image1.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 40),
         ("word/styles.xml", b'<?xml version="1.0"?><x/>'),
     ]
@@ -1606,6 +1763,23 @@ def demo():
     assert "inconsistent" in kinds and "producer" in kinds, kinds
     assert "dating" in kinds, "формат бумаги A4 обязан дать сигнал dating: %s" % kinds
     assert not rep.errors, rep.errors
+
+    # customXml: риск определяется корнем. Утечкой (а значит и предметом проверки
+    # оракулом в core/clean.py) считается только то, что чистильщик обязан убрать.
+    by_loc = {f.location: f for f in rep.findings if f.location.startswith("customXml/")}
+    assert len(by_loc) == 5, sorted(by_loc)
+    cx = by_loc["customXml/item1.xml"]
+    assert cx.risk is Risk.ENVIRONMENT, cx
+    assert "Кузнецова А.В." in cx.value, cx.value
+    assert "0x010100DEADBEEF" in cx.value, (
+        "значения SharePoint бывают в атрибутах, а не только в тексте: %s" % cx.value)
+    assert by_loc["customXml/itemProps1.xml"].risk is Risk.ENVIRONMENT, "корпоративный URI схемы"
+    assert by_loc["customXml/item2.xml"].risk is Risk.STRUCTURAL, (
+        "библиография -- содержимое документа, чистильщик её не убирает")
+    assert by_loc["customXml/itemProps2.xml"].risk is Risk.STRUCTURAL, (
+        "публичный адрес схемы OOXML об организации не говорит ничего")
+    assert by_loc["customXml/item3.xml"].risk is Risk.PROVENANCE, (
+        "пустая часть неизвестного происхождения -- провенанс, не утечка")
 
     print("Файл: %s  (%d байт, fmt=%s)" % (rep.path, rep.size, rep.fmt))
     print("Частей ZIP: %d | находок: %d (значимых: %d) | сигналов: %d | ошибок: %d"
