@@ -33,6 +33,7 @@ from types import SimpleNamespace
 from core import sniff
 from core.cleanmodel import ACT_TITLE, Act
 from core.model import _ABS_PATH, PATH_STUB, clip
+from core.report import spoiler
 
 __all__ = ["render_telegram", "render_plain", "summary_line"]
 
@@ -421,7 +422,13 @@ class _Style:
         return self._w("code", v, cap)
 
     def val(self, v, cap=200):
-        return self.code(v, cap) if _c(v, cap) else self.i("(пусто)")
+        """Значение из файла. В Telegram уходит под спойлер (политика и
+        оговорка -- в core/report.py, флаг MASK_VALUES): отчёт о чистке
+        перечисляет ровно то, что было найдено, то есть те же персональные
+        данные, что и отчёт инспекции. Пустое не прячем -- скрывать нечего."""
+        if not _c(v, cap):
+            return self.i("(пусто)")
+        return spoiler(self.code(v, cap)) if self.tg else self.code(v, cap)
 
     def p(self, v, cap=700):
         """Абзац обычного текста."""
@@ -863,6 +870,29 @@ def _demo():
     check("ok=False + действия: не показаны как сделанное, но об этом сказано",
           "Удалено" not in m and "Иванов" not in m and "не показаны" in m, m[:400])
     del bad.actions[:]
+
+    # 3b. Маскировка значений. Отчёт о чистке перечисляет ровно те значения,
+    # что нашёл инспектор, то есть те же персональные данные -- значит прятать
+    # их надо здесь так же. Площадка одна (_Style.val), поэтому хватит проверки,
+    # что под спойлером оказалось значение, а не пустая строка и не весь абзац.
+    msk = mk()
+    msk.act("removed", "/Info", "/Author", "Иванов Иван Иванович")
+    msk.act("blanked", "docProps/core.xml", "dc:creator", "")
+    m = "\n".join(render_telegram(msk))
+    check("маскировка: значение ушло под спойлер",
+          "<tg-spoiler><code>Иванов Иван Иванович</code></tg-spoiler>" in m, m[:300])
+    check("маскировка: пустое значение не прячем (скрывать нечего)",
+          "<tg-spoiler><i>(пусто)</i>" not in m and "<i>(пусто)</i>" in m)
+    check("маскировка: в plain спойлера нет -- это вывод в локальную консоль",
+          "tg-spoiler" not in render_plain(msk))
+    import core.report as _rep
+    _rep.MASK_VALUES = False
+    try:
+        check("маскировка: общий выключатель действует и на отчёт о чистке",
+              "tg-spoiler" not in "\n".join(render_telegram(msk))
+              and "<code>Иванов Иван Иванович</code>" in "\n".join(render_telegram(msk)))
+    finally:
+        _rep.MASK_VALUES = True
 
     # 4. critical_after == -1.
     unv = mk(ca=-1, sa=-1)
