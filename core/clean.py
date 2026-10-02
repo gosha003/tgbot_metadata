@@ -5,7 +5,7 @@
                verify=True) -> DispatchResult
 
 Определяет формат через core.sniff и маршрутизирует по core.sniff.family:
-pdf -> clean_pdf, image -> clean_image, ooxml -> clean_ooxml.
+pdf -> clean_pdf, image -> clean_image, ooxml -> clean_ooxml, rtf -> clean_rtf.
 Остальные форматы честно
 отклоняются: чистки для них ещё нет, и делать вид, что почистили, нельзя.
 Отдать пользователю файл, который он считает почищенным, а он не почищен, --
@@ -61,6 +61,7 @@ from . import sniff
 from .clean_image import clean_image
 from .clean_ooxml import clean_ooxml
 from .clean_pdf import clean_pdf
+from .clean_rtf import clean_rtf
 from .cleanmodel import ACT_TITLE, Act, CleanResult, Profile
 from .inspect import inspect_file
 from .model import Risk, clip
@@ -80,17 +81,13 @@ _LEAKY = (Risk.IDENTITY, Risk.ENVIRONMENT)
 # Номер фазы живёт ЗДЕСЬ: cleanreport._no_cleaner() берёт planned_phase у
 # диспетчера, а своя таблица у него -- только запасной путь.
 #
-# ODF и RTF отнесены к фазе 2, а не 4, и это решение по существу: в фазу 4
-# формат попадает тогда, когда почистить его на месте нельзя в принципе.
-# Для легаси OLE2 это так -- метаданные и история правок вшиты в контейнер,
-# в потоках 1Table/0Table лежит удалённый текст прошлых версий, и единственный
-# способ от них избавиться -- пересоздать файл стоковым приложением. Для ODF
-# это не так: тот же ZIP, что и OOXML, и zipfix его уже умеет. Для RTF тоже
-# не так: плоский текст с control words, правится напрямую. Регенерация для
-# них была бы не необходимостью, а потерей вёрстки без причины.
+# В фазу 4 формат попадает тогда, когда почистить его на месте нельзя в принципе.
+# Легаси OLE2 -- так: метаданные и история правок вшиты в контейнер, в потоках
+# 1Table/0Table лежит удалённый текст прошлых версий. ODF ещё не чистится, но
+# чистится на месте (тот же ZIP, zipfix его уже умеет), поэтому фаза 2, не 4.
+# RTF уже чистится: плоский текст, control words правятся напрямую.
 _PLANNED = {
     "odf": (2, "Чистка ODF -- фаза 2."),
-    "rtf": (2, "Чистка RTF -- фаза 2."),
     "ole": (4, "Легаси OLE2 (doc/xls/ppt) на месте не чистится в принципе: метаданные и "
                "история правок вшиты в сам контейнер, нужна конвертация через стоковое "
                "приложение -- фаза 4."),
@@ -232,6 +229,7 @@ _CLEANERS = {
     "image": lambda s, d, prof, keep, force: clean_image(s, d, prof, keep),
     "ooxml": lambda s, d, prof, keep, force: clean_ooxml(
         s, d, prof, keep, force_signed=force),
+    "rtf": lambda s, d, prof, keep, force: clean_rtf(s, d, prof, keep),
 }
 
 
@@ -592,7 +590,7 @@ def _selftest() -> int:
         d = os.path.join(tmp, "refuse")
         os.makedirs(d)
         # docx/xlsx/pptx убраны из отказов: с фазы 2 они чистятся (см. пункт 3b).
-        cases = [(fx.make_rtf, "rtf", 2), (fx.make_odt, "odt", 2),
+        cases = [(fx.make_odt, "odt", 2),
                  (fx.make_doc, "doc", 4), (fx.make_xls, "xls", 4), (fx.make_ppt, "ppt", 4)]
         for maker, name, phase in cases:
             sub = os.path.join(d, name)
@@ -612,6 +610,11 @@ def _selftest() -> int:
             _check("%s: нет ни доказательства, ни действий" % name,
                    res.critical_after == -1 and not res.actions and not res.clean)
             _check("%s: путь в сообщении не утёк" % name, sub not in msg and os.path.basename(path) not in msg)
+
+        path, _exp = fx.make_rtf(d)
+        res = clean_file(path, os.path.join(d, "clean.rtf"))
+        _check("rtf: файл выдан и исходные значения не выжили",
+               res.ok and res.verified and res.clean, (res.ok, res.clean, res.errors[:2]))
 
         # 4. dst == src при любом написании пути.
         print("4. dst не затирает src")

@@ -114,11 +114,11 @@ _NEUTRAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,40}$")
 
 _PROFILES = {"cl:stealth": Profile.STEALTH, "cl:paranoid": Profile.PARANOID}
 _EXT = {"pdf": ".pdf", "jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif",
-        "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx"}
+        "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "rtf": ".rtf"}
 # Основа нейтрального имени: родовое слово по типу файла, без картинки как
 # умолчания -- иначе docx уехал бы с именем image_*.docx.
 _STEM = {"pdf": "document", "docx": "document", "xlsx": "spreadsheet",
-         "pptx": "presentation"}
+         "pptx": "presentation", "rtf": "document"}
 
 HELP_TEXT = (
     "Это инспектор и чистильщик метаданных документов.\n\n"
@@ -126,7 +126,7 @@ HELP_TEXT = (
     "картинку) -- бот покажет, что сейчас лежит внутри: автор, приложение, "
     "даты, локальные пути, GPS в фото и т.п. Файл при этом <b>не меняется "
     "и не сохраняется</b>.\n\n"
-    "Для <b>PDF, картинок (JPEG, PNG, WebP, GIF) и docx/xlsx/pptx</b> после "
+    "Для <b>PDF, картинок (JPEG, PNG, WebP, GIF), docx/xlsx/pptx и RTF</b> после "
     "отчёта появятся кнопки чистки: <b>Stealth</b> (убирает личность и "
     "окружение, оставляет приложение и версию) или <b>Paranoid</b> (убирает "
     "всё, но результат выглядит обработанным). Бот пришлёт отчёт о чистке и "
@@ -134,7 +134,7 @@ HELP_TEXT = (
     "У docx/xlsx/pptx полной незаметности не даёт даже Stealth: пустой автор "
     "сам по себе признак чистки. Бот честно пишет это в отчёте, а не "
     "умалчивает.\n\n"
-    "Для остальных форматов (doc/xls/ppt, ODF, RTF) чистки <b>пока нет</b>: "
+    "Для остальных форматов (doc/xls/ppt, ODF) чистки <b>пока нет</b>: "
     "бот так и напишет и укажет, в какой фазе она запланирована. Такой файл "
     "он не меняет.\n\n"
     "Главное условие: отправляйте файл через скрепку → <b>Файл</b> "
@@ -819,8 +819,18 @@ async def _selftest() -> int:
         print("3. форматы без чистки: кнопок нет, фаза названа")
         # Номер фазы здесь идёт из cleanreport._PHASE, а не от диспетчера:
         # _no_clean_text() строит пустой CleanResult, у которого planned_phase=0.
-        # RTF -- фаза 2 (чистится на месте), легаси OLE2 -- фаза 4.
-        for maker, nm, phase in ((fx.make_rtf, "rtf", 2), (fx.make_doc, "doc", 4)):
+        # Легаси OLE2 -- фаза 4. RTF чистится, проверка выше.
+        src, exp, ev, ch = await send(fx.make_rtf, "rtf")
+        check("rtf: кнопки чистки показаны", ch is not None and ch.markup is not None)
+        if ch is not None:
+            await click(ch, "cl:stealth")
+            d = docs(ev)
+            check("rtf: файл отправлен как document_*.rtf",
+                  len(d) == 1 and re.fullmatch(r"document_[0-9a-f]{6}\.rtf", d[0].name) is not None,
+                  [x.name for x in d])
+            check("rtf: исходные значения ушли", d and survivors(src, d[0].data, "rtf") == [])
+
+        for maker, nm, phase in ((fx.make_doc, "doc", 4),):
             _, _, ev, ch = await send(maker, nm)
             last = texts(ev)[-1]
             check("%s: нет кнопок, нет файла, нет записи" % nm,
