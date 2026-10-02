@@ -779,6 +779,9 @@ def test_doc(tmp):
     _check("doc: язык приложения (lid) == 0x0419",
            _vals(rep, "Язык приложения (lid)") == ["0x%04X" % expected["lid"]] == ["0x0419"],
            repr(_vals(rep, "Язык приложения (lid)")))
+    marks = _vals(rep, "Автор правки (SttbfRMark)")
+    _check("doc: SttbfRMark -- оба автора, служебная Unknown отброшена",
+           marks == list(fixtures.DOC_RMARK) and "Unknown" not in marks, repr(marks))
 
     # --- РЕГРЕССИЯ D2: пользовательские свойства. olefile читает их имена
     # только как UTF-8, поэтому Unicode-секция (как пишет настоящий Office) и

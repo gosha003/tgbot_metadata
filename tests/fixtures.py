@@ -1119,6 +1119,7 @@ def _ole_compobj(usertype, clipfmt, progid, clsid):
 DOC_CODEPAGE = 1251
 DOC_TITLE = "Служебная записка"
 DOC_AUTHOR = "Иванов Иван Петрович"
+DOC_RMARK = ("Кузнецова А.В.", "Орлова Светлана")
 DOC_KEYWORDS = "договор; смета; черновик"
 DOC_COMMENTS = "Не рассылать, внутренний черновик"
 DOC_TEMPLATE = "C:\\Users\\ivanov\\AppData\\Roaming\\Microsoft\\Шаблоны\\Normal.dotm"
@@ -1196,20 +1197,36 @@ def _doc_ole_meta():
     }
 
 
+def _doc_sttb(names):
+    """Unicode-STTB, как его пишет Word 97+ в SttbfRMark: fExtend=0xFFFF,
+    число строк, cbExtra=0, затем длина и текст каждой в UTF-16LE.
+    Первой идёт служебная "Unknown" -- инспектор обязан её отбросить."""
+    blob = struct.pack("<HHH", 0xFFFF, len(names), 0)
+    for name in names:
+        blob += struct.pack("<H", len(name)) + name.encode("utf-16le")
+    return blob
+
+
 def _word_streams(user_items):
     """Потоки обычного .doc: свойства (+ пользовательская секция user_items в
     кодовой странице 1200, как пишет Office), CompObj, WordDocument и 1Table.
 
     FIB: FibBase 32 байта -- wIdent, nFib, lid, flags (fComplex, cQuickSaves,
-    fWhichTblStm). Остальное нули, инспектор читает только базу. WordDocument и
-    1Table лежат в обычных секторах (4608 и ровно 4096 байт -- на самой границе
-    мини-потока), остальное -- в мини-потоке: так проходят обе ветки чтения.
+    fWhichTblStm), затем csw/cslw/cbRgFcLcb и пара fcSttbfRMark (индекс 51),
+    указывающая на таблицу авторов в начале 1Table. WordDocument и 1Table лежат
+    в обычных секторах (4608 и ровно 4096 байт -- на самой границе мини-потока),
+    остальное -- в мини-потоке: так проходят обе ветки чтения.
     """
     flags = 0x0004 | (DOC_QUICK_SAVES << 4) | 0x0200
-    fib = struct.pack("<HHHHHHHIBBHHII", 0xA5EC, 0x00C1, 0, DOC_LID, 0, flags,
-                      0x00BF, 0, 0, 0, 0, 0, 0, 0)
+    fib = bytearray(struct.pack("<HHHHHHHIBBHHII", 0xA5EC, 0x00C1, 0, DOC_LID, 0, flags,
+                                0x00BF, 0, 0, 0, 0, 0, 0, 0).ljust(0x800, b"\x00"))
+    sttb = _doc_sttb(("Unknown",) + tuple(DOC_RMARK))
+    fib[32:34] = struct.pack("<H", 14)          # csw, как у Word 97+
+    fib[62:64] = struct.pack("<H", 22)          # cslw
+    fib[152:154] = struct.pack("<H", 93)        # cbRgFcLcb: пар хватает до индекса 51
+    fib[154 + 51 * 8:154 + 51 * 8 + 8] = struct.pack("<II", 0, len(sttb))
     body = "Текст документа.".encode("cp1251")
-    word_document = (fib.ljust(0x800, b"\x00") + body).ljust(4608, b"\x00")
+    word_document = (bytes(fib) + body).ljust(4608, b"\x00")
     summary, docsum = _ole_props_streams(user_items, 1200)
     compobj = _ole_compobj("Microsoft Word 97-2003 Document", "MSWordDoc",
                            "Word.Document.8", _CLSID_WORD8)
@@ -1217,7 +1234,7 @@ def _word_streams(user_items):
             ("\x05DocumentSummaryInformation", docsum),
             ("\x01CompObj", compobj),
             ("WordDocument", word_document),
-            ("1Table", b"\x00" * 4096)]
+            ("1Table", sttb.ljust(4096, b"\x00"))]
 
 
 def make_doc(dir):
@@ -1241,12 +1258,13 @@ def make_doc(dir):
                    DOC_TEMPLATE, DOC_LAST_SAVED_BY, DOC_APPNAME, DOC_CATEGORY,
                    DOC_MANAGER, DOC_COMPANY, DOC_MSIP_EMAIL, DOC_CUSTOM_DEPT,
                    "2023-03-05 14:07:00", "2024-03-06 09:42:11",
-                   "2024-03-06 09:30:00", str(DOC_EDIT_SECONDS), "2024-03-06 09:43:07"],
+                   "2024-03-06 09:30:00", str(DOC_EDIT_SECONDS), "2024-03-06 09:43:07",
+                   *DOC_RMARK],
         "identity": [DOC_AUTHOR, DOC_LAST_SAVED_BY, DOC_COMPANY, DOC_MANAGER,
-                     DOC_MSIP_EMAIL, DOC_CUSTOM_DEPT],
+                     DOC_MSIP_EMAIL, DOC_CUSTOM_DEPT, *DOC_RMARK],
         "environment": [DOC_TEMPLATE],
-        "signals": ["producer", "hazard"],
-        "not_signals": ["ai", "scrubbed", "inconsistent"],
+        "signals": ["producer", "hazard", "inconsistent"],
+        "not_signals": ["ai", "scrubbed"],
         # olefile.get_metadata(): строки bytes в cp1251, даты datetime, время
         # правки целое число секунд.
         "ole_meta": _doc_ole_meta(),
