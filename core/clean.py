@@ -63,7 +63,9 @@ from .clean_image import clean_image
 from .clean_ooxml import clean_ooxml
 from .clean_odf import clean_odf
 from .clean_pdf import clean_pdf
+from .clean_regen import OUTPUT_FMT, clean_regen, find_soffice
 from .clean_rtf import clean_rtf
+from .lint import detect
 from .cleanmodel import ACT_TITLE, Act, CleanResult, Profile
 from .inspect import inspect_file
 from .model import Risk, clip
@@ -154,7 +156,9 @@ class DispatchResult(CleanResult):
     # cp:lastModifiedBy вместе сами являются признаком, а любая альтернатива
     # либо течёт, либо подделывает провенанс. Настоящее решение -- Regenerate
     # (фаза 4), то есть пересоздание файла стоковым приложением.
-    new_signals: list = dataclasses.field(default_factory=list)
+    # Оценка по сигналам результата. none -- инспектор не видит обработки.
+    detect: str = ""
+    detect_why: list = dataclasses.field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -257,11 +261,6 @@ def _run(res, tmpdirs, src, dst, profile, keep, force_signed, verify) -> None:
         res.err("Неизвестный профиль чистки.")
         return
     res.profile = prof.value
-    if prof is Profile.REGENERATE:
-        res.planned_phase = 4
-        res.err("Профиль regenerate (пересоздание через LibreOffice) -- фаза 4, пока не "
-                "реализован. Файл НЕ очищен, выходной файл не создан.")
-        return
 
     fmt = sniff.sniff(src)
     res.fmt = fmt
@@ -285,10 +284,24 @@ def _run(res, tmpdirs, src, dst, profile, keep, force_signed, verify) -> None:
         return
 
     fam = sniff.family(fmt)
-    cleaner = _CLEANERS.get(fam)
-    if cleaner is None:
-        _refuse(res, fmt, fam, size)
-        return
+    if prof is Profile.REGENERATE:
+        if fmt not in OUTPUT_FMT or not find_soffice():
+            res.planned_phase = 4
+            if fmt not in OUTPUT_FMT:
+                res.err("Профиль regenerate (пересоздание через LibreOffice) для формата «%s» "
+                        "не применяется, фаза 4. Файл НЕ очищен, выходной файл не создан."
+                        % sniff.pretty(fmt))
+            else:
+                res.err("Профиль regenerate требует LibreOffice, его на машине нет, фаза 4. "
+                        "Чистка на месте не подменяется: незаметность была бы другой. "
+                        "Файл НЕ очищен, выходной файл не создан.")
+            return
+        cleaner = clean_regen
+    else:
+        cleaner = _CLEANERS.get(fam)
+        if cleaner is None:
+            _refuse(res, fmt, fam, size)
+            return
 
     # Временный каталог рядом с dst: тогда os.replace атомарен (тот же том), а
     # существующий dst при отказе остаётся нетронутым.
@@ -312,10 +325,11 @@ def _run(res, tmpdirs, src, dst, profile, keep, force_signed, verify) -> None:
     if verify:
         before = inspect_file(src, max_size=MAX_FILE)
         after = inspect_file(out, max_size=MAX_FILE)
-        if after.fmt != fmt:
+        if after.fmt != (sub.fmt if prof is Profile.REGENERATE else fmt):
             res.err("Результат определяется как %s, а не %s: файл не выдан." %
-                    (sniff.pretty(after.fmt), sniff.pretty(fmt)))
+                    (sniff.pretty(after.fmt), sniff.pretty(sub.fmt if prof is Profile.REGENERATE else fmt)))
             return
+        res.fmt = after.fmt
         res.critical_before, res.sensitive_before = before.critical, before.sensitive
         res.critical_after, res.sensitive_after = after.critical, after.sensitive
         res.survived = survived_values(before, after)
@@ -336,6 +350,7 @@ def _run(res, tmpdirs, src, dst, profile, keep, force_signed, verify) -> None:
                            if (sg.kind, sg.detail) not in was_sig
                            and sg.kind in ("scrubbed", "ai")
                            and sg.kind not in was_kinds]
+        res.detect, res.detect_why = detect(after)
         res.verified = True
 
     # Вход не изменился за время работы: иначе «до» и «после» сравнивали разные байты.
