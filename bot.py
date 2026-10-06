@@ -29,6 +29,7 @@ WebP, GIF, docx, xlsx, pptx). Для остальных бот прямо пиш
 from __future__ import annotations
 
 import asyncio
+import functools
 import html
 import logging
 import os
@@ -38,8 +39,9 @@ import shutil
 import sys
 import tempfile
 import time
+import zipfile
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -56,7 +58,7 @@ from aiogram.types import (
 )
 
 import config
-from core import cleanreport
+from core import cleanreport, sniff
 from core.cleanmodel import CleanResult, Profile
 from core.model import clip
 from core.report import render_telegram
@@ -75,6 +77,12 @@ except ImportError:
     # инспектором и честно пишет, что чистки нет -- кнопок не показывает.
     clean_file = None
 
+try:
+    from core.clean_batch import clean_batch, render_report as render_batch_report
+except ImportError:
+    # Нет пакетного модуля: одиночная чистка работает, ZIP бот честно не берёт.
+    clean_batch = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tgbot_metadata")
 
@@ -87,6 +95,11 @@ _INSPECT_TIMEOUT = 120  # секунд, см. _in_thread ниже
 # clean_file = чистка + две инспекции (до и после) + две сверки sha256,
 # поэтому потолок втрое выше, чем у одной инспекции.
 _CLEAN_TIMEOUT = 360
+# Пакет = до MAX_FILES полных чисток подряд (а на «Пересоздать» -- запусков
+# LibreOffice), поэтому потолок на порядок выше одиночного.
+_BATCH_TIMEOUT = 1800
+# Пакетный отчёт короче этого числа сообщений идёт в чат, длиннее -- документом.
+_BATCH_CHAT_PARTS = 4
 
 # ponytail: состояние кнопок живёт в памяти процесса и пропадает при
 # перезапуске бота (нажатие после рестарта = "кнопка устарела"). Для
@@ -113,15 +126,30 @@ _SEND_PAUSE = 0.35
 _NEUTRAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,40}$")
 
 _PROFILES = {"cl:stealth": Profile.STEALTH, "cl:paranoid": Profile.PARANOID,
-             "cl:regen": Profile.REGENERATE}
+             "cl:regen": Profile.REGENERATE, "bt:stealth": Profile.STEALTH,
+             "bt:paranoid": Profile.PARANOID, "bt:regen": Profile.REGENERATE}
+
+# Whitelist пользователя (keep). Ключи -- ровно то, что понимают чистильщики:
+# PDF сверяет label/location ("/Author", "dc:creator"), OOXML -- "dc:title",
+# ODF и RTF -- локальные имена ("creator", "author"), картинки -- "icc".
+# Подпись, ключи keep, подстроки русских/английских подписей полей из отчёта
+# инспектора (нужны, чтобы отличить выжившее ПО ВЫБОРУ от выжившего по недочёту).
+_KEEP_OPTS = {
+    "title": ("заголовок документа", {"/Title", "dc:title", "title"},
+              ("заголовок", "название", "title")),
+    "author": ("автора", {"/Author", "dc:creator", "author", "creator", "initial-creator"},
+               ("автор", "creator", "author", "кто сохранял", "lastmodifiedby")),
+    "icc": ("ICC-профиль", {"icc"}, ()),
+}
+_IMG_FMT = ("jpeg", "png", "webp", "gif")
 _EXT = {"pdf": ".pdf", "jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif",
         "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "rtf": ".rtf",
-        "odt": ".odt", "ods": ".ods", "odp": ".odp"}
+        "odt": ".odt", "ods": ".ods", "odp": ".odp", "zip": ".zip"}
 # Основа нейтрального имени: родовое слово по типу файла, без картинки как
 # умолчания -- иначе docx уехал бы с именем image_*.docx.
 _STEM = {"pdf": "document", "docx": "document", "xlsx": "spreadsheet",
          "pptx": "presentation", "rtf": "document", "odt": "document",
-         "ods": "spreadsheet", "odp": "presentation"}
+         "ods": "spreadsheet", "odp": "presentation", "zip": "archive"}
 
 HELP_TEXT = (
     "Это инспектор и чистильщик метаданных документов.\n\n"
@@ -137,6 +165,11 @@ HELP_TEXT = (
     "У docx/xlsx/pptx полной незаметности не даёт даже Stealth: пустой автор "
     "сам по себе признак чистки. Бот честно пишет это в отчёте, а не "
     "умалчивает.\n\n"
+    "Перед чисткой можно переключателями «Сохранить» оставить заголовок, "
+    "автора или ICC-профиль. Это ваш осознанный выбор: файл с сохранённым "
+    "автором <b>не будет чистым</b>, и бот так и скажет.\n\n"
+    "Пришлите <b>ZIP</b> -- бот почистит каждый документ внутри и вернёт архив "
+    "только с почищенным и проверенным (отчёт по каждому файлу будет в чате).\n\n"
     "Для остальных форматов (doc/xls/ppt) чистки <b>пока нет</b>: "
     "бот так и напишет и укажет, в какой фазе она запланирована. Такой файл "
     "он не меняет.\n\n"
@@ -158,7 +191,24 @@ CHOICE_TEXT = (
     "• <b>Пересоздать</b> -- сохранить заново через LibreOffice. Следа чистки "
     "нет, потому что файл никто не чистил, но приложение становится "
     "LibreOffice и вёрстка может измениться. Нет LibreOffice -- отказ, "
-    "а не другая чистка."
+    "а не другая чистка. Переключатели «Сохранить» с пересозданием не "
+    "работают: бот откажет, а не проигнорирует их молча.\n\n"
+    "<i>Переключатели «Сохранить»: поле остаётся как было, поэтому файл НЕ "
+    "будет чистым -- отчёт назовёт это вашим выбором.</i>"
+)
+
+BATCH_TEXT = (
+    "📦 <b>Это ZIP-архив: {n}</b>. Бот почистит каждый файл внутри "
+    "(вложенные архивы не разворачиваются) и пришлёт новый архив <b>только с "
+    "теми, чья чистота доказана</b> повторной инспекцией. Не очищенное в "
+    "архив не попадает: его не отдать по ошибке как чистое. Отчёт по каждому "
+    "файлу -- в чате.\n\n"
+    "• <b>Stealth</b> / <b>Paranoid</b> -- как для одиночного файла.\\n"
+    "• <b>Пересоздать</b> -- через LibreOffice, файл за файлом: долго.\\n"
+    "• Имена файлов тоже метаданные: «нейтральные» -- doc_0001.docx и т.п. "
+    "(соответствие номеров именам будет только в чате).\\n"
+    "• «Сохранить»: файл с сохранённым полем не считается чистым и в архив "
+    "не попадёт -- такие файлы чистите по одному."
 )
 
 
@@ -295,6 +345,8 @@ class _Pending:
     fmt: str
     user_id: int | None
     expires: float
+    keep: set = field(default_factory=set)   # ключи _KEEP_OPTS, которые просил сохранить пользователь
+    neutral: bool = True                     # только для ZIP: нейтральные имена внутри архива
 
 
 _pending: "OrderedDict[tuple, _Pending]" = OrderedDict()
@@ -325,12 +377,65 @@ def _e(value, cap: int = 40) -> str:
     return html.escape(clip(value, cap), quote=False)
 
 
-def _verdict(res) -> tuple:
+def _opts_for(fmt: str) -> tuple:
+    """Какие переключатели «Сохранить» имеют смысл для формата."""
+    return ("icc",) if fmt in _IMG_FMT else (
+        ("title", "author", "icc") if fmt == "zip" else ("title", "author"))
+
+
+def _keep_keys(ids) -> set | None:
+    """Ключи переключателей -> множество keep для чистильщика (None, если пусто)."""
+    keys = set()
+    for i in ids:
+        keys |= _KEEP_OPTS[i][1]
+    return keys or None
+
+
+def _keep_names(ids) -> str:
+    return ", ".join(_KEEP_OPTS[i][0] for i in _KEEP_OPTS if i in ids)
+
+
+def _by_choice(sv, ids) -> bool:
+    """Исходное значение выжило ПО ВЫБОРУ пользователя: и поле-источник, и место,
+    где оно найдено в результате, -- это поле включённого переключателя. Автор,
+    найденный в заголовке при включённом «сохранить автора», сюда не попадает:
+    это недочистка, а не выбор. Чистильщики ODF и RTF записей KEPT про whitelist
+    не пишут, а у OOXML в такой записи пустое значение, поэтому по actions выбор
+    не определить -- сверяем по подписям полей."""
+    label, found = str(sv.label).casefold(), str(sv.found_at).casefold()
+    for i in ids:
+        pats = _KEEP_OPTS[i][2]
+        if any(p in label for p in pats) and any(p in found for p in pats):
+            return True
+    return False
+
+
+_DETECT_RU = {"none": "инспектор признаков обработки не видит",
+              "noticeable": "файл выглядит чищеным: факт обработки виден",
+              "obvious": "файл опознаётся как обработанный"}
+
+
+def _detect_line(res) -> str:
+    """Оценка заметности чистки (core/lint.py) для случаев, где cleanreport её не
+    печатает: он выводит ОЦЕНКА только в ветке «выживших нет»."""
+    d = getattr(res, "detect", "")
+    if d not in _DETECT_RU:
+        return ""
+    return "👁 <b>Заметность чистки</b>: %s." % _DETECT_RU[d]
+
+
+def _verdict(res, keep=()) -> tuple:
     """(уровень, HTML): вердикт ДИСПЕТЧЕРА по значениям. Отчёт cleanreport судит
     по счётчику critical_after и про survived не знает: он может написать «ЧИСТО»
     там, где исходное имя автора пережило чистку внутри заголовка. Поэтому при
-    любых сомнениях бот говорит сам и ставит это ПЕРЕД отчётом."""
+    любых сомнениях бот говорит сам и ставит это ПЕРЕД отчётом.
+
+    keep -- ключи переключателей «Сохранить». Выжившее по этому выбору -- не
+    недочистка, но и не «чисто»: уровень "kept", файл НЕ называется чистым."""
+    keep = [k for k in _KEEP_OPTS if k in set(keep)]
     survived = list(getattr(res, "survived", None) or [])
+    mine = [sv for sv in survived if _by_choice(sv, keep)]
+    survived = [sv for sv in survived if not _by_choice(sv, keep)]
     gaps = list(getattr(res, "gaps", None) or [])
     old = [r for r in (getattr(res, "residual", None) or []) if not r[2]]
     lines = []
@@ -343,27 +448,51 @@ def _verdict(res) -> tuple:
             lines.append("• %s (%s) → найдено: %s" % (_e(sv.label), _e(sv.location), _e(sv.found_at)))
         if len(survived) > 5:
             lines.append("… и ещё %d" % (len(survived) - 5))
-    elif old:
+    elif old and not mine:
         lines.append("⚠ В результате остались критичные находки с прежними значениями: %d. "
                      "Короткие значения (до 5 символов) проверка по подстроке не сравнивает, "
                      "смотрите отчёт ниже." % len(old))
     if gaps:
         lines.append("⚠ Инспектор не разобрал часть файла (%d): доказательство неполное, в "
                      "неразобранном могло остаться." % len(gaps))
+    if mine:
+        # Это не скрывается и не подаётся как провал: пользователь так попросил.
+        head = ("📌 <b>Сохранено по вашему выбору (%s): исходных значений в файле -- %d.</b> "
+                "Это не недочистка: вы просили эти поля оставить. Но файл поэтому <b>НЕ чистый</b>, "
+                "и отправлять его дальше можно только сознательно. Отчёт ниже может написать «НЕ "
+                "ЧИСТО»: его вердикт считается без учёта вашего списка." % (_keep_names(keep), len(mine)))
+        lines.insert(0, head)
+        for sv in mine[:5]:
+            lines.append("• %s (%s)" % (_e(sv.label), _e(sv.location)))
     if not lines and res.clean:
         note = ("Повторная инспекция: ни одно исходное значение личности и окружения "
                 "в результате не найдено.")
         if getattr(res, "critical_after", 0) > 0:
             note += (" Критичное, что инспектор ещё видит, -- новые значения (например, "
                      "перегенерированный trailer /ID): с исходными они не связаны.")
+        if keep:
+            note += " Вы просили сохранить: %s." % _keep_names(keep)
         return "ok", note
-    return ("bad" if survived else "warn"), "\n".join(lines or ["⚠ Чистота не доказана."])
+    # Отчёт cleanreport при выживших оценку заметности не печатает -- добавляем сами.
+    det = _detect_line(res)
+    if det and (mine or survived):
+        lines.append(det)
+    if survived:
+        level = "bad"
+    elif mine and not gaps and getattr(res, "verified", False):
+        level = "kept"
+    else:
+        level = "warn"
+    return level, "\n".join(lines or ["⚠ Чистота не доказана."])
 
 
-def _caption(level: str, profile: str, note: str) -> str:
+def _caption(level: str, profile: str, note: str, keep=()) -> str:
     if level == "ok":
         return ("✅ Профиль <b>%s</b>. %s Имя файла нейтральное, исходное не использовано."
                 % (profile, note))
+    if level == "kept":
+        return ("📌 Профиль <b>%s</b>: по вашему выбору сохранено: %s. Файл НЕ чистый: "
+                "эти поля остались как были." % (profile, _keep_names(keep)))
     if level == "warn":
         return "⚠ Профиль <b>%s</b>: чистота НЕ доказана, прочтите предупреждение выше." % profile
     return ("⛔ ПОЧИЩЕНО НЕ ПОЛНОСТЬЮ: часть исходных значений осталась в файле. "
@@ -382,16 +511,32 @@ def _no_clean_text(fmt: str) -> str:
             "не отправляйте его дальше как почищенный." % html.escape(why, quote=False))
 
 
-def _keyboard() -> InlineKeyboardMarkup:
+def _keyboard(item: "_Pending | None" = None) -> InlineKeyboardMarkup:
+    """Переключатели «Сохранить» (по формату) -> профили -> «Не чистить».
+    ZIP: профили идут в пакетный режим (bt:), плюс переключатель имён."""
+    fmt = item.fmt if item else ""
+    batch = fmt == "zip"
+    pre = "bt" if batch else "cl"
+
     def row(text, data):
         return [InlineKeyboardButton(text=text, callback_data=data)]
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        row("Почистить (Stealth)", "cl:stealth"),
-        row("Почистить (Paranoid)", "cl:paranoid"),
-        row("Пересоздать (LibreOffice)", "cl:regen"),
-        row("Не чистить", "cl:no"),
-    ])
+    rows = []
+    for opt in _opts_for(fmt):
+        on = bool(item) and opt in item.keep
+        rows.append(row("%s Сохранить: %s" % ("☑" if on else "☐", _KEEP_OPTS[opt][0]), "kp:" + opt))
+    if batch:
+        rows.append(row("Имена в архиве: %s" % ("нейтральные" if (not item or item.neutral)
+                                                else "исходные"), "kp:nn"))
+        rows += [row("Почистить всё (Stealth)", pre + ":stealth"),
+                 row("Почистить всё (Paranoid)", pre + ":paranoid"),
+                 row("Пересоздать всё (LibreOffice)", pre + ":regen")]
+    else:
+        rows += [row("Почистить (Stealth)", pre + ":stealth"),
+                 row("Почистить (Paranoid)", pre + ":paranoid"),
+                 row("Пересоздать (LibreOffice)", pre + ":regen")]
+    rows.append(row("Не чистить", "cl:no"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ============================================================================
@@ -451,6 +596,13 @@ async def _inspect_and_reply(message: Message, doc: Document) -> None:
             file_path = os.path.join(tmp_dir, "input.bin")
             await message.bot.download(doc, destination=file_path, timeout=60)
 
+            if sniff.sniff(file_path) == "zip":
+                # ZIP общего вида: инспектировать нечего (метка времени записи --
+                # не находка о документе), зато можно почистить содержимое пакетом.
+                await _quiet(status.delete())
+                await _offer_batch(message, doc, file_path)
+                return
+
             if inspect_file is None:
                 await status.edit_text(
                     "Ядро разбора (core/inspect.py) пока не готово -- его "
@@ -509,15 +661,31 @@ async def _offer_cleaning(message: Message, fmt: str, doc: Document) -> None:
     if clean_file is None or fmt not in cleanreport.CLEANABLE:
         await message.answer(_no_clean_text(fmt))
         return
-    sent = await message.answer(CHOICE_TEXT, reply_markup=_keyboard())
     user = message.from_user
-    _remember(
-        (sent.chat.id, sent.message_id),
-        _Pending(doc.file_id, fmt, user.id if user else None, time.monotonic() + _PENDING_TTL),
-    )
+    item = _Pending(doc.file_id, fmt, user.id if user else None, time.monotonic() + _PENDING_TTL)
+    sent = await message.answer(CHOICE_TEXT, reply_markup=_keyboard(item))
+    _remember((sent.chat.id, sent.message_id), item)
 
 
-@router.callback_query(F.data.in_(("cl:stealth", "cl:paranoid", "cl:regen", "cl:no")))
+async def _offer_batch(message: Message, doc: Document, path: str) -> None:
+    """ZIP: показать, сколько файлов внутри, и предложить пакетную чистку."""
+    if clean_batch is None:
+        await message.answer("⛔ <b>Пакетной чистки нет</b>: модуль core/clean_batch.py не "
+                             "загрузился. ZIP не чищен и не изменён.")
+        return
+    try:
+        with zipfile.ZipFile(path) as zf:
+            n = sum(1 for i in zf.infolist() if not i.filename.endswith(("/", "\\")))
+    except Exception:  # noqa: BLE001 -- битый каталог: чистильщик сам откажет внятно
+        n = -1
+    head = "файлов внутри: %d" % n if n >= 0 else "каталог архива не читается, чистка, скорее всего, откажет"
+    item = _Pending(doc.file_id, "zip", message.from_user.id if message.from_user else None,
+                    time.monotonic() + _PENDING_TTL)
+    sent = await message.answer(BATCH_TEXT.format(n=head), reply_markup=_keyboard(item))
+    _remember((sent.chat.id, sent.message_id), item)
+
+
+@router.callback_query(F.data.startswith(("cl:", "bt:", "kp:")))
 async def on_clean_choice(cb: CallbackQuery) -> None:
     """Нажатие кнопки. Не падает никогда."""
     async def ack(text=None, alert=False):
@@ -543,14 +711,41 @@ async def on_clean_choice(cb: CallbackQuery) -> None:
         if item.user_id is not None and cb.from_user.id != item.user_id:
             await ack("Эта кнопка не для вас.", True)
             return
-        # Первое нажатие забирает запись: двойной тап не запустит чистку дважды.
-        del _pending[key]
+        if cb.data.startswith("kp:"):
+            # Переключатель: запись остаётся (и её TTL не продлевается), меняется клавиатура.
+            opt = cb.data[3:]
+            if opt == "nn" and item.fmt == "zip":
+                item.neutral = not item.neutral
+            elif opt in _opts_for(item.fmt):
+                item.keep ^= {opt}
+            else:
+                await ack()
+                return
+            await _quiet(msg.edit_reply_markup(reply_markup=_keyboard(item)))
+            await ack()
+            return
         if cb.data == "cl:no":
+            del _pending[key]
             await ack()
             await _say(msg, "Хорошо, файл не чищу. Он не сохранялся на сервере бота.")
             return
+        profile = _PROFILES.get(cb.data)
+        if profile is None:
+            await ack()
+            return
+        if profile is Profile.REGENERATE and item.keep:
+            # Пересоздание whitelist не понимает (clean_regen его отбрасывает).
+            # Молча выдать файл без сохранённого -- обмануть пользователя: говорим прямо.
+            await ack("Пересоздание не умеет «Сохранить»: LibreOffice пишет файл заново. "
+                      "Снимите переключатели или выберите Stealth/Paranoid.", True)
+            return
+        # Первое нажатие забирает запись: двойной тап не запустит чистку дважды.
+        del _pending[key]
         await ack("Чищу…")
-        await _clean_and_reply(msg, item, _PROFILES[cb.data])
+        if cb.data.startswith("bt:"):
+            await _batch_and_reply(msg, item, profile)
+        else:
+            await _clean_and_reply(msg, item, profile)
     except Exception as exc:
         log.error("сбой в обработчике кнопки: %s", type(exc).__name__)
         log.debug("подробности сбоя", exc_info=True)
@@ -574,7 +769,8 @@ async def _clean_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
             dst = os.path.join(tmp_dir, "out", "out.bin")
             await msg.bot.download(item.file_id, destination=src, timeout=60)
             size_in = os.path.getsize(src)
-            res = await _in_thread(tmp_dir, _CLEAN_TIMEOUT, clean_file, src, dst, profile)
+            res = await _in_thread(tmp_dir, _CLEAN_TIMEOUT, clean_file, src, dst, profile,
+                                   _keep_keys(item.keep))
             name = _neutral_name(res.fmt if res.fmt not in ("", "unknown") else item.fmt)
 
         ok = bool(res.ok)
@@ -588,11 +784,12 @@ async def _clean_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
             len(res.actions), time.monotonic() - started,
         )
 
-        level, note = _verdict(res) if ok else ("bad", "")
+        level, note = _verdict(res, item.keep) if ok else ("bad", "")
         if ok:
             await _quiet(msg.delete())
             if level != "ok":
                 await msg.answer(note)  # предупреждение раньше отчёта, который может писать «ЧИСТО»
+                # (и выбор пользователя тоже называем до отчёта, а не прячем в нём)
         else:
             await _say(msg, "⛔ <b>Файл НЕ почищен</b> -- чистка не удалась, почищенной копии нет, "
                             "бот никакой файл не отправляет. Причина и подробности ниже.")
@@ -601,7 +798,7 @@ async def _clean_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
         if ok:
             await msg.answer_document(
                 FSInputFile(dst, filename=name),
-                caption=_caption(level, pname, note),
+                caption=_caption(level, pname, note, item.keep),
                 disable_content_type_detection=True,  # документ, не фото: ничего не пережимается
             )
     except _Timeout:
@@ -616,6 +813,125 @@ async def _clean_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
         log.debug("подробности сбоя", exc_info=True)
         await _say(msg, "Не получилось почистить файл из-за внутренней ошибки. Почищенный файл "
                         "НЕ отправлен: не считайте файл почищенным. Исходный файл не изменён и "
+                        "не сохранён на сервере бота.")
+    finally:
+        if tmp_dir:
+            _rmtree(tmp_dir)
+
+
+def _chunk_pre(text: str, limit: int = 3500) -> list:
+    """Текст отчёта -> сообщения <pre> не длиннее limit (после экранирования).
+    Строки недоверенные (имена из архива): экранируем каждую."""
+    parts, cur = [], ""
+    for line in text.splitlines():
+        line = html.escape(line[:400], quote=False)
+        if cur and len(cur) + len(line) + 1 > limit:
+            parts.append("<pre>%s</pre>" % cur)
+            cur = ""
+        cur += ("\n" if cur else "") + line
+    if cur:
+        parts.append("<pre>%s</pre>" % cur)
+    return parts
+
+
+def _batch_detect_line(res) -> str:
+    """Сводка заметности следов чистки по очищенным файлам пакета."""
+    d = [i.detect for i in res.items if i.status == "cleaned"]
+    if not d:
+        return ""
+    return ("👁 <b>Заметность чистки</b> (очищено %d): не видны -- %d, заметны -- %d, "
+            "очевидны -- %d." % (len(d), d.count("none"), d.count("noticeable"), d.count("obvious")))
+
+
+async def _batch_and_reply(msg: Message, item: _Pending, profile: Profile) -> None:
+    """ZIP -> clean_batch в потоке -> отчёт по каждому файлу -> архив. Не падает
+    никогда. Архив уходит только если в нём есть очищенное и он влезает в лимит
+    отправки Bot API; не очищенное в архив не входит (решение clean_batch)."""
+    pname = profile.value.capitalize()
+    tmp_dir = None
+    started = time.monotonic()
+    try:
+        await _say(msg, "📦 Чищу архив, профиль <b>%s</b>: это может занять минуты…" % pname)
+        async with _SEMAPHORE:
+            tmp_dir = tempfile.mkdtemp(prefix="tgclean_")
+            src = os.path.join(tmp_dir, "input.zip")
+            dst = os.path.join(tmp_dir, "out", "out.zip")
+            await msg.bot.download(item.file_id, destination=src, timeout=120)
+            size_in = os.path.getsize(src)
+            res = await _in_thread(tmp_dir, _BATCH_TIMEOUT, functools.partial(
+                clean_batch, src, dst, profile, _keep_keys(item.keep),
+                neutral_names=item.neutral))
+
+        t = res.totals
+        size_out = os.path.getsize(dst) if res.ok and os.path.isfile(dst) else 0
+        log.info("пакетная чистка: профиль=%s ok=%s файлов=%d очищено=%d не_очищено=%d "
+                 "размер_до=%d размер_после=%d время=%.1fс", profile.value, res.ok,
+                 t.get("total", 0), t.get("cleaned", 0), t.get("not_cleaned", 0),
+                 size_in, size_out, time.monotonic() - started)
+
+        if not res.ok:
+            why = html.escape(clip(res.errors[0] if res.errors else "причина не указана", 300),
+                              quote=False)
+            await _say(msg, "⛔ <b>Архив НЕ почищен</b> -- выходного архива нет, бот ничего не "
+                            "отправляет. Причина: %s" % why)
+            return
+
+        await _quiet(msg.delete())
+        text = render_batch_report(res, with_names=True)
+        parts = _chunk_pre(text)
+        if len(parts) <= _BATCH_CHAT_PARTS:
+            await _send_parts(msg, parts, "python -m core.clean_batch")
+        else:
+            # Отчёт на сотни файлов в чат не лезет (429 от Telegram): сводка + полный документом.
+            head = text.split("\n\n", 1)[0]
+            await msg.answer("<pre>%s</pre>\nПодробно по каждому файлу -- документом ниже."
+                             % html.escape(head, quote=False))
+            rep = os.path.join(tmp_dir, "report.txt")
+            with open(rep, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            await msg.answer_document(
+                FSInputFile(rep, filename="report_%s.txt" % secrets.token_hex(3)),
+                caption="Отчёт по каждому файлу (с исходными именами).")
+
+        det = _batch_detect_line(res)
+        if det:
+            await msg.answer(det)
+        if item.keep and t.get("unproven"):
+            await msg.answer(
+                "📌 Вы просили сохранить: %s. Файлов, не включённых в архив из-за чистоты, "
+                "не доказанной по этой причине: %d -- это следствие вашего выбора. Очистите их "
+                "по одному, если нужно." % (_keep_names(item.keep), t["unproven"]))
+        if not t.get("cleaned"):
+            await msg.answer("⛔ <b>Ни один файл не очищен</b> -- архива с результатом нет. "
+                             "Причины по каждому файлу -- в отчёте выше.")
+            return
+        if size_out > config.MAX_SEND_BYTES:
+            await msg.answer(
+                "⛔ <b>Результат не отправлен</b>: архив весит %.1f МБ, а Telegram Bot API не даёт "
+                "ботам отправлять файлы крупнее %d МБ (это лимит API, а не бота). Файлы очищены, но "
+                "доставить их нельзя: разбейте исходный архив на части и пришлите снова."
+                % (size_out / (1024 * 1024), config.MAX_SEND_BYTES // (1024 * 1024)))
+            return
+        if res.all_cleaned:
+            cap = ("✅ Профиль <b>%s</b>: очищено и проверено файлов -- %d из %d. Имя архива "
+                   "нейтральное." % (pname, t["cleaned"], t["total"]))
+        else:
+            cap = ("⚠ Профиль <b>%s</b>: в архиве только очищенное и проверенное -- %d из %d. "
+                   "Остальные <b>НЕ включены</b> и у вас в исходном виде: см. отчёт." %
+                   (pname, t["cleaned"], t["total"]))
+        await msg.answer_document(
+            FSInputFile(dst, filename=_neutral_name("zip")), caption=cap,
+            disable_content_type_detection=True)
+    except _Timeout:
+        tmp_dir = None  # каталог убирает сам поток, когда закончит
+        await _say(msg, "Пакетная чистка не уложилась в {} мин и прервана. Архива с результатом "
+                        "нет: ничего не отправляйте как почищенное. Разбейте архив на части и "
+                        "пришлите снова.".format(_BATCH_TIMEOUT // 60))
+    except Exception as exc:
+        log.error("сбой при пакетной чистке: %s", type(exc).__name__)
+        log.debug("подробности сбоя", exc_info=True)
+        await _say(msg, "Не получилось почистить архив из-за внутренней ошибки. Архив с результатом "
+                        "НЕ отправлен: не считайте файлы почищенными. Исходный архив не изменён и "
                         "не сохранён на сервере бота.")
     finally:
         if tmp_dir:
@@ -702,7 +1018,7 @@ async def _selftest() -> int:
             self.text, self.markup = text, None
 
         async def edit_reply_markup(self, **kw):
-            self.markup = None
+            self.markup = kw.get("reply_markup")
 
         async def delete(self):
             self.events.append(("deleted", self))
@@ -763,8 +1079,9 @@ async def _selftest() -> int:
         src, exp, ev, ch = await send(fx.make_pdf, "pdf")
         before = sha(bot.files["pdf"])
         btns = [b.text for r in ch.markup.inline_keyboard for b in r] if ch else []
-        check("кнопки: Stealth, Paranoid, Пересоздать, Не чистить",
-              btns == ["Почистить (Stealth)", "Почистить (Paranoid)",
+        check("кнопки: переключатели «Сохранить», Stealth, Paranoid, Пересоздать, Не чистить",
+              btns == ["☐ Сохранить: заголовок документа", "☐ Сохранить: автора",
+                       "Почистить (Stealth)", "Почистить (Paranoid)",
                        "Пересоздать (LibreOffice)", "Не чистить"], btns)
         check("профили объяснены прямо в сообщении",
               ch and "Stealth" in ch.text and "оставляет" in ch.text and "Paranoid" in ch.text
@@ -858,7 +1175,7 @@ async def _selftest() -> int:
                   "НЕ почищен" in last and "только инспектируется" in last and "фазе %d" % phase in last, last)
 
         print("4. ok=False: файл не отправляется")
-        def refuse(s, d, p):
+        def refuse(s, d, p, keep=None):
             r = core_clean.DispatchResult(s, d, "pdf", "stealth")
             r.err("тест: отказ чистильщика")
             return r
@@ -870,7 +1187,7 @@ async def _selftest() -> int:
         check("каталоги убраны", left() == base)
 
         print("5. таймаут: поток дорабатывает, каталог убирается после него")
-        def slow(s, d, p):
+        def slow(s, d, p, keep=None):
             time.sleep(1.0)
             os.makedirs(os.path.dirname(d), exist_ok=True)
             with open(d, "wb") as fh:
@@ -886,7 +1203,7 @@ async def _selftest() -> int:
         g["_CLEAN_TIMEOUT"] = saved[1]
 
         print("6. исключение в чистильщике: человеческий текст, без утечки")
-        def boom(s, d, p):
+        def boom(s, d, p, keep=None):
             raise RuntimeError("СЕКРЕТНОЕ-ЗНАЧЕНИЕ-ИЗ-ФАЙЛА")
         g["clean_file"] = boom
         _, _, ev, ch = await send(fx.make_pdf, "pdf6")
@@ -988,11 +1305,345 @@ async def _selftest() -> int:
         check("о потере сказано, и отчёт назван неполным, а не пустым",
               any("дошёл не полностью" in s and "1 из 3" in s for s in fl.sent), fl.sent)
         g["_SEND_PAUSE"] = _SEND_PAUSE
+
+        print("11. «Пересоздать»: профиль REGENERATE, честный отказ без LibreOffice, файл при его наличии")
+        real_clean, real_soffice = saved[0], core_clean.find_soffice
+        calls = []
+
+        def spy(s, d, p, keep=None):
+            calls.append((p, keep))
+            return real_clean(s, d, p, keep)
+
+        g["clean_file"] = spy
+        core_clean.find_soffice = lambda: None          # LibreOffice «не установлен»
+        try:
+            _, _, ev, ch = await send(fx.make_docx, "dx11a")
+            await click(ch, "cl:regen")
+            check("нажатие cl:regen вызвало clean_file ровно один раз и именно с REGENERATE",
+                  len(calls) == 1 and calls[0][0] is Profile.REGENERATE, calls)
+            check("нет LibreOffice: файл НЕ выдан, сказано «НЕ почищен»",
+                  not docs(ev) and "НЕ почищен" in ch.text, ch.text)
+            check("отказ называет причину (нужен LibreOffice), а не молча подменяет профиль",
+                  any("LibreOffice" in t and ("требует" in t or "нет" in t) for t in texts(ev)),
+                  [t[:160] for t in texts(ev)][-2:])
+            check("ни Stealth, ни Paranoid в этом сценарии не запускались",
+                  all(c[0] is Profile.REGENERATE for c in calls), calls)
+            check("каталоги убраны", left() == base)
+        finally:
+            core_clean.find_soffice = real_soffice
+        calls.clear()
+        if real_soffice():
+            src, _, ev, ch = await send(fx.make_docx, "dx11b")
+            await click(ch, "cl:regen")
+            d = docs(ev)
+            check("есть LibreOffice: clean_file вызван с REGENERATE",
+                  len(calls) == 1 and calls[0][0] is Profile.REGENERATE, calls)
+            check("есть LibreOffice: файл выдан документом document_*.docx",
+                  len(d) == 1 and re.fullmatch(r"document_[0-9a-f]{6}\.docx", d[0].name) is not None,
+                  [x.name for x in d] or texts(ev)[-1][:300])
+            if d:
+                check("пересозданный файл: исходные значения ушли", survivors(src, d[0].data, "dx11b") == [])
+                check("подпись называет профиль Regenerate", "Regenerate" in d[0].caption, d[0].caption)
+        else:
+            print("  [--] LibreOffice на машине нет: ветка «файл выдан» не проверялась")
+        g["clean_file"] = saved[0]
+
+        print("12. whitelist (keep): переключатели, выбор пользователя виден в отчёте")
+        calls.clear()
+        g["clean_file"] = spy
+        src, exp, ev, ch = await send(fx.make_pdf, "pdf12")
+        key = next(iter(_pending))
+        cb = await click(ch, "kp:author")
+        lbl = [b.text for r in ch.markup.inline_keyboard for b in r]
+        check("переключатель включился: кнопка ☑, запись цела, keep={'author'}",
+              "☑ Сохранить: автора" in lbl and _pending[key].keep == {"author"}
+              and cb.acks == [(None, False)], (lbl, cb.acks))
+        await click(ch, "kp:author")
+        check("повторное нажатие выключает", _pending[key].keep == set()
+              and "☐ Сохранить: автора" in [b.text for r in ch.markup.inline_keyboard for b in r])
+        cb = await click(ch, "kp:author", user_id=8)
+        check("чужой переключатель отклонён, состояние не изменилось",
+              cb.acks[0][1] and _pending[key].keep == set(), cb.acks)
+        cb = await click(ch, "kp:nn")
+        check("«kp:nn» вне ZIP и неизвестные ключи ничего не меняют", _pending[key].keep == set()
+              and _pending[key].neutral is True)
+        await click(ch, "kp:author")
+        await click(ch, "kp:title")
+        await click(ch, "cl:stealth")
+        d = docs(ev)
+        sent_keep = calls[0][1] if calls else None
+        check("в clean_file ушли именно ключи выбранного",
+              sent_keep and {"/Author", "dc:creator", "/Title"} <= set(sent_keep), sent_keep)
+        pre = next((i for i, (k, m) in enumerate(ev) if k == "text" and "по вашему выбору" in m.text), -1)
+        rep = next((i for i, (k, m) in enumerate(ev) if k == "text" and "Чистка метаданных" in m.text), -1)
+        check("файл выдан, выбор назван ДО отчёта как выбор, а не как недочистка",
+              len(d) == 1 and 0 <= pre < rep and "Это не недочистка" in ev[pre][1].text
+              and "НЕ чистый" in ev[pre][1].text, (pre, rep))
+        check("подпись: 📌, «по вашему выбору», «НЕ чистый», без ✅ и без «НЕ ПОЛНОСТЬЮ»",
+              d and "\U0001F4CC" in d[0].caption and "по вашему выбору" in d[0].caption
+              and "НЕ чистый" in d[0].caption and "✅" not in d[0].caption
+              and "НЕ ПОЛНОСТЬЮ" not in d[0].caption, d[0].caption if d else None)
+        check("автор действительно остался в файле (это и есть выбор)",
+              d and len(survivors(src, d[0].data, "pdf12")) >= 1)
+        check("оценка заметности названа и тут (cleanreport её при выживших не печатает)",
+              any("Заметность чистки" in m.text for k, m in ev if k == "text" and "по вашему выбору" in m.text))
+        for maker, nm, ext_ in ((fx.make_odt, "odt12", "odt"), (fx.make_rtf, "rtf12", "rtf"),
+                                (fx.make_pptx, "pptx12", "pptx")):
+            calls.clear()
+            src, exp, ev, ch = await send(maker, nm)
+            await click(ch, "kp:author")
+            await click(ch, "cl:stealth")
+            d = docs(ev)
+            check("%s: keep=автор -> выжившее объяснено выбором, caption 📌 (cleanreport KEPT не пишет)" % ext_,
+                  len(d) == 1 and "\U0001F4CC" in d[0].caption and "✅" not in d[0].caption, d[0].caption if d else texts(ev)[-1][:200])
+        # Автор, найденный НЕ в поле автора, -- недочистка, даже при включённом переключателе.
+        sv_ok = core_clean.Survivor("identity", "/Info", "Автор", "Петров Пётр", "/Info > Автор")
+        sv_bad = core_clean.Survivor("identity", "/Info", "Автор", "Петров Пётр", "/Info > Заголовок")
+        mk2 = lambda **kw: core_clean.DispatchResult("a", "b", "pdf", "stealth", ok=True, verified=True, **kw)  # noqa: E731
+        check("_verdict: автор в поле автора + переключатель -> kept",
+              _verdict(mk2(survived=[sv_ok]), ["author"])[0] == "kept")
+        check("_verdict: тот же автор БЕЗ переключателя -> bad",
+              _verdict(mk2(survived=[sv_ok]), [])[0] == "bad")
+        check("_verdict: автор нашёлся в заголовке при «сохранить автора» -> bad, не выбор",
+              _verdict(mk2(survived=[sv_bad]), ["author"])[0] == "bad")
+        check("_verdict: выбор + посторонняя утечка -> bad",
+              _verdict(mk2(survived=[sv_ok, core_clean.Survivor("environment", "x", "Путь", "C:/Users/ivan", "y > Путь")]),
+                       ["author"])[0] == "bad")
+        check("_verdict: выбор + неполный разбор -> warn, не kept",
+              _verdict(mk2(survived=[sv_ok], gaps=["после чистки: x"]), ["author"])[0] == "warn")
+        check("_verdict: просили сохранить, но ничего не осталось -> ok с упоминанием выбора",
+              (lambda r: r[0] == "ok" and "заголовок документа" in r[1])(_verdict(mk2(), ["title"])))
+        # Пересоздание whitelist не понимает: молчаливая подмена была бы обманом.
+        calls.clear()
+        src, exp, ev, ch = await send(fx.make_docx, "dx12r")
+        key = next(iter(_pending))
+        await click(ch, "kp:title")
+        cb = await click(ch, "cl:regen")
+        check("keep + «Пересоздать»: явный отказ-предупреждение, чистка не запущена",
+              cb.acks and cb.acks[0][1] and "не умеет" in cb.acks[0][0] and not calls and not docs(ev), cb.acks)
+        check("после отказа запись и переключатели целы -- можно снять и выбрать другое",
+              key in _pending and _pending[key].keep == {"title"})
+        await click(ch, "kp:title")
+        # ICC у картинок
+        calls.clear()
+        src, exp, ev, ch = await send(fx.make_png, "png12")
+        lbl = [b.text for r in ch.markup.inline_keyboard for b in r]
+        check("картинка: единственный переключатель -- ICC", lbl[:2] == ["☐ Сохранить: ICC-профиль", "Почистить (Stealth)"], lbl)
+        await click(ch, "kp:icc")
+        await click(ch, "cl:paranoid")
+        check("ICC: keep={'icc'} дошёл до чистильщика, файл выдан",
+              calls and calls[0][1] == {"icc"} and len(docs(ev)) == 1, calls)
+        # TTL: переключатели живут в той же записи, что и file_id
+        src, exp, ev, ch = await send(fx.make_pdf, "pdf12t")
+        await click(ch, "kp:title")
+        for v in _pending.values():
+            v.expires = 0
+        cb = await click(ch, "kp:author")
+        check("запись истекла вместе с переключателями: «устарела»",
+              cb.acks[0][1] and "устарела" in cb.acks[0][0] and not _pending, cb.acks)
+        g["clean_file"] = saved[0]
+
+        print("13. ZIP: пакетная чистка")
+        import zipfile as zf_
+
+        def mkzip(names_makers, nm, extra=()):
+            def maker(dirpath):
+                out = os.path.join(dirpath, nm + ".zip")
+                originals = {}
+                with zf_.ZipFile(out, "w", zf_.ZIP_DEFLATED) as z:
+                    for mk_ in names_makers:
+                        p, _e = mk_(dirpath)
+                        z.write(p, "Папка/" + os.path.basename(p))
+                        originals[os.path.basename(p)] = p
+                    for arc, data in extra:
+                        z.writestr(arc, data)
+                return out, {"orig": originals}
+            return maker
+
+        base = left()
+        src, exp, ev, ch = await send(mkzip((fx.make_docx, fx.make_pdf, fx.make_png, fx.make_doc), "pack"), "zip1")
+        lbl = [b.text for r in ch.markup.inline_keyboard for b in r] if ch else []
+        check("ZIP: предложена пакетная чистка с числом файлов и переключателями",
+              ch and "ZIP-архив" in ch.text and "файлов внутри: 4" in ch.text
+              and lbl == ["☐ Сохранить: заголовок документа", "☐ Сохранить: автора", "☐ Сохранить: ICC-профиль",
+                          "Имена в архиве: нейтральные", "Почистить всё (Stealth)", "Почистить всё (Paranoid)",
+                          "Пересоздать всё (LibreOffice)", "Не чистить"], lbl)
+        check("ZIP: на диске после предложения ничего нет", left() == base)
+        cb = await click(ch, "bt:stealth")
+        d = docs(ev)
+        rep_txt = "\n".join(texts(ev))
+        check("ZIP: ответили на нажатие сразу", cb.acks and cb.acks[0][0] == "Чищу…", cb.acks)
+        check("ZIP: отчёт по каждому файлу в чате, с исходными именами",
+              "ОТЧЁТ О ПАКЕТНОЙ ЧИСТКЕ" in rep_txt and "leaky.docx" in rep_txt and "probe.pdf" in rep_txt
+              and "probe.png" in rep_txt, rep_txt[:300])
+        check("ZIP: отказ назван и объяснён (легаси doc), а не потерян",
+              "НЕ ОЧИЩЕН" in rep_txt and "причина" in rep_txt and "doc" in rep_txt.lower())
+        check("ZIP: оценка заметности названа", "Заметность чистки" in rep_txt)
+        arc = [x for x in d if x.name.endswith(".zip")]
+        check("ZIP: выдан один архив с нейтральным именем archive_*.zip",
+              len(arc) == 1 and re.fullmatch(r"archive_[0-9a-f]{6}\.zip", arc[0].name) is not None, [x.name for x in d])
+        if arc:
+            outp = os.path.join(work, "zip1_out.zip")
+            with open(outp, "wb") as fh:
+                fh.write(arc[0].data)
+            with zf_.ZipFile(outp) as z:
+                names = z.namelist()
+                inner_report = z.read("_REPORT.txt").decode("utf-8")
+                members = {n: z.read(n) for n in names}
+            check("ZIP: подпись честно говорит «только очищенное», остальное НЕ включено",
+                  "НЕ включены" in arc[0].caption and "3 из 4" in arc[0].caption and "✅" not in arc[0].caption,
+                  arc[0].caption)
+            check("ZIP: имена внутри нейтральные, исходных нет (имя -- тоже метаданные)",
+                  sorted(names) == ["_REPORT.txt", "doc_0001.docx", "doc_0002.pdf", "doc_0003.png"]
+                  and not any(k in " ".join(names) for k in ("leaky", "probe", "Папка")), names)
+            check("ZIP: _REPORT.txt внутри архива без исходных имён",
+                  "leaky" not in inner_report and "probe" not in inner_report and "№0001" in inner_report)
+            check("ZIP: легаси .doc в архив не попал (нет «очищенного» оригинала)",
+                  not any(n.endswith(".doc") or "NOT_CLEANED" in n for n in names))
+            srcs = list(exp["orig"].values())
+            for nm_, orig in zip(("doc_0001.docx", "doc_0002.pdf", "doc_0003.png"), srcs):
+                check("ZIP: %s -- исходные значения ушли (повторная инспекция)" % nm_,
+                      survivors(orig, members[nm_], "z_" + nm_) == [])
+        check("ZIP: каталоги убраны", left() == base and not _pending)
+        leak = [v for v in ("leaky", "probe") if any(v in line for line in logs)]
+        check("ZIP: имена файлов не попали в логи", not leak, leak)
+
+        # переключатель имён: исходные имена остаются, но безопасная нормализация пути остаётся
+        src, exp, ev, ch = await send(mkzip((fx.make_docx, fx.make_pdf), "pack2"), "zip2")
+        await click(ch, "kp:nn")
+        check("ZIP: «Имена в архиве» переключилось на исходные",
+              "Имена в архиве: исходные" in [b.text for r in ch.markup.inline_keyboard for b in r])
+        await click(ch, "bt:paranoid")
+        arc = [x for x in docs(ev) if x.name.endswith(".zip")]
+        check("ZIP: все очищены -> подпись ✅ «2 из 2»",
+              len(arc) == 1 and "✅" in arc[0].caption and "2 из 2" in arc[0].caption, [x.caption for x in arc])
+        if arc:
+            outp = os.path.join(work, "zip2_out.zip")
+            with open(outp, "wb") as fh:
+                fh.write(arc[0].data)
+            with zf_.ZipFile(outp) as z:
+                names = sorted(z.namelist())
+            check("ZIP: исходные имена сохранены по просьбе", names == ["_REPORT.txt", "Папка/leaky.docx", "Папка/probe.pdf"], names)
+
+        # keep в пакете: файл с сохранённым полем не доказан -> не в архиве, объяснено выбором
+        src, exp, ev, ch = await send(mkzip((fx.make_pdf, fx.make_png), "pack3"), "zip3")
+        await click(ch, "kp:author")
+        await click(ch, "bt:stealth")
+        arc = [x for x in docs(ev) if x.name.endswith(".zip")]
+        t3 = "\n".join(texts(ev))
+        check("ZIP + keep: pdf не доказан (автор оставлен по выбору) и объяснён выбором, не недочисткой",
+              "вашего выбора" in t3 and "автора" in t3 and len(arc) == 1, t3[-400:])
+        if arc:
+            outp = os.path.join(work, "zip3_out.zip")
+            with open(outp, "wb") as fh:
+                fh.write(arc[0].data)
+            with zf_.ZipFile(outp) as z:
+                check("ZIP + keep: в архиве только png, pdf с автором не отправлен как чистый",
+                      sorted(z.namelist()) == ["_REPORT.txt", "doc_0002.png"], z.namelist())
+        # keep + regen в ZIP
+        src, exp, ev, ch = await send(mkzip((fx.make_pdf,), "pack3b"), "zip3b")
+        await click(ch, "kp:title")
+        cb = await click(ch, "bt:regen")
+        check("ZIP: keep + «Пересоздать всё» -- отказ, пакет не запущен",
+              cb.acks[0][1] and "не умеет" in cb.acks[0][0] and not docs(ev) and len(_pending) == 1, cb.acks)
+        await click(ch, "cl:no")
+
+        # ничего не очищено: архива нет
+        src, exp, ev, ch = await send(mkzip((fx.make_doc,), "pack4", extra=(("note.txt", "просто текст"),)), "zip4")
+        await click(ch, "bt:stealth")
+        check("ZIP: ничего не очищено -> «Ни один файл не очищен», архив не отправлен",
+              not docs(ev) and any("Ни один файл не очищен" in t for t in texts(ev)), texts(ev)[-1][:200])
+
+        # не ZIP-архив / повреждённый: честный отказ ядра, не падение
+        def bad_zip(dirpath):
+            p = os.path.join(dirpath, "broken.zip")
+            with open(p, "wb") as fh:
+                fh.write(b"PK\x03\x04" + b"\x00" * 40)
+            return p, {}
+        src, exp, ev, ch = await send(bad_zip, "zip5")
+        if ch is not None and any(b.callback_data == "bt:stealth" for r in ch.markup.inline_keyboard for b in r):
+            await click(ch, "bt:stealth")
+            check("ZIP битый: файла нет, сказано «НЕ почищен»/причина",
+                  not docs(ev) and any("НЕ почищен" in (m.text or "") for k, m in ev + [("text", ch)] if k == "text"), ch.text)
+        else:
+            check("ZIP битый: чистка не предложена и файла нет", not docs(ev))
+
+        # лимит отправки Bot API
+        saved_lim = config.MAX_SEND_BYTES
+        config.MAX_SEND_BYTES = 2048
+        try:
+            src, exp, ev, ch = await send(mkzip((fx.make_docx, fx.make_pdf), "pack6"), "zip6")
+            await click(ch, "bt:stealth")
+        finally:
+            config.MAX_SEND_BYTES = saved_lim
+        check("ZIP: результат больше лимита отправки -> внятное сообщение, архива в чате нет, бот не упал",
+              not [x for x in docs(ev) if x.name.endswith(".zip")]
+              and any("Результат не отправлен" in t and "Bot API" in t and "МБ" in t for t in texts(ev)),
+              texts(ev)[-1][:300])
+        check("ZIP: лимит отправки в config равен 50 МБ", config.MAX_SEND_BYTES == 50 * 1024 * 1024)
+
+        # длинный отчёт -> документом
+        g["_BATCH_CHAT_PARTS"] = 0
+        try:
+            src, exp, ev, ch = await send(mkzip((fx.make_docx, fx.make_pdf), "pack7"), "zip7")
+            await click(ch, "bt:stealth")
+        finally:
+            g["_BATCH_CHAT_PARTS"] = 4
+        rd = [x for x in docs(ev) if x.name.endswith(".txt")]
+        check("ZIP: длинный отчёт уходит документом report_*.txt с полными именами",
+              len(rd) == 1 and re.fullmatch(r"report_[0-9a-f]{6}\.txt", rd[0].name) and b"leaky.docx" in rd[0].data,
+              [x.name for x in docs(ev)])
+
+        # исключение и отказ ядра пакета
+        real_batch = g["clean_batch"]
+
+        def boom_batch(*a, **k):
+            raise RuntimeError("СЕКРЕТНОЕ-ИЗ-АРХИВА")
+        g["clean_batch"] = boom_batch
+        src, exp, ev, ch = await send(mkzip((fx.make_pdf,), "pack8"), "zip8")
+        await click(ch, "bt:stealth")
+        check("ZIP: исключение в ядре -> человеческий текст, архива нет, значение не в чат и не в логи",
+              "внутренней ошибки" in ch.text and "НЕ отправлен" in ch.text and "СЕКРЕТНОЕ" not in ch.text
+              and not docs(ev) and not any("СЕКРЕТНОЕ" in x for x in logs) and left() == base, ch.text)
+
+        def refuse_batch(s, d, profile, keep=None, force=False, **kw):
+            r = real_batch.__globals__["BatchResult"](src=s, dst=d, profile="stealth")
+            r.err("тест: пакет отклонён")
+            return r
+        g["clean_batch"] = refuse_batch
+        src, exp, ev, ch = await send(mkzip((fx.make_pdf,), "pack9"), "zip9")
+        await click(ch, "bt:stealth")
+        check("ZIP: ok=False -> «Архив НЕ почищен» с причиной, архив не отправляется",
+              "Архив НЕ почищен" in ch.text and "пакет отклонён" in ch.text and not docs(ev), ch.text)
+
+        # таймаут: поток дорабатывает, каталог убирается после него
+        def slow_batch(s, d, profile, keep=None, force=False, **kw):
+            time.sleep(1.0)
+            return real_batch(s, d, profile, keep, force, **kw)
+        g["clean_batch"], g["_BATCH_TIMEOUT"] = slow_batch, 0.3
+        src, exp, ev, ch = await send(mkzip((fx.make_pdf,), "pack10"), "zip10")
+        await click(ch, "bt:stealth")
+        check("ZIP: таймаут назван, архива нет", "не уложилась" in ch.text and not docs(ev), ch.text)
+        await asyncio.sleep(2.5)
+        check("ZIP: после таймаута поток закончил -- каталоги убраны", left() == base, left())
+        g["clean_batch"], g["_BATCH_TIMEOUT"] = real_batch, 1800
+
+        print("14. оценка детектируемости доходит до пользователя")
+        src, exp, ev, ch = await send(fx.make_docx, "dx14")
+        await click(ch, "cl:stealth")
+        det = [t for t in texts(ev) if "ОЦЕНКА:" in t]
+        check("docx: после чистки в ответе бота есть строка ОЦЕНКА (из res.detect)", len(det) == 1, texts(ev)[-1][:200])
+        src, exp, ev, ch = await send(fx.make_pdf, "pdf14")
+        await click(ch, "cl:stealth")
+        check("pdf: после чистки в ответе бота есть строка ОЦЕНКА", any("ОЦЕНКА:" in t for t in texts(ev)))
+        check("оценка не продублирована ботом там, где её уже печатает cleanreport",
+              sum("Заметность чистки" in t for t in texts(ev)) == 0, [t[:80] for t in texts(ev)])
     finally:
         g["clean_file"], g["_CLEAN_TIMEOUT"] = saved[0], saved[1]
         core_clean._CLEANERS.clear()
         core_clean._CLEANERS.update(saved[2])
         config.ALLOWED_USER_IDS[:] = saved[3]
+        config.MAX_SEND_BYTES = 50 * 1024 * 1024
         log.removeHandler(grab)
         shutil.rmtree(work, ignore_errors=True)
         _pending.clear()
