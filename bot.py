@@ -112,7 +112,8 @@ _SEND_PAUSE = 0.35
 # словаря типичных личных имён -- только если эвристика реально подведёт.
 _NEUTRAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,40}$")
 
-_PROFILES = {"cl:stealth": Profile.STEALTH, "cl:paranoid": Profile.PARANOID}
+_PROFILES = {"cl:stealth": Profile.STEALTH, "cl:paranoid": Profile.PARANOID,
+             "cl:regen": Profile.REGENERATE}
 _EXT = {"pdf": ".pdf", "jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif",
         "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "rtf": ".rtf",
         "odt": ".odt", "ods": ".ods", "odp": ".odp"}
@@ -153,7 +154,11 @@ CHOICE_TEXT = (
     "пути, имена принтеров, GPS, серийники. Приложение и его версию оставляет: "
     "пустые метаданные сами выдают, что файл чистили.\n"
     "• <b>Paranoid</b> -- убирает всё, включая приложение и даты. Чище, но "
-    "результат выглядит обработанным."
+    "результат выглядит обработанным.\n"
+    "• <b>Пересоздать</b> -- сохранить заново через LibreOffice. Следа чистки "
+    "нет, потому что файл никто не чистил, но приложение становится "
+    "LibreOffice и вёрстка может измениться. Нет LibreOffice -- отказ, "
+    "а не другая чистка."
 )
 
 
@@ -384,6 +389,7 @@ def _keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         row("Почистить (Stealth)", "cl:stealth"),
         row("Почистить (Paranoid)", "cl:paranoid"),
+        row("Пересоздать (LibreOffice)", "cl:regen"),
         row("Не чистить", "cl:no"),
     ])
 
@@ -511,7 +517,7 @@ async def _offer_cleaning(message: Message, fmt: str, doc: Document) -> None:
     )
 
 
-@router.callback_query(F.data.in_(("cl:stealth", "cl:paranoid", "cl:no")))
+@router.callback_query(F.data.in_(("cl:stealth", "cl:paranoid", "cl:regen", "cl:no")))
 async def on_clean_choice(cb: CallbackQuery) -> None:
     """Нажатие кнопки. Не падает никогда."""
     async def ack(text=None, alert=False):
@@ -564,12 +570,12 @@ async def _clean_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
         # потока -- если понадобится строгая одна задача за раз.
         async with _SEMAPHORE:
             tmp_dir = tempfile.mkdtemp(prefix="tgclean_")
-            src = os.path.join(tmp_dir, "input.bin")
-            name = _neutral_name(item.fmt)
-            dst = os.path.join(tmp_dir, "out", name)
+            src = os.path.join(tmp_dir, "input" + _EXT.get(item.fmt, ".bin"))
+            dst = os.path.join(tmp_dir, "out", "out.bin")
             await msg.bot.download(item.file_id, destination=src, timeout=60)
             size_in = os.path.getsize(src)
             res = await _in_thread(tmp_dir, _CLEAN_TIMEOUT, clean_file, src, dst, profile)
+            name = _neutral_name(res.fmt if res.fmt not in ("", "unknown") else item.fmt)
 
         ok = bool(res.ok)
         if ok and not os.path.isfile(dst):
@@ -757,8 +763,9 @@ async def _selftest() -> int:
         src, exp, ev, ch = await send(fx.make_pdf, "pdf")
         before = sha(bot.files["pdf"])
         btns = [b.text for r in ch.markup.inline_keyboard for b in r] if ch else []
-        check("кнопки: Stealth, Paranoid, Не чистить",
-              btns == ["Почистить (Stealth)", "Почистить (Paranoid)", "Не чистить"], btns)
+        check("кнопки: Stealth, Paranoid, Пересоздать, Не чистить",
+              btns == ["Почистить (Stealth)", "Почистить (Paranoid)",
+                       "Пересоздать (LibreOffice)", "Не чистить"], btns)
         check("профили объяснены прямо в сообщении",
               ch and "Stealth" in ch.text and "оставляет" in ch.text and "Paranoid" in ch.text
               and "выглядит обработанным" in ch.text)

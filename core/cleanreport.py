@@ -184,10 +184,14 @@ def _snap(result):
     s.planned_phase = _num(_g(result, "planned_phase", 0))
     # Сигналы, появившиеся ПОСЛЕ чистки: файл теперь опознаётся как обработанный.
     s.new_signals = []
+    s.detect = ""
+    s.detect_why = []
     try:
         for item in (_g(result, "new_signals", None) or []):
             kind = _c(_val(item[0]), 40)
             s.new_signals.append(kind)
+        s.detect = _c(_g(result, "detect", ""), 20)
+        s.detect_why = [_c(x, 300) for x in (_g(result, "detect_why", None) or [])]
     except Exception:
         s.errs.append("список новых сигналов не прочитался")
 
@@ -322,6 +326,18 @@ def _verdict(s):
         was = _pair(s.cb, s.ca, " -> ")
         lines = ["Доказательство: ни одно исходное чувствительное значение не "
                  "найдено в результате. Сверка идёт значениями, а не счётчиками."]
+        if s.detect == "obvious":
+            lines.append(
+                "ОЦЕНКА: файл выглядит собранным программой, а не сохранённым "
+                "в офисном приложении. Для многих задач это хуже следа чистки.")
+        elif s.detect == "noticeable":
+            lines.append(
+                "ОЦЕНКА: файл выглядит чищеным. Утечки исходных значений нет, "
+                "но сам факт обработки виден.")
+        elif s.detect == "none":
+            lines.append(
+                "ОЦЕНКА: инспектор не видит признаков обработки. Это не гарантия: "
+                "он видит только метаданные, не стиль текста и не водяные знаки.")
         if s.new_signals:
             lines.append(
                 "НО ФАЙЛ ТЕПЕРЬ ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ. Утечки нет, однако после "

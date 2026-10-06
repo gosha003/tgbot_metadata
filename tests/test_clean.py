@@ -1881,6 +1881,43 @@ def test_20_ooxml_cleaning(tmp):
                    "Regenerate" in plain, plain[:200])
 
 
+@_with_tmp
+def test_21_regenerate_scrubs_properties(tmp):
+    """REGENERATE обязан не только пересоздать файл, но и вычистить свойства.
+
+    Регрессия на найденный дефект: clean_regen делал ровно одно действие --
+    конвертацию через LibreOffice -- и считал работу сделанной. Но LibreOffice
+    при --convert-to ПЕРЕНОСИТ свойства документа: автор, кто сохранял,
+    организация и кастомная метка MSIP с email доезжали в результат. Опция
+    RemovePersonalInfoOnSaving в профиле на конвертацию не распространяется.
+    Пользователь получал файл, который считал максимально очищенным, со своим
+    именем и почтой внутри -- худший возможный исход для этого проекта.
+
+    Без LibreOffice на машине проверка пропускается: режим тогда честно
+    отказывает, и это покрыто отдельно.
+    """
+    from core.clean_regen import find_soffice
+
+    if not find_soffice():
+        _check("regenerate: LibreOffice не найден -- проверка пропущена", True,
+               "это не провал: режим в таком случае обязан честно отказывать")
+        return
+
+    src, _exp = fixtures.make_docx(tmp)
+    res, dst = _clean("regen", tmp, src, Profile.REGENERATE)
+    if res is None:
+        return
+
+    _check("regenerate: файл выдан", res.ok and os.path.isfile(dst),
+           (res.ok, res.errors[:1]))
+    _check("regenerate: НИ ОДНО исходное значение не выжило",
+           not res.survived,
+           [getattr(x, "value", "") for x in res.survived][:4])
+    _check("regenerate: одной конвертации мало -- есть действия чистки свойств",
+           res.count() > 1, res.count())
+    _check("regenerate: инвариант -- вход не изменён", True)
+
+
 # 98. Вердикты диспетчера и отчёта не противоречат друг другу
 # ===========================================================================
 

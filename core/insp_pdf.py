@@ -1332,6 +1332,14 @@ def _sec_signals(pdf, report, ctx):
     m_year = re.match(r"D?:?(\d{4})", c_date or "")
     if m_year:
         year = m_year.group(1)
+    markers = {m for m, _name in ctx.get("era_fonts", [])}
+    if any(m.startswith("aptos") for m in markers) and "calibri" in markers:
+        report.signal(
+            "inconsistent",
+            "В файле одновременно Calibri и Aptos. Calibri -- окно 2007–2023, "
+            "Aptos -- не раньше 2023. Вместе документ правили уже после появления "
+            "Aptos, поверх более старой основы.",
+            "medium")
     for marker, name in ctx.get("era_fonts", []):
         if marker.startswith("aptos") and year and year < "2023":
             report.signal("inconsistent",

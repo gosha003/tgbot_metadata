@@ -359,6 +359,40 @@ def parse_props(zf) -> dict:
 # === А. сам ZIP-контейнер =================================================
 
 
+# Стоковые офисные пакеты, которые НЕ являются Microsoft Office. Их файлы
+# законно отличаются от вордовских: другой порядок записей в ZIP, другой набор
+# частей, нет rsid. Без этого списка ЛЮБОЙ подлинный документ из LibreOffice
+# объявлялся «собранным библиотекой python-docx или генератором ИИ» -- ложное
+# срабатывание на файлах реальных людей, а не только на наших пересозданных.
+_STOCK_SUITES = ("libreoffice", "openoffice", "staroffice", "neooffice",
+                 "collabora", "onlyoffice", "ascensio", "wps ", "kingsoft")
+
+
+def _stock_suite(app) -> str:
+    """Имя стокового не-майкрософтовского пакета из Application, иначе ''."""
+    low = str(app or "").lower()
+    if "microsoft" in low:
+        return ""
+    for marker in _STOCK_SUITES:
+        if marker in low:
+            return str(app).split("/")[0].split("$")[0].strip()[:60]
+    return ""
+
+
+def _app_name_early(zf) -> str:
+    """Application до разбора секций: секции ZIP надо знать, чем собран пакет,
+    а _sec_app отрабатывает позже. Читает одну маленькую часть, не бросает."""
+    try:
+        raw = zf.read("docProps/app.xml")
+    except Exception:
+        return ""
+    try:
+        m = re.search(rb"<Application>([^<]{0,200})</Application>", raw)
+        return m.group(1).decode("utf-8", "replace") if m else ""
+    except Exception:
+        return ""
+
+
 def _sec_zip(zf, rep, ctx):
     infos = zf.infolist()
     ctx["names"] = [i.filename for i in infos]
@@ -405,10 +439,19 @@ def _sec_zip(zf, rep, ctx):
     rep.add(Risk.PROVENANCE, "ZIP", "Первая запись контейнера", first,
             "Word/Excel/PowerPoint всегда пишут [Content_Types].xml первым.")
     if first and first != "[Content_Types].xml":
-        rep.signal("ai",
-                   "Первая запись ZIP — %s, а не [Content_Types].xml: пакет "
-                   "собран сторонним инструментом или пересобран." % first,
-                   "medium")
+        suite = _stock_suite(_app_name_early(zf))
+        if suite:
+            # LibreOffice и подобные кладут первым word/document.xml. Это их
+            # штатный порядок, а не след постороннего инструмента.
+            rep.signal("producer",
+                       "Первая запись ZIP — %s: штатный порядок для %s, "
+                       "Microsoft Office кладёт первым [Content_Types].xml."
+                       % (first, suite), "medium")
+        else:
+            rep.signal("ai",
+                       "Первая запись ZIP — %s, а не [Content_Types].xml: пакет "
+                       "собран сторонним инструментом или пересобран." % first,
+                       "medium")
 
     # Таймстемпы. Word обнуляет их в 1980-01-01, библиотеки пишут реальное время.
     stamps = [tuple(i.date_time) for i in infos]
@@ -1434,11 +1477,19 @@ def _sec_missing(zf, rep, ctx):
             why.append("нет частей: %s" % ", ".join(missing))
         if no_rsid:
             why.append("нет ни одного rsid")
-        detail = ("Пакет собран библиотекой (python-docx/docxtpl или генератором "
-                  "ИИ), а не Word: %s." % "; ".join(why))
-        if app:
-            detail += " При этом app.xml заявляет Application=%s." % app
-        rep.signal("ai", detail, conf)
+        suite = _stock_suite(app)
+        if suite:
+            # Другой офисный пакет -- не библиотека и не генератор ИИ. Его
+            # файлы законно не содержат вордовских частей и rsid.
+            rep.signal("producer",
+                       "Пакет собран в %s, а не в Word: %s. Для этого пакета "
+                       "это штатно." % (suite, "; ".join(why)), "high")
+        else:
+            detail = ("Пакет собран библиотекой (python-docx/docxtpl или генератором "
+                      "ИИ), а не Word: %s." % "; ".join(why))
+            if app:
+                detail += " При этом app.xml заявляет Application=%s." % app
+            rep.signal("ai", detail, conf)
 
 
 # === О. выводы и противоречия =============================================
@@ -1523,7 +1574,19 @@ def _sec_conclusions(zf, rep, ctx):
     if not app.get("Company") and "Company" in app:
         scrub_bits.append("пустой Company")
     if len(scrub_bits) >= 2:
-        rep.signal("scrubbed",
+        # Асимметрия, которую нельзя игнорировать: Word спрашивает имя при
+        # первом запуске, а LibreOffice ставится с ПУСТЫМИ данными пользователя
+        # и пишет пустого автора по умолчанию. Для такого пакета пустые поля --
+        # штатное состояние, а не след чистки, поэтому уверенность низкая.
+        _suite = _stock_suite(app.get("Application", ""))
+        if _suite:
+            rep.signal("scrubbed",
+                       "Пустые поля личности (%s). Для %s это состояние по "
+                       "умолчанию: пакет ставится с незаполненными данными "
+                       "пользователя, так что следом чистки это не является."
+                       % (", ".join(scrub_bits), _suite), "low")
+        else:
+            rep.signal("scrubbed",
                    "Признаки предыдущей чистки: %s. Проверьте остальные "
                    "площадки (ZIP, settings.xml, rels) — их обычно забывают."
                    % ", ".join(scrub_bits), "medium")
