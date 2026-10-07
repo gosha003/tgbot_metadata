@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -92,6 +93,72 @@ def _empty_profile(root) -> str:
     return root
 
 
+_NET_RE = re.compile(
+    rb'(Target|xlink:href|r:link|href)\s*=\s*(["\'])\s*(https?|ftp)://[^"\']*\2',
+    re.IGNORECASE)
+
+
+def _defang_external(src, work, res):
+    """Копия файла без ссылок на сеть; при любой заминке -- исходный путь.
+
+    Работает по сырым байтам XML-частей ZIP-пакета (OOXML и ODF) и по тексту
+    RTF. Разбирать XML ради этого не нужно: цель -- чтобы LibreOffice не нашёл
+    чего загружать, а не чтобы получился образцовый документ. Ссылка
+    заменяется на пустую строку той же формы, поэтому структура не ломается.
+
+    Сам файл результата от этого не страдает: внешние ссылки всё равно
+    вычищаются вторым проходом как ENVIRONMENT.
+    """
+    try:
+        import zipfile
+
+        from . import zipfix
+        from .sniff import family, sniff
+
+        fam = family(sniff(src))
+        out = os.path.join(work, "defanged" + os.path.splitext(src)[1])
+
+        if fam in ("ooxml", "odf"):
+            replace, hits = {}, 0
+            with zipfile.ZipFile(src) as z:
+                for name in z.namelist():
+                    if not name.lower().endswith((".xml", ".rels")):
+                        continue
+                    raw = z.read(name)
+                    new, n = _NET_RE.subn(rb'\1=\2\2', raw)
+                    if n:
+                        replace[name] = new
+                        hits += n
+            if not hits:
+                return src
+            rep = zipfix.rebuild(src, out, replace=replace)
+            if not getattr(rep, "ok", False) or not os.path.isfile(out):
+                res.err("Внешние ссылки обезвредить не удалось, пересоздание "
+                        "отменено: LibreOffice пошёл бы по ним в сеть.")
+                return None
+            res.act(Act.REMOVED, "внешние ссылки", "Ссылки на сеть до конвертации",
+                    "%d шт." % hits, "",
+                    "LibreOffice при конвертации сам загружает внешние картинки, "
+                    "раскрывая ваш IP владельцу ссылки. Обезврежены до запуска.")
+            return out
+
+        if fam == "rtf":
+            raw = open(src, "rb").read()
+            new, n = _NET_RE.subn(rb'\1=\2\2', raw)
+            if not n:
+                return src
+            with open(out, "wb") as fh:
+                fh.write(new)
+            res.act(Act.REMOVED, "внешние ссылки", "Ссылки на сеть до конвертации",
+                    "%d шт." % n, "", "Обезврежены до запуска LibreOffice.")
+            return out
+    except Exception:  # noqa: BLE001
+        res.err("Проверка внешних ссылок сорвалась, пересоздание отменено: "
+                "LibreOffice мог бы пойти по ним в сеть.")
+        return None
+    return src
+
+
 def _scrub_after_convert(path, res) -> None:
     """Вычистить свойства уже пересозданного файла нашим же чистильщиком.
 
@@ -162,6 +229,19 @@ def clean_regen(src, dst, profile=Profile.REGENERATE, keep=None, force_signed=Fa
         profile_dir = _empty_profile(os.path.join(work, "profile"))
         outdir = os.path.join(work, "out")
         os.makedirs(outdir)
+
+        # Внешние ссылки обезвреживаются ДО конвертации. LibreOffice при
+        # --convert-to САМ скачивает внешние картинки документа: замерено, что
+        # docx с a:blip r:link=http://... даёт три HTTP-запроса с машины
+        # владельца. Для инструмента приватности это утечка в чистом виде --
+        # отправитель файла узнаёт IP и может достучаться до внутренней сети.
+        # Поэтому конвертируем не оригинал, а копию без внешних ссылок.
+        src = _defang_external(src, work, res)
+        if src is None:
+            # Обезвредить не вышло -- файл НЕ пересоздаём. Запустить
+            # LibreOffice «на всякий случай» значит сходить в сеть по чужому
+            # адресу: отказ здесь безопаснее успеха.
+            return res
         try:
             # Первый запуск только создаёт профиль: заранее положенный xcu
             # LibreOffice выбрасывает. Настройку дописываем во второй.
