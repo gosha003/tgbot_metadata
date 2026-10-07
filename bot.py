@@ -213,11 +213,27 @@ BATCH_TEXT = (
 
 
 def _allowed(message: Message | CallbackQuery) -> bool:
-    """Пустой ALLOWED_USER_IDS = доступ всем, иначе -- только из списка."""
-    if not config.ALLOWED_USER_IDS:
-        return True
+    """Только те, кого владелец назвал явно.
+
+    Раньше пустой список значил «можно всем». Это расходилось с CLAUDE.md и
+    было небезопасно: любой, кто нашёл бота, грузил файлы в разбор и в
+    LibreOffice на машине владельца. Теперь ненастроенный доступ = закрытый.
+    """
     user = message.from_user
     return bool(user) and user.id in config.ALLOWED_USER_IDS
+
+
+def _access_hint(user_id) -> str:
+    """Что ответить тому, кого нет в списке. Своего user_id человек обычно не
+    знает, поэтому называем его и команду, которую надо выполнить."""
+    if not config.ACCESS_CONFIGURED:
+        return ("Доступ к боту ещё не настроен, поэтому он никого не обслуживает.\n\n"
+                "Ваш Telegram user_id: <code>%s</code>\n\n"
+                "Если это ваш бот — добавьте в файл <code>.env</code> рядом с "
+                "<code>bot.py</code> строку\n"
+                "<code>TG_OWNER_ID=%s</code>\n"
+                "и перезапустите бота." % (user_id, user_id))
+    return ("Доступ к этому боту ограничен. Ваш user_id: <code>%s</code>" % user_id)
 
 
 def _looks_neutral(filename: str) -> bool:
@@ -548,6 +564,11 @@ def _keyboard(item: "_Pending | None" = None) -> InlineKeyboardMarkup:
 @router.message(Command("help"))
 async def on_help(message: Message) -> None:
     if not _allowed(message):
+        # На /start отвечаем даже чужому: иначе владелец, ещё не прописавший
+        # себя в .env, увидит молчащего бота и решит, что тот сломан. Текст
+        # не раскрывает ничего, кроме user_id самого спрашивающего.
+        user = message.from_user
+        await _quiet(message.answer(_access_hint(user.id if user else "?")))
         return
     await message.answer(HELP_TEXT)
 
@@ -1047,6 +1068,10 @@ async def _selftest() -> int:
     texts = lambda ev: [m.text for k, m in ev if k == "text"]  # noqa: E731
     docs = lambda ev: [d for k, d in ev if k == "doc"]  # noqa: E731
     saved = (g["clean_file"], g["_CLEAN_TIMEOUT"], dict(core_clean._CLEANERS), list(config.ALLOWED_USER_IDS))
+    # Подставные пользователи самопроверки -- 7 и 8. Раньше их пускал пустой
+    # список («можно всем»), но умолчание перевёрнуто на «никому», поэтому
+    # теперь их надо назвать явно. Проверки отказа ниже подменяют список сами.
+    config.ALLOWED_USER_IDS[:] = [7, 8]
 
     async def send(maker, name):
         """Положить фикстуру, прогнать настоящий _inspect_and_reply."""
@@ -1246,7 +1271,9 @@ async def _selftest() -> int:
         check("чужая кнопка отклонена, запись цела", cb.acks[0][1] and len(_pending) == 1 and not docs(ev))
         config.ALLOWED_USER_IDS[:] = [1]
         cb = await click(ch, "cl:stealth", user_id=7)
-        config.ALLOWED_USER_IDS[:] = saved[3]
+        # Возвращаем ТЕСТОВЫЙ список, а не исходный: исходный теперь означает
+        # «никому», и все проверки после этой точки молча отваливались бы.
+        config.ALLOWED_USER_IDS[:] = [7, 8]
         check("пользователь не из списка: молчим, запись цела", cb.acks == [(None, False)] and len(_pending) == 1 and not docs(ev), cb.acks)
         await click(ch, "cl:no")
         check("«Не чистить»: записи нет, файла нет, текст сказан",
