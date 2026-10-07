@@ -742,7 +742,10 @@ def _prepare_id(pdf, c):
 
 def _save(pdf, path):
     # Без linearize (см. docstring модуля). deterministic_id -- ID[1] из содержимого.
-    pdf.save(path, deterministic_id=True)
+    # fix_metadata_version=False: иначе save() сам зовёт open_metadata, и XMP корня
+    # уходит переформатированным сериализатором pikepdf (отступы, порядок атрибутов,
+    # pdf:PDFVersion) -- отпечаток поверх нашей правки через lxml.
+    pdf.save(path, deterministic_id=True, fix_metadata_version=False)
 
 
 _ID_RE = re.compile(rb"/ID\s*\[\s*<[0-9A-Fa-f]*>\s*<[0-9A-Fa-f]*>\s*\]")
@@ -1017,6 +1020,9 @@ def _fx_base(outlines=False, equal_id=False):
 
 def _write(tmp, name, pdf, **kw):
     path = os.path.join(tmp, name + ".pdf")
+    # Без open_metadata при сохранении: иначе pikepdf молча заменяет нечитаемый XMP
+    # пустым и распаковывает сжатый -- фикстура «бомба» и «сжатый XMP» не доходила бы до чистки.
+    kw.setdefault("fix_metadata_version", False)
     pdf.save(path, **kw)
     pdf.close()
     return path
@@ -1340,6 +1346,7 @@ def _selftest():
                               ColorSpace=N.DeviceRGB, BitsPerComponent=8)
         img["/Metadata"] = xm                                                              # XMP у картинки
         pdf.pages[0].obj.Resources["/XObject"] = D(Im1=img)
+        pdf.pages[0].contents_add(pdf.make_stream(b"q /Im1 Do Q"))                     # рисуется: не «лишний ресурс»
         pdf.Root["/PieceInfo"] = D(Illustrator=D(LastModified=S("D:20240101000000")))
         pdf.pages[0].obj["/PieceInfo"] = D(Acrobat=D(LastModified=S("D:20240101000000")))
         pdf.pages[0].obj["/Thumb"] = pdf.make_stream(b"\x00")
@@ -1372,6 +1379,13 @@ def _selftest():
         res, dst = run(s12b, "bomb_p", Profile.PARANOID)
         with pikepdf.open(dst) as q:
             _check("бомба в XMP, PARANOID: поток убран", res.ok and "/Metadata" not in q.Root, res.errors)
+        pdf = pikepdf.Pdf.new()
+        pdf.add_blank_page()
+        pdf.Root.Metadata = pdf.make_stream(_EMPTY_XMP, Type=N.Metadata, Subtype=N.XML)
+        _save(pdf, os.path.join(tmp, "xmp_bytes.pdf"))
+        with pikepdf.open(os.path.join(tmp, "xmp_bytes.pdf")) as q:
+            _check("_save не пересериализует XMP корня (open_metadata не вызывается)",
+                   q.Root.Metadata.read_bytes() == _EMPTY_XMP)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

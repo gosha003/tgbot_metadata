@@ -576,17 +576,20 @@ def _selftest() -> int:
         a = Report(path="x", fmt="pdf")
         a.add(Risk.IDENTITY, "/Info", "Автор", "Иван Петров")
         a.add(Risk.ENVIRONMENT, "/Info", "Путь", "C:\\Users\\ivan\\отчёт.docx")
-        a.add(Risk.IDENTITY, "/Info", "Короткое", "Bob")               # <= 5: не считаем
+        a.add(Risk.IDENTITY, "/Info", "Короткое", "Bob")               # < 6: по границе слова
+        a.add(Risk.IDENTITY, "/Info", "Внутри", "Ann")                 # только внутри слова
         a.add(Risk.PROVENANCE, "/Info", "Producer", "Microsoft Word 365")  # не IDENTITY/ENV
         a.add(Risk.IDENTITY, "XMP", "Автор2", "иван   петров")        # дубль после нормализации
         b = Report(path="y", fmt="pdf")
         b.add(Risk.STRUCTURAL, "/Info", "Title", "Отчёт ИВАН ПЕТРОВ за квартал")  # любой риск, регистр
         b.add(Risk.PROVENANCE, "/Info", "Producer", "Microsoft Word 365")
         b.add(Risk.IDENTITY, "/Info", "X", "Bob")
+        b.add(Risk.STRUCTURAL, "/Info", "Y", "Annual report")
         got = survived_values(a, b)
-        _check("имя в заголовке найдено, регистр не важен", len(got) == 1 and got[0].label == "Автор", got)
-        _check("путь не найден, короткое и PROVENANCE не считаются",
-               all(g.label not in ("Путь", "Короткое", "Producer") for g in got))
+        _check("имя в заголовке найдено, регистр не важен",
+               [g.label for g in got] == ["Автор", "Короткое"], got)
+        _check("путь, PROVENANCE и короткое внутри слова не считаются",
+               all(g.label not in ("Путь", "Внутри", "Producer") for g in got))
         _check("пустой результат при чистом выходе", survived_values(a, Report(path="z", fmt="pdf")) == [])
         _check("clean требует и verified, и пустых survived, и отсутствия gaps",
                DispatchResult("a", "b", "pdf", "stealth", ok=True, verified=True).clean
@@ -594,7 +597,7 @@ def _selftest() -> int:
                and not DispatchResult("a", "b", "pdf", "stealth", ok=True, verified=True, survived=[1]).clean
                and not DispatchResult("a", "b", "pdf", "stealth", ok=True).clean
                and not DispatchResult("a", "b", "pdf", "stealth", verified=True).clean)
-        _check("граница длины: 6 символов считаются, 5 -- нет",
+        _check("граница длины: 6 символов ищутся подстрокой, 5 -- только словом",
                len(survived_values(_one("abcdef"), _one("xabcdefx"))) == 1
                and survived_values(_one("abcde"), _one("xabcdex")) == [])
 
