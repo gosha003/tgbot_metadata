@@ -1918,6 +1918,48 @@ def test_21_regenerate_scrubs_properties(tmp):
     _check("regenerate: инвариант -- вход не изменён", True)
 
 
+def test_22_oracle_short_values():
+    """Регрессия на критичную находку критика: оракул был слеп к коротким значениям.
+
+    survived_values пропускал всё короче MIN_VALUE_LEN, и чистильщик-лжец
+    (простая копия файла) получал clean=True и вердикт «ПОЧИЩЕНО» на документе
+    с dc:creator «Иван». «Олег», «Анна», «Bob» -- туда же. Центральное
+    утверждение проекта («ни одно исходное значение не встречается в
+    результате») не работало на самом частом классе данных -- на именах.
+
+    Порог стоял не зря: подстрокой «ru» нашлось бы внутри «trust». Поэтому
+    короткие значения сравниваются по границам слова, а не пропускаются.
+    """
+    from core.clean import survived_values
+    from core.model import Report, Risk
+
+    def rep(value, risk=Risk.IDENTITY):
+        r = Report(path="synthetic", fmt="docx")
+        r.add(risk, "docProps/core.xml", "dc:creator", value)
+        return r
+
+    for name in ("Иван", "Олег", "Анна", "Bob", "Ivan"):
+        _check("оракул: короткое имя %r не теряется" % name,
+               len(survived_values(rep(name), rep(name))) == 1, name)
+
+    for short, longer in (("ru", "trust"), ("1.7", "21.75"),
+                          ("Иван", "Иванов"), ("ru", "Другое")):
+        _check("оракул: %r внутри %r -- НЕ совпадение" % (short, longer),
+               not survived_values(rep(short), rep(longer)), (short, longer))
+
+    _check("оракул: короткое значение как отдельное слово находится",
+           len(survived_values(rep("Иван"), rep("Автор: Иван"))) == 1)
+    _check("оракул: длинное значение по-прежнему ищется подстрокой",
+           len(survived_values(rep("Иванов Иван"),
+                               rep("Подготовил Иванов Иван, отдел"))) == 1)
+
+    # Маркеры присутствия -- разметка отчёта, а не данные: «есть» в исходнике и
+    # «есть» в результате это не пережившая чистку утечка.
+    for marker in ("есть", "нет", "да", "true"):
+        _check("оракул: маркер %r не считается утечкой" % marker,
+               not survived_values(rep(marker), rep(marker)), marker)
+
+
 # 98. Вердикты диспетчера и отчёта не противоречат друг другу
 # ===========================================================================
 
