@@ -48,6 +48,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     Document,
     FSInputFile,
@@ -560,15 +561,19 @@ def _keyboard(item: "_Pending | None" = None) -> InlineKeyboardMarkup:
 # ============================================================================
 
 
+async def _deny(message: Message) -> None:
+    # Отвечаем даже чужому: иначе владелец, ещё не прописавший себя в .env,
+    # увидит молчащего бота и решит, что тот сломан. Текст не раскрывает
+    # ничего, кроме user_id самого спрашивающего.
+    user = message.from_user
+    await _quiet(message.answer(_access_hint(user.id if user else "?")))
+
+
 @router.message(CommandStart())
 @router.message(Command("help"))
 async def on_help(message: Message) -> None:
     if not _allowed(message):
-        # На /start отвечаем даже чужому: иначе владелец, ещё не прописавший
-        # себя в .env, увидит молчащего бота и решит, что тот сломан. Текст
-        # не раскрывает ничего, кроме user_id самого спрашивающего.
-        user = message.from_user
-        await _quiet(message.answer(_access_hint(user.id if user else "?")))
+        await _deny(message)
         return
     await message.answer(HELP_TEXT)
 
@@ -576,6 +581,7 @@ async def on_help(message: Message) -> None:
 @router.message(F.photo)
 async def on_photo(message: Message) -> None:
     if not _allowed(message):
+        await _deny(message)
         return
     await message.answer(
         "Это пришло как <b>фото</b>, а не файл. Telegram уже пережал и "
@@ -591,6 +597,7 @@ async def on_photo(message: Message) -> None:
 @router.message(F.document)
 async def on_document(message: Message) -> None:
     if not _allowed(message):
+        await _deny(message)
         return
     doc: Document = message.document
     if doc.file_size and doc.file_size > config.MAX_FILE_BYTES:
@@ -704,6 +711,15 @@ async def _offer_batch(message: Message, doc: Document, path: str) -> None:
                     time.monotonic() + _PENDING_TTL)
     sent = await message.answer(BATCH_TEXT.format(n=head), reply_markup=_keyboard(item))
     _remember((sent.chat.id, sent.message_id), item)
+
+
+@router.message()
+async def on_other(message: Message) -> None:
+    """Всё прочее (текст, стикер, голос): подсказка вместо молчания."""
+    if not _allowed(message):
+        await _deny(message)
+        return
+    await message.answer(HELP_TEXT)
 
 
 @router.callback_query(F.data.startswith(("cl:", "bt:", "kp:")))
@@ -964,6 +980,9 @@ async def _run() -> None:
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
+    # Меню команд у кнопки «/» в Telegram. Без него /start не видно.
+    await _quiet(bot.set_my_commands([BotCommand(command="start", description="Как пользоваться"),
+                                      BotCommand(command="help", description="Справка")]))
     await dp.start_polling(bot)
 
 

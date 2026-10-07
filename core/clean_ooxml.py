@@ -1115,6 +1115,19 @@ def _sec_people(pkg):
               "[Content_Types].xml.")
 
 
+def _sec_xl_revisions(pkg):
+    """Журнал изменений общей книги Excel: userName и dateTime каждого сохранения каждого
+    участника, userNames.xml -- список всех, кто открывал книгу. Убирается целиком; Excel
+    открывает книгу как обычную (так же выглядит «отменить общий доступ»). revisionHeaders
+    первым: с ним уходит его .rels, и у журналов не остаётся висячих ссылок."""
+    parts = sorted((n for n in pkg.names if n.startswith("xl/revisions/") and n.endswith(".xml")
+                    and pkg.exists(n)), key=lambda n: not n.endswith("revisionHeaders.xml"))
+    for nm in parts:
+        if pkg.exists(nm):
+            _drop(pkg, nm, "revisions", "Журнал изменений общей книги (%s)" % nm.rsplit("/", 1)[-1], "",
+                  "Имена всех участников общей книги и время каждого их сохранения.")
+
+
 def _sec_printer(pkg):
     for nm in [n for n in pkg.names if "printersettings" in n.lower() and n.lower().endswith(".bin")]:
         if not pkg.exists(nm):
@@ -2073,6 +2086,7 @@ _SECTIONS = (
     ("docProps/custom.xml", _sec_custom),
     ("Превью", _sec_thumbnail),
     ("word/people.xml", _sec_people),
+    ("xl/revisions", _sec_xl_revisions),
     ("Настройки принтера", _sec_printer),
     ("Макросы VBA", _sec_vba),
     ("Вложенные объекты", _sec_embeddings),

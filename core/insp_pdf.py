@@ -32,6 +32,7 @@ MAX_ANNOTS = 400           # аннотаций всего
 MAX_FIELDS = 300           # полей формы всего
 MAX_FONTS = 300            # шрифтов всего
 MAX_ATTACH = 100           # вложений всего
+MAX_IMAGES = 2000          # картинок-JPEG, которые разбираем
 MAX_OCGS = 200             # слоёв optional content
 MAX_XMP_KEYS = 400         # ключей XMP
 MAX_HISTORY = 60           # событий xmpMM:History
@@ -288,6 +289,7 @@ def inspect_pdf(path) -> Report:
         _sec_layers,       # Л
         _sec_fonts,        # М
         _sec_pieceinfo,    # Н
+        _sec_images,       # Н2
         _sec_structural,   # О
         _sec_overview,     # П
     )
@@ -1151,6 +1153,48 @@ def _sec_pieceinfo(pdf, report, ctx):
             dump(page, "стр. %d" % (idx + 1))
         except Exception as exc:
             report.err("Стр. %d: /PieceInfo не читается: %s" % (idx + 1, exc))
+
+
+def is_jpeg_image(obj) -> bool:
+    """Картинка, чей поток -- JPEG-файл целиком (единственный фильтр /DCTDecode)."""
+    if not isinstance(obj, pikepdf.Stream) or _s(_get(obj, "/Subtype")) != "/Image":
+        return False
+    flt = _get(obj, "/Filter")
+    if isinstance(flt, pikepdf.Array):
+        return len(flt) == 1 and _s(flt[0]) == "/DCTDecode"
+    return _s(flt) == "/DCTDecode"
+
+
+def _sec_images(pdf, report, ctx):
+    """Н2. Картинки-JPEG внутри PDF: поток /DCTDecode -- это JPEG-файл байт в байт,
+    со всем его EXIF (GPS, серийник камеры, дата съёмки). img2pdf и сканер-приложения
+    кладут фото без перекодирования. Метаданные документа этого не касаются."""
+    from .insp_image import _jpeg, _signals   # разбор JPEG из инспектора картинок
+    n = 0
+    for obj in pdf.objects:
+        if not is_jpeg_image(obj):
+            continue
+        n += 1
+        if n > MAX_IMAGES:
+            report.err("Картинок-JPEG больше %d: остальные не разобраны." % MAX_IMAGES)
+            return
+        try:
+            data = obj.read_raw_bytes()
+            if len(data) > MAX_STREAM:
+                report.err("Картинка (объект %d) больше %d МБ: не разобрана." % (obj.objgen[0], MAX_STREAM >> 20))
+                continue
+            sub, sctx = Report(path="", fmt="pdf-image"), {}
+            _jpeg(sub, data, sctx)
+            _signals(sub, sctx)
+        except Exception as exc:
+            report.err("Картинка (объект %d): %s: %s" % (obj.objgen[0], type(exc).__name__, exc))
+            continue
+        where = "картинка (объект %d) " % obj.objgen[0]
+        for f in sub.findings:
+            if f.risk is not Risk.STRUCTURAL:   # карта сегментов, JFIF, ICC -- шум для PDF
+                report.add(f.risk, where + f.location, f.label, f.value, f.note, f.removable)
+        for s in sub.signals:
+            report.signal(s.kind, "картинка внутри PDF: " + s.detail, s.confidence)
 
 
 def _sec_structural(pdf, report, ctx):

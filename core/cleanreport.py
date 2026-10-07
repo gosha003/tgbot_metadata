@@ -173,12 +173,15 @@ def _snap(result):
     s.has_evidence = False
     s.verified = False
     s.survived_n = 0
+    s.res_old = []
     try:
         if _g(result, "verified", None) is not None:
             s.has_evidence = True
             s.verified = bool(_g(result, "verified", False))
             sv = _g(result, "survived", None)
             s.survived_n = len(list(sv)) if sv is not None else 0
+            # residual: (место, поле, новое ли значение). Не новое -- было и в исходнике.
+            s.res_old = ["%s %s" % (r[0], r[1]) for r in (_g(result, "residual", None) or []) if not r[2]]
     except Exception:
         s.errs.append("доказательство диспетчера не прочиталось: вердикт по эвристике")
     s.planned_phase = _num(_g(result, "planned_phase", 0))
@@ -350,7 +353,12 @@ def _verdict(s):
                 "оставить настоящее имя значит не почистить, подставить чужое -- "
                 "подделать провенанс. Незаметность даёт только пересоздание файла "
                 "стоковым приложением (режим Regenerate, фаза 4).")
-        if s.ca > 0:
+        if s.ca > 0 and s.res_old:
+            lines.append("Критичных находок в результате: %d. Из них %d с тем же значением, что "
+                         "и в исходнике (%s): в сверку утечек они не попали (короткое или "
+                         "служебное значение). Проверьте их сами в списке ниже."
+                         % (s.ca, len(s.res_old), "; ".join(s.res_old[:5])))
+        elif s.ca > 0:
             lines.append("Критичных находок в результате: %d. Это НОВЫЕ значения, "
                          "которых в исходнике не было -- например перегенерированный "
                          "trailer /ID. С исходным файлом они не связаны." % s.ca)

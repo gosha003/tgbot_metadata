@@ -1960,6 +1960,162 @@ def test_22_oracle_short_values():
                not survived_values(rep(marker), rep(marker)), marker)
 
 
+def _pdf_with_photo(tmp, jpg):
+    """PDF «как из img2pdf»: JPEG лежит потоком /DCTDecode байт в байт, с EXIF."""
+    pdf = pikepdf.new()
+    pdf.add_blank_page(page_size=(200, 200))
+    img = pikepdf.Stream(pdf, _read(jpg))
+    img.update({"/Type": pikepdf.Name("/XObject"), "/Subtype": pikepdf.Name("/Image"), "/Width": 8,
+                "/Height": 8, "/ColorSpace": pikepdf.Name("/DeviceGray"), "/BitsPerComponent": 8,
+                "/Filter": pikepdf.Name("/DCTDecode")})
+    pdf.pages[0].Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=img))
+    # Страница обязана РИСОВАТЬ картинку: неиспользуемую QPDF выбросит как мусор,
+    # и тест доказал бы чистоту удалением, а не чисткой.
+    pdf.pages[0].Contents = pdf.make_stream(b"q 200 0 0 200 0 0 cm /Im0 Do Q")
+    path = os.path.join(tmp, "scan.pdf")
+    pdf.save(path)
+    return path
+
+
+@_with_tmp
+def test_23_pdf_photo_exif(tmp):
+    """Регрессия: EXIF фотографии внутри PDF переживал чистку, а отчёт писал «чисто».
+
+    Инспектор PDF не заглядывал в потоки картинок, поэтому оракулу нечего было
+    сравнивать: GPS дома и серийник камеры уезжали получателю с вердиктом
+    «ПОЧИЩЕНО». PDF из фотографий (img2pdf, сканер-приложения) -- частый случай."""
+    jpg, _ = fixtures.make_jpeg(tmp)
+    src = _pdf_with_photo(tmp, jpg)
+    rep = inspect_file(src)
+    _check("pdf+фото: инспектор видит GPS в картинке",
+           any("картинка" in f.location and "GPS" in f.location for f in rep.findings))
+    _check("pdf+фото: инспектор видит серийник в картинке",
+           any(fixtures.JPEG_SERIAL in f.value for f in rep.findings))
+    for profile in PROFILES:
+        res, dst = _clean("pdf+фото", tmp, src, profile)
+        if res is None or not _check("pdf+фото/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+            continue
+        _check("pdf+фото/%s: clean (оракул ничего не нашёл)" % _pname(profile), res.clean,
+               [(s.label, s.value) for s in res.survived][:4])
+        raw = _read(dst)
+        _check("pdf+фото/%s: серийника и автора нет в байтах результата" % _pname(profile),
+               fixtures.JPEG_SERIAL.encode() not in raw and fixtures.JPEG_ARTIST.encode() not in raw)
+        with pikepdf.open(dst) as q:
+            imgs = [o.read_raw_bytes() for o in q.objects
+                    if isinstance(o, pikepdf.Stream) and o.get("/Subtype") == "/Image"]
+        _check("pdf+фото/%s: картинка на месте и осталась JPEG" % _pname(profile),
+               len(imgs) == 1 and imgs[0][:2] == b"\xff\xd8" and imgs[0].rstrip()[-2:] == b"\xff\xd9",
+               len(imgs))
+
+
+SHARED_EDITOR = "Скрытый Участник"
+
+
+def _xlsx_shared(tmp):
+    """xlsx с журналом общей книги, как его пишет Excel: revisionHeaders (userName,
+    dateTime), userNames (все, кто открывал), revisionLog; связи и Override на месте."""
+    src, _ = fixtures.make_xlsx(tmp)
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+    ct = "application/vnd.openxmlformats-officedocument.spreadsheetml."
+    parts = {
+        "xl/revisions/revisionHeaders.xml":
+            '<headers xmlns="%s" xmlns:r="%s" guid="{11111111-0000-0000-0000-000000000001}">'
+            '<header guid="{11111111-0000-0000-0000-000000000002}" dateTime="2024-03-01T10:00:00" '
+            'maxSheetId="2" userName="%s" r:id="rId1"><sheetIdMap count="1"><sheetId val="1"/>'
+            '</sheetIdMap></header></headers>' % (ns, rel[:-1], SHARED_EDITOR),
+        "xl/revisions/_rels/revisionHeaders.xml.rels":
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="%srevisionLog" Target="revisionLog1.xml"/></Relationships>' % rel,
+        "xl/revisions/revisionLog1.xml": '<revisions xmlns="%s"/>' % ns,
+        "xl/revisions/userNames.xml":
+            '<users xmlns="%s" count="1"><userInfo guid="{11111111-0000-0000-0000-000000000003}" '
+            'name="%s" id="1" dateTime="2024-03-01T10:00:00"/></users>' % (ns, SHARED_EDITOR),
+    }
+    out = os.path.join(tmp, "shared.xlsx")
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "[Content_Types].xml":
+                data = data.replace(b"</Types>", (
+                    '<Override PartName="/xl/revisions/revisionHeaders.xml" ContentType="%srevisionHeaders+xml"/>'
+                    '<Override PartName="/xl/revisions/revisionLog1.xml" ContentType="%srevisionLog+xml"/>'
+                    '<Override PartName="/xl/revisions/userNames.xml" ContentType="%suserNames+xml"/></Types>'
+                    % (ct, ct, ct)).encode())
+            elif info.filename == "xl/_rels/workbook.xml.rels":
+                data = data.replace(b"</Relationships>", (
+                    '<Relationship Id="rIdRv1" Type="%srevisionHeaders" Target="revisions/revisionHeaders.xml"/>'
+                    '<Relationship Id="rIdRv2" Type="%susernames" Target="revisions/userNames.xml"/>'
+                    '</Relationships>' % (rel, rel)).encode())
+            zout.writestr(info, data)
+        for name, text in parts.items():
+            zout.writestr(name, text.encode("utf-8"))
+    return out
+
+
+@_with_tmp
+def test_24_xlsx_shared_workbook(tmp):
+    """Регрессия: журнал общей книги (xl/revisions) с именами всех участников
+    переживал чистку и не был виден инспектору."""
+    src = _xlsx_shared(tmp)
+    _check("xlsx общая книга: инспектор видит участника",
+           any(SHARED_EDITOR in f.value and f.risk is Risk.IDENTITY for f in inspect_file(src).findings))
+    for profile in PROFILES:
+        res, dst = _clean("xlsx-shared", tmp, src, profile)
+        if res is None or not _check("xlsx общая книга/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+            continue
+        _check("xlsx общая книга/%s: clean" % _pname(profile), res.clean,
+               [(s.label, s.value) for s in res.survived][:4])
+        with zipfile.ZipFile(dst) as z:
+            names = z.namelist()
+            blob = b"".join(z.read(n) for n in names)
+        _check("xlsx общая книга/%s: xl/revisions убран, ссылок на него не осталось" % _pname(profile),
+               not any(n.startswith("xl/revisions/") for n in names) and b"revisions/" not in blob,
+               [n for n in names if "revision" in n])
+        _check("xlsx общая книга/%s: имени участника нет в байтах" % _pname(profile),
+               SHARED_EDITOR.encode("utf-8") not in blob)
+
+
+@_with_tmp
+def test_25_rtf_upr_author(tmp):
+    """Регрессия: нелатинский автор в {\\upr{\\author ANSI}{\\*\\ud{\\author Юникод}}}
+    переживал чистку: подгруппа называется upr, и поимённый разбор её не видел."""
+    name = "Скрытый Автор"
+    ansi = "".join("\\'%02x" % b for b in name.encode("cp1251"))
+    uni = "".join("\\u%d?" % ord(ch) for ch in name)
+    rtf = ("{\\rtf1\\ansi\\ansicpg1251\\deff0{\\info{\\upr{\\author %s}{\\*\\ud{\\author %s}}}"
+           "{\\creatim\\yr2024\\mo3\\dy1\\hr10\\min0}}{\\*\\generator Microsoft Word 11.0.0000;}"
+           "Hello\\par}" % (ansi, uni))
+    src = _write(os.path.join(tmp, "upr.rtf"), rtf.encode("latin-1"))
+    _check("rtf \\upr: инспектор видит автора",
+           any(f.value == name and f.risk is Risk.IDENTITY for f in inspect_file(src).findings))
+    for profile in PROFILES:
+        res, dst = _clean("rtf-upr", tmp, src, profile)
+        if res is None or not _check("rtf \\upr/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+            continue
+        out = _read(dst).decode("latin-1")
+        _check("rtf \\upr/%s: clean" % _pname(profile), res.clean,
+               [(s.label, s.value) for s in res.survived][:4])
+        _check("rtf \\upr/%s: ни ANSI-, ни юникодной копии имени" % _pname(profile),
+               ansi not in out and uni not in out and "\\upr" not in out, out[:200])
+        _check("rtf \\upr/%s: текст документа цел" % _pname(profile), "Hello\\par" in out)
+
+
+def test_26_report_residual_honest():
+    """Регрессия: при остатке критичного отчёт всегда писал «это НОВЫЕ значения»,
+    даже когда диспетчер (residual) знал, что значение было и в исходнике."""
+    def mk(residual):
+        return DispatchResult("a", "b", "pdf", "stealth", ok=True, verified=True, survived=[],
+                              critical_before=3, critical_after=len(residual), residual=residual)
+
+    old = cleanreport.render_plain(mk([("/Root", "Поле подписи", False), ("trailer", "/ID[0]", True)]))
+    old = " ".join(old.split())   # отчёт переносит строки по ширине
+    _check("отчёт: старое значение в остатке не названо новым",
+           "НОВЫЕ значения" not in old and "Поле подписи" in old, old[:300])
+    new = cleanreport.render_plain(mk([("trailer", "/ID[0]", True)]))
+    _check("отчёт: только новые -- так и сказано", "НОВЫЕ значения" in new, new[:300])
+
+
 # 98. Вердикты диспетчера и отчёта не противоречат друг другу
 # ===========================================================================
 

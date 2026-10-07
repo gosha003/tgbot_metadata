@@ -27,6 +27,7 @@ from core.insp_legacy import (
     _PATH_RE,
     _brace_group,
     _cp_codec,
+    _info_groups,
     _rtf_plain,
     _subgroups,
 )
@@ -112,7 +113,7 @@ def _info_edits(text, paranoid, keep, res, enc):
     drop = set(_LEAK)
     if paranoid:
         drop |= _PROV
-    for name, _content, inner in _subgroups(body):
+    for name, content, inner in _info_groups(body):
         if name not in drop or _kept(keep, name):
             continue
         # Позиция подгруппы в body: inner -- её тело без скобок, ищем его.
@@ -120,12 +121,15 @@ def _info_edits(text, paranoid, keep, res, enc):
         if at < 0:
             continue
         gs, ge = base + at, base + at + len(inner) + 2
-        blank = _blank_span(text, gs, ge)
+        if re.match(r"\s*\\upr(?![a-zA-Z])", inner):
+            blank = "{\\%s}" % name      # {\upr ANSI+Юникод} целиком -> одно пустое поле
+        else:
+            blank = _blank_span(text, gs, ge)
         if blank is None:
             continue
         edits.append((gs, ge, blank))
         res.act(Act.BLANKED, "\\info\\%s" % name, name,
-                _rtf_plain(inner, enc), "",
+                _rtf_plain(content, enc), "",
                 "Группа осталась пустой: отсутствие самого поля заметнее, "
                 "чем пустое значение.")
         body = body[:at] + " " * (len(inner) + 2) + body[at + len(inner) + 2:]
