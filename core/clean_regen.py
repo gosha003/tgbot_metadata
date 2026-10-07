@@ -172,7 +172,14 @@ def _scrub_after_convert(path, res) -> None:
         from .sniff import family, sniff
         fam = family(sniff(path))
         if fam == "ooxml":
-            from .clean_ooxml import clean_ooxml as _inner
+            import functools
+
+            from .clean_ooxml import clean_ooxml
+            # Пользовательских свойств у свежего файла LibreOffice нет: всё, что
+            # там есть, приехало из исходника. STEALTH часть таких свойств
+            # оставляет как безобидные, а инспектор .doc считает их личностью --
+            # замерено на «Отдел» из DocumentSummaryInformation.
+            _inner = functools.partial(clean_ooxml, drop_custom=True)
         elif fam == "odf":
             from .clean_odf import clean_odf as _inner
         else:

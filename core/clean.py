@@ -41,7 +41,7 @@ clean переопределено: оно учитывает survived, а не 
 Приватность: ни имён файлов, ни значений находок в логи не пишем (логов нет).
 Только stdlib; тяжёлые зависимости тянутся через сами чистильщики.
 
-CLI: python -m core.clean <файл> [--out ПУТЬ] [--profile stealth|paranoid]
+CLI: python -m core.clean <файл> [--out ПУТЬ] [--profile stealth|paranoid|regenerate]
                          [--force-signed] [--json] [--overwrite] [--selftest]
 Код возврата: 0 -- чисто и доказано; 1 -- файл не выдан; 2 -- выдан, но чистота не доказана.
 """
@@ -442,8 +442,13 @@ def clean_file(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False,
 # ============================================================================
 
 
-def _default_out(path) -> str:
+def _default_out(path, profile="stealth") -> str:
     base, ext = os.path.splitext(path)
+    if profile == "regenerate":
+        # Пересоздание меняет формат (doc -> docx): расширение по выходу, а не по входу.
+        out = OUTPUT_FMT.get(ext.lower().lstrip("."))
+        if out:
+            ext = "." + out
     return base + ".clean" + ext
 
 
@@ -809,11 +814,12 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="python -m core.clean",
-        description="Чистка метаданных документа (фаза 1: PDF и картинки). Вход не меняется.")
+        description="Чистка метаданных документа. Вход не меняется.")
     parser.add_argument("file", nargs="?", help="путь к файлу")
     parser.add_argument("--out", help="куда писать результат (по умолчанию рядом, с суффиксом .clean)")
-    parser.add_argument("--profile", choices=["stealth", "paranoid"], default="stealth",
-                        help="stealth -- не выдаёт обработку (по умолчанию); paranoid -- убрать всё")
+    parser.add_argument("--profile", choices=["stealth", "paranoid", "regenerate"], default="stealth",
+                        help="stealth -- не выдаёт обработку (по умолчанию); paranoid -- убрать всё; "
+                             "regenerate -- пересоздать через LibreOffice (doc/xls/ppt -> docx/xlsx/pptx)")
     parser.add_argument("--force-signed", action="store_true",
                         help="чистить подписанный PDF, уничтожив подпись")
     parser.add_argument("--json", action="store_true", help="вывести результат в JSON")
@@ -826,7 +832,7 @@ def main(argv=None) -> int:
     if not args.file:
         parser.error("нужен файл (или --selftest)")
 
-    out = args.out or _default_out(args.file)
+    out = args.out or _default_out(args.file, args.profile)
     if os.path.exists(out) and not args.overwrite and not _same_file_safe(args.file, out):
         print("Выходной файл уже существует: %s (--overwrite -- перезаписать)" % out)
         return 1

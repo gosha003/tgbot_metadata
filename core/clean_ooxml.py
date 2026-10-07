@@ -1072,6 +1072,9 @@ def _sec_custom(pkg):
             why = _custom_why(pkg, pname, val)
             if why is None and pkg.paranoid:
                 why = "PARANOID убирает все пользовательские свойства."
+            if why is None and getattr(pkg, "drop_custom", False):
+                why = ("Файл пересоздан LibreOffice: у свежего файла пользовательских свойств "
+                       "нет, это свойство перенесено из исходника.")
             if why is None or pkg.held(name, pname):
                 continue
             P.remove(n)
@@ -2190,6 +2193,7 @@ def _run(res, state, src, dst, profile, keep, force_signed, depth):
         return
     with zf:
         pkg = _Pkg(res, zf, prof, keep, depth, state["tmp"], force_signed)
+        pkg.drop_custom = bool(state.get("drop_custom"))
         for title, fn in _SECTIONS:
             _step(pkg, title, fn)
         _step(pkg, "Таймстемпы ZIP", lambda p: state.__setitem__("times", _plan_times(p)))
@@ -2226,7 +2230,8 @@ def _run(res, state, src, dst, profile, keep, force_signed, depth):
     res.ok = True
 
 
-def clean_ooxml(src, dst, profile=Profile.STEALTH, keep=None, *, force_signed=False, _depth=0) -> CleanResult:
+def clean_ooxml(src, dst, profile=Profile.STEALTH, keep=None, *, force_signed=False, _depth=0,
+                drop_custom=False) -> CleanResult:
     """Очистить docx/xlsx/pptx src -> dst. Вход не модифицируется никогда. Исключений наружу не
     бросает: при отказе ok=False, причина в errors, dst не создан и существующий dst не тронут.
 
@@ -2236,10 +2241,12 @@ def clean_ooxml(src, dst, profile=Profile.STEALTH, keep=None, *, force_signed=Fa
 
     profile -- STEALTH (дефолт) или PARANOID; REGENERATE трактуется как PARANOID.
     keep -- whitelist (см. docstring модуля). force_signed -- чистить подписанный пакет, уничтожив
-    подпись. _depth -- служебный: глубина вложенности при рекурсии в embeddings/."""
+    подпись. _depth -- служебный: глубина вложенности при рекурсии в embeddings/.
+    drop_custom -- убрать ВСЕ пользовательские свойства (docProps/custom.xml) и в STEALTH:
+    для дочистки после пересоздания, где любое такое свойство перенесено из исходника."""
     res = CleanResult(src=str(src), dst=str(dst), fmt="unknown",
                       profile=str(getattr(profile, "value", profile)))
-    state = {}
+    state = {"drop_custom": drop_custom}
     try:
         s, d = os.fspath(src), os.fspath(dst)
         os.makedirs(os.path.dirname(os.path.abspath(d)), exist_ok=True)

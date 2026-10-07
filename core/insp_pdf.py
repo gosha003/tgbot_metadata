@@ -281,6 +281,7 @@ def inspect_pdf(path) -> Report:
         _sec_encryption,   # А
         _sec_docinfo,      # Б
         _sec_xmp,          # В
+        _sec_object_xmp,   # В2
         _sec_file_id,      # Г
         _sec_annots,       # Е
         _sec_acroform,     # Ж + К
@@ -428,34 +429,96 @@ def _sec_xmp(pdf, report, ctx):
         return
 
     for key, value in pairs[:MAX_XMP_KEYS]:
-        if key in _XMP_GUID:
-            report.add(Risk.IDENTITY, "XMP", key, value,
-                       note="Постоянный GUID документа. Он НЕ меняется при пересохранении и "
-                            "связывает между собой все версии файла и все файлы, сделанные из "
-                            "одного шаблона: по нему два разных на вид документа сводятся в один.")
-        elif key.startswith("xmpMM:History"):
-            report.add(Risk.PROVENANCE, "XMP", key, value,
-                       note="Событие журнала правок xmpMM:History -- фактическая история того, "
-                            "чем и когда файл редактировали.")
-        elif key in _XMP_IDENTITY or key.startswith(("xmpRights:", "photoshop:Author")):
-            report.add(Risk.IDENTITY, "XMP", key, value,
-                       note="Имя/правообладатель в XMP: переживает чистку /Info.")
-        elif _looks_like_path(value):
-            report.add(Risk.ENVIRONMENT, "XMP", key, value,
-                       note="В значении локальный путь: выдаёт имя пользователя и структуру диска.")
-        elif key in ("xmp:CreateDate", "xmp:ModifyDate", "xmp:MetadataDate"):
-            report.add(Risk.PROVENANCE, "XMP", key, value,
-                       note="Дата XMP. xmp:MetadataDate часто новее xmp:ModifyDate -- разница "
-                            "показывает, что метаданные трогали отдельно от содержимого.")
-        elif key.startswith("pdfaid:") or key.startswith("pdfuaid:"):
-            report.add(Risk.STRUCTURAL, "XMP", key, value,
-                       note="Декларация соответствия PDF/A или PDF/UA. При чистке обычно сохраняем: "
-                            "без неё файл перестаёт быть архивным/доступным.")
-        else:
-            report.add(Risk.PROVENANCE, "XMP", key, value)
+        risk, note = _xmp_class(key, value)
+        report.add(risk, "XMP", key, value, note=note)
 
     if len(pairs) > MAX_XMP_KEYS:
         report.err("XMP: показаны первые %d ключей из %d." % (MAX_XMP_KEYS, len(pairs)))
+
+
+def _xmp_class(key, value) -> tuple:
+    """Ключ XMP -> (Risk, пояснение). Общая оценка для корневого XMP и XMP объектов."""
+    if key in _XMP_GUID:
+        return Risk.IDENTITY, ("Постоянный GUID документа. Он НЕ меняется при пересохранении и "
+                               "связывает между собой все версии файла и все файлы, сделанные из "
+                               "одного шаблона: по нему два разных на вид документа сводятся в один.")
+    if key.startswith("xmpMM:History"):
+        return Risk.PROVENANCE, ("Событие журнала правок xmpMM:History -- фактическая история того, "
+                                 "чем и когда файл редактировали.")
+    if key in _XMP_IDENTITY or key.startswith(("xmpRights:", "photoshop:Author")):
+        return Risk.IDENTITY, "Имя/правообладатель в XMP: переживает чистку /Info."
+    if _looks_like_path(value):
+        return Risk.ENVIRONMENT, "В значении локальный путь: выдаёт имя пользователя и структуру диска."
+    if key in ("xmp:CreateDate", "xmp:ModifyDate", "xmp:MetadataDate"):
+        return Risk.PROVENANCE, ("Дата XMP. xmp:MetadataDate часто новее xmp:ModifyDate -- разница "
+                                 "показывает, что метаданные трогали отдельно от содержимого.")
+    if key.startswith("pdfaid:") or key.startswith("pdfuaid:"):
+        return Risk.STRUCTURAL, ("Декларация соответствия PDF/A или PDF/UA. При чистке обычно "
+                                 "сохраняем: без неё файл перестаёт быть архивным/доступным.")
+    return Risk.PROVENANCE, ""
+
+
+MAX_OBJ_XMP = 200       # объектов со своим XMP, которые разбираем
+MAX_OBJ_SCAN = 200000   # объектов файла, которые просматриваем в поисках /Metadata
+
+
+def _sec_object_xmp(pdf, report, ctx):
+    """В2. XMP, привязанный не к документу, а к странице, форме или картинке.
+
+    Такие пакеты приезжают вместе с вставленной картинкой из Photoshop или
+    страницей, собранной из другого PDF, и несут чужие автора, GUID и пути.
+    Чистильщик их снимает (обход объектов в clean_pdf), а инспектор раньше не
+    видел -- отчёт «до» был неполон. Обычные служебные ключи не выводим, чтобы
+    не утопить отчёт: только личность, GUID, пути и приложение-источник."""
+    try:
+        root_gen = pdf.Root.objgen
+    except Exception:
+        root_gen = None
+    holders = scanned = 0
+    for obj in pdf.objects:
+        scanned += 1
+        if scanned > MAX_OBJ_SCAN:
+            report.err("Объектов больше %d: XMP объектов разобран не во всём файле." % MAX_OBJ_SCAN)
+            break
+        try:
+            if not isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)) or obj.objgen == root_gen:
+                continue
+            meta = _get(obj, "/Metadata")
+            if not isinstance(meta, pikepdf.Stream):
+                continue
+        except Exception:
+            continue
+        holders += 1
+        if holders > MAX_OBJ_XMP:
+            report.err("Объектов со своим XMP больше %d: разобраны первые." % MAX_OBJ_XMP)
+            break
+        kind = {"/Page": "страница", "/XObject": "объект"}.get(_s(_get(obj, "/Type")), "объект")
+        sub = _s(_get(obj, "/Subtype"))
+        if sub == "/Image":
+            kind = "картинка"
+        elif sub == "/Form":
+            kind = "форма"
+        where = "XMP: %s %d" % (kind, obj.objgen[0])
+        try:
+            packed = len(meta.read_raw_bytes())
+            if packed > MAX_XMP_PACKED:
+                report.err("%s: поток слишком велик (%d байт сжатых), не распаковываем." % (where, packed))
+                continue
+            pairs = _parse_xmp(meta.read_bytes()[:MAX_STREAM], report)
+        except Exception as exc:
+            report.err("%s не читается: %s" % (where, exc))
+            continue
+        for key, value in pairs[:MAX_XMP_KEYS]:
+            risk, note = _xmp_class(key, value)
+            if risk is Risk.PROVENANCE and key not in ("xmp:CreatorTool", "pdf:Producer"):
+                continue
+            report.add(risk, where, key, value, note=note)
+        if pairs:
+            report.add(Risk.PROVENANCE, where, "Свой XMP-пакет у объекта",
+                       "ключей: %d" % len(pairs),
+                       note="Метаданные вставленной картинки или страницы из другого файла. "
+                            "Переживают чистку /Info и корневого XMP, если их не снять отдельно.")
+    ctx["object_xmp"] = holders
 
 
 def _parse_xmp(raw: bytes, report) -> list:
@@ -1072,25 +1135,88 @@ def _sec_layers(pdf, report, ctx):
                       "high")
 
 
+MAX_RES_NODES = 3000   # словарей /Resources, которые обходим вглубь (на весь файл)
+MAX_RES_DEPTH = 12     # вложенность Form XObject в Form XObject
+
+
+def _page_resources(page, report, idx, budget, seen):
+    """Все словари /Resources страницы: свои, вложенных Form XObject и
+    тайловых /Pattern, внешних видов аннотаций (/AP). Шрифт, использованный
+    только в форме или в штампе, на странице не объявлен -- без обхода вглубь
+    список шрифтов неполон по построению.
+
+    budget -- [остаток узлов] на весь файл, seen -- уже обойдённые объекты
+    (общие формы встречаются на каждой странице, и цикл в битом файле не
+    должен зациклить разбор)."""
+    stack = [(_get(page, "/Resources"), 0)]
+    try:
+        for annot in list(_get(page, "/Annots") or [])[:MAX_ANNOTS]:
+            ap = _get(annot, "/AP")
+            if ap is None:
+                continue
+            for state in ("/N", "/R", "/D"):
+                view = _get(ap, state)
+                if view is None:
+                    continue
+                if isinstance(view, pikepdf.Stream):
+                    stack.append((_get(view, "/Resources"), 1))
+                elif isinstance(view, pikepdf.Dictionary):
+                    for k in list(view.keys())[:20]:
+                        stack.append((_get(view[k], "/Resources"), 1))
+    except Exception as exc:
+        report.err("Стр. %d: внешний вид аннотаций (/AP) не читается: %s" % (idx + 1, exc))
+    while stack and budget[0] > 0:
+        res, depth = stack.pop()
+        if res is None or depth > MAX_RES_DEPTH:
+            continue
+        # Цикл возможен только через косвенные ссылки, поэтому помним только их.
+        # id() прямых объектов не годится: pikepdf создаёт обёртку на каждое
+        # обращение, и id освобождённой обёртки достаётся следующей.
+        try:
+            key = res.objgen if res.is_indirect else None
+        except Exception:
+            key = None
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        budget[0] -= 1
+        yield res
+        for sub in ("/XObject", "/Pattern"):
+            try:
+                group = _get(res, sub)
+                if group is None:
+                    continue
+                for k in list(group.keys())[:200]:
+                    obj = group[k]
+                    if sub == "/XObject" and _s(_get(obj, "/Subtype")) != "/Form":
+                        continue  # картинки ресурсов не несут
+                    stack.append((_get(obj, "/Resources"), depth + 1))
+            except Exception as exc:
+                report.err("Стр. %d: %s не читается: %s" % (idx + 1, sub, exc))
+
+
 def _sec_fonts(pdf, report, ctx):
-    """М. Шрифты: сабсеты и гарнитуры, датирующие документ."""
+    """М. Шрифты: сабсеты и гарнитуры, датирующие документ. Включая шрифты
+    вложенных форм, узоров и внешних видов аннотаций."""
     seen = {}
+    budget, visited = [MAX_RES_NODES], set()
     for idx, page in _pages(pdf, report):
         try:
-            res = _get(page, "/Resources")
-            if res is None:
-                continue
-            fonts = _get(res, "/Font")
-            if fonts is None:
-                continue
-            for fkey in list(fonts.keys())[:100]:
-                if len(seen) >= MAX_FONTS:
-                    break
-                base = _s(_get(fonts[fkey], "/BaseFont"))
-                if base:
-                    seen.setdefault(base, idx + 1)
+            for res in _page_resources(page, report, idx, budget, visited):
+                fonts = _get(res, "/Font")
+                if fonts is None:
+                    continue
+                for fkey in list(fonts.keys())[:100]:
+                    if len(seen) >= MAX_FONTS:
+                        break
+                    base = _s(_get(fonts[fkey], "/BaseFont"))
+                    if base:
+                        seen.setdefault(base, idx + 1)
         except Exception as exc:
             report.err("Стр. %d: /Resources /Font не читается: %s" % (idx + 1, exc))
+    if budget[0] <= 0:
+        report.err("Ресурсов больше %d: шрифты вложенных форм разобраны не все." % MAX_RES_NODES)
     ctx["fonts"] = set(seen)
     if not seen:
         return
