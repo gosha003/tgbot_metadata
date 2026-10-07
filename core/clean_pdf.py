@@ -44,9 +44,10 @@ import zlib
 import pikepdf
 from lxml import etree
 
+from .clean_image import _clean_jpeg
 from .cleanmodel import PROFILE_REMOVES, Act, CleanResult, Profile
 from .insp_pdf import (RDF, _INFO_MAP, _XMP_IDENTITY, _flatten,
-                       _looks_like_path, _qname, _s, _walk_name_tree)
+                       _looks_like_path, _qname, _s, _walk_name_tree, is_jpeg_image)
 from .model import Risk
 
 # --- лимиты: чистка обязана обработать ВСЁ, иначе отказ (частично чистый файл
@@ -56,6 +57,7 @@ MAX_PAGES = 20000
 MAX_ANNOTS = 200000
 MAX_FIELDS = 20000
 MAX_XMP = 4 * 1024 * 1024            # распакованный XMP больше -- не разбираем
+MAX_IMAGES = 20000
 
 _ID_WORDS = ("author", "user", "owner", "company", "operator", "signer")  # как в инспекторе
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
@@ -416,6 +418,39 @@ def _sweep_objects(pdf, c):
                 _xmp_holder(obj, where + " XMP", c)
         except Exception as exc:  # noqa: BLE001
             c.res.err("Обход объектов: %s: %s" % (type(exc).__name__, exc))
+
+
+# ============================================================================
+#  Картинки-JPEG: EXIF внутри потока /DCTDecode
+# ============================================================================
+
+
+def _sec_images(pdf, c):
+    """Поток /DCTDecode -- JPEG-файл целиком, с EXIF камеры (GPS, серийник, дата съёмки).
+    Чистим тем же кодом, что и отдельные картинки: сегменты метаданных вырезаются,
+    сжатые данные копируются байт в байт, без перекодирования. В отчёт идут только
+    удаления: строки «JFIF сохранён» по сотне сканов утопили бы суть."""
+    n = 0
+    for obj in pdf.objects:
+        if not is_jpeg_image(obj):
+            continue
+        n += 1
+        if n > MAX_IMAGES:
+            raise _Refuse("Картинок больше %d: чистка не выполнена, чтобы не оставить часть необработанной." % MAX_IMAGES)
+        where = "картинка (объект %d)" % obj.objgen[0]
+        data = obj.read_raw_bytes()
+        sub = CleanResult(src="", dst="", fmt="jpeg", profile=c.profile.value)
+        new = _clean_jpeg(data, sub, keep_icc=not c.paranoid)
+        if new is None:
+            c.res.act(Act.FAILED, where, "JPEG", "%d байт" % len(data),
+                      note="Поток не разобран как JPEG: %s" % "; ".join(sub.errors))
+            continue
+        if new == data:
+            continue
+        obj.write(new, filter=obj.get("/Filter"), decode_parms=obj.get("/DecodeParms"))
+        for a in sub.actions:
+            if a.act is Act.REMOVED:
+                c.res.act(Act.REMOVED, "%s %s" % (where, a.location), a.label, a.before, a.after, a.note)
 
 
 # ============================================================================
@@ -827,6 +862,7 @@ def _clean(res, src, dst, profile, keep, force_signed, tmp):
             ("/Info", _sec_info, (pdf, c)),
             ("активное содержимое и вложения", _sec_doc, (pdf, c)),
             ("страницы и аннотации", _sec_pages, (pdf, c)),
+            ("картинки", _sec_images, (pdf, c)),
             ("форма", _sec_form, (pdf, c)),
             ("/Perms", _sec_perms, (pdf, c)),
             ("сквозной обход объектов", _sweep_objects, (pdf, c)),

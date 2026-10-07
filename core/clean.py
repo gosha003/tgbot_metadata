@@ -529,7 +529,7 @@ def _render(res) -> str:
     if not body:
         return _render_plain(res)
     note = ""
-    if res.clean and res.critical_after > 0:
+    if res.clean and res.critical_after > 0 and all(r[2] for r in res.residual):
         # cleanreport судит по critical_after и не знает про survived: его «осталось
         # критичных» верно как счёт, но не как вывод об утечке.
         note = ("\nПодробный отчёт ниже оценивает остаток по счётчику критичных находок; "

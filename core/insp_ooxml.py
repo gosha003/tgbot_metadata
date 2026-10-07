@@ -159,6 +159,8 @@ PERSON_ATTRS = {
     "authorId": (Risk.PROVENANCE, "authorId — ссылка на список авторов"),
     "personId": (Risk.PROVENANCE, "personId — ссылка на список авторов"),
     "lastModifiedBy": (Risk.IDENTITY, "Кем изменён комментарий"),
+    "userName": (Risk.IDENTITY, "Участник общей книги (xl/revisions)"),
+    "dateTime": (Risk.PROVENANCE, "Время сохранения участником"),
 }
 
 
@@ -944,6 +946,7 @@ def _is_person_part(name):
         return True
     return bool(
         re.match(r"^xl/persons/.*\.xml$", name)
+        or re.match(r"^xl/revisions/.*\.xml$", name)
         or re.match(r"^xl/threadedComments/.*\.xml$", name)
         or re.match(r"^ppt/comments/.*\.xml$", name)
         or re.match(r"^ppt/.*/comments\d*\.xml$", name)

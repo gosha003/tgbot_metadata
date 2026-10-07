@@ -1636,6 +1636,28 @@ def _subgroups(body):
         i += 1
 
 
+def _info_groups(body):
+    """Подгруппы \\info с раскрытым \\upr. Нелатинское значение Word пишет дважды:
+    {\\upr{\\author ANSI}{\\*\\ud{\\author Юникод}}} -- и подгруппа называется upr, а не
+    author, так что поимённый разбор её пропускал. Отдаём (имя поля, содержимое, сырое
+    тело группы верхнего уровня); содержимое -- из \\ud, там настоящий текст."""
+    for name, content, inner in _subgroups(body):
+        if name != "upr":
+            yield name, content, inner
+            continue
+        field, value = "", ""
+        for n, c, _i in _subgroups(content):
+            if n == "ud":
+                for n2, c2, _i2 in _subgroups(c):
+                    field, value = n2, c2
+                    break
+                break
+            if n and not field:
+                field, value = n, c
+        if field:
+            yield field, value, inner
+
+
 def _rtf_plain(text, enc="cp1252") -> str:
     """Текст группы RTF -> обычная строка: \\'hh, \\uN, \\\\, \\{ и \\}."""
     out, raw = [], bytearray()
@@ -1794,7 +1816,7 @@ def _rtf_info(text, enc, report):
         return
     body, _end = _brace_group(text, m.start())
 
-    for name, content, inner in _subgroups(body):
+    for name, content, inner in _info_groups(body):
         known = _RTF_INFO.get(name)
         if known:
             risk, label, note = known
