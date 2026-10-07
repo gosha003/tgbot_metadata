@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Телеграм-оболочка: инспекция (фаза 0), чистка PDF и картинок (фаза 1),
-чистка OOXML (фаза 2).
+"""Телеграм-оболочка: инспекция, чистка (Stealth / Paranoid / Пересоздать),
+пакетная чистка ZIP, удаление отчётов из чата.
 
 Инспекция файл не меняет. Чистка -- только по явному нажатию кнопки и только
-для форматов, у которых чистильщик есть (cleanreport.CLEANABLE: PDF, JPEG, PNG,
-WebP, GIF, docx, xlsx, pptx). Для остальных бот прямо пишет, что файл НЕ
-почищен и когда чистка появится: отдать файл, который пользователь считает
+для форматов, у которых чистильщик есть (cleanreport.CLEANABLE), плюс легаси
+doc/xls/ppt через пересоздание, если на машине есть LibreOffice. Для остальных
+бот прямо пишет, что файл НЕ почищен: отдать файл, который пользователь считает
 почищенным, а он не почищен, -- худший исход для этого проекта.
+
+Один экземпляр на машину: main() держит файл-замок config.LOCK_PATH.
 
 Поток чистки: отчёт об инспекции -> сообщение с профилями и кнопками (в памяти
 процесса запоминается только file_id, а не сам файл) -> нажатие -> файл
@@ -84,6 +86,18 @@ except ImportError:
     # Нет пакетного модуля: одиночная чистка работает, ZIP бот честно не берёт.
     clean_batch = None
 
+try:
+    from core.clean_regen import find_soffice
+except ImportError:
+    def find_soffice():
+        return None
+
+try:
+    from core.insp_image import _exiftool_exe
+except ImportError:
+    def _exiftool_exe():
+        return None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tgbot_metadata")
 
@@ -143,14 +157,19 @@ _KEEP_OPTS = {
     "icc": ("ICC-профиль", {"icc"}, ()),
 }
 _IMG_FMT = ("jpeg", "png", "webp", "gif")
+# Легаси OLE2: на месте не чистится в принципе, только пересоздание через
+# LibreOffice (выход -- docx/xlsx/pptx). Поэтому у них одна кнопка.
+_LEGACY = ("doc", "xls", "ppt")
 _EXT = {"pdf": ".pdf", "jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif",
         "docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx", "rtf": ".rtf",
-        "odt": ".odt", "ods": ".ods", "odp": ".odp", "zip": ".zip"}
+        "odt": ".odt", "ods": ".ods", "odp": ".odp", "zip": ".zip",
+        "doc": ".doc", "xls": ".xls", "ppt": ".ppt"}
 # Основа нейтрального имени: родовое слово по типу файла, без картинки как
 # умолчания -- иначе docx уехал бы с именем image_*.docx.
 _STEM = {"pdf": "document", "docx": "document", "xlsx": "spreadsheet",
          "pptx": "presentation", "rtf": "document", "odt": "document",
-         "ods": "spreadsheet", "odp": "presentation", "zip": "archive"}
+         "ods": "spreadsheet", "odp": "presentation", "zip": "archive",
+         "doc": "document", "xls": "spreadsheet", "ppt": "presentation"}
 
 HELP_TEXT = (
     "Это инспектор и чистильщик метаданных документов.\n\n"
@@ -171,9 +190,13 @@ HELP_TEXT = (
     "автором <b>не будет чистым</b>, и бот так и скажет.\n\n"
     "Пришлите <b>ZIP</b> -- бот почистит каждый документ внутри и вернёт архив "
     "только с почищенным и проверенным (отчёт по каждому файлу будет в чате).\n\n"
-    "Для остальных форматов (doc/xls/ppt) чистки <b>пока нет</b>: "
-    "бот так и напишет и укажет, в какой фазе она запланирована. Такой файл "
-    "он не меняет.\n\n"
+    "Старые <b>doc/xls/ppt</b> на месте не чистятся в принципе: метаданные "
+    "и удалённый текст прошлых версий вшиты в сам контейнер. Для них одна "
+    "кнопка -- <b>Пересоздать</b> через LibreOffice, на выходе docx/xlsx/pptx. "
+    "Нет LibreOffice на машине -- бот так и скажет и файл не тронет.\n\n"
+    "Автоудаление отчётов из чата: {ttl}. Удалить сразу -- кнопка "
+    "«Удалить отчёт» под отчётом или команда /clear. Почищенные файлы не "
+    "удаляются. /status -- что доступно на этой машине.\n\n"
     "Главное условие: отправляйте файл через скрепку → <b>Файл</b> "
     "(Document), а не как «Фото». Если отправить картинку как фото, "
     "Telegram пережмёт её раньше, чем бот увидит файл, и метаданные "
@@ -196,6 +219,16 @@ CHOICE_TEXT = (
     "работают: бот откажет, а не проигнорирует их молча.\n\n"
     "<i>Переключатели «Сохранить»: поле остаётся как было, поэтому файл НЕ "
     "будет чистым -- отчёт назовёт это вашим выбором.</i>"
+)
+
+LEGACY_TEXT = (
+    "\U0001F9F9 <b>Почистить файл?</b> Старый формат Office на месте не "
+    "чистится: метаданные и удалённый текст прошлых версий вшиты в сам "
+    "контейнер. Честный путь один -- <b>Пересоздать</b>: LibreOffice "
+    "сохранит документ заново в современном формате (docx/xlsx/pptx) без "
+    "истории правок и без вашего имени.\n\n"
+    "<i>Приложением станет LibreOffice, вёрстка может немного измениться. "
+    "Исходный файл не меняется: бот пришлёт новую копию.</i>"
 )
 
 BATCH_TEXT = (
@@ -328,6 +361,9 @@ async def _send_parts(target, parts: list, how: str) -> None:
     parts: готовые сообщения от рендерера.
     how: команда CLI для пометки об обрезке.
 
+    Каждое сообщение запоминается для удаления (кнопкой, /clear, по таймеру):
+    в отчёте лежат найденные значения. Кнопка «Удалить отчёт» -- под последним.
+
     Сбой на одном сообщении не съедает остальные -- отчёт уже построен, и
     показать его частично полезнее, чем не показать вовсе. Но промолчать о
     потере нельзя: недосланный кусок читается как «больше находок нет».
@@ -338,7 +374,8 @@ async def _send_parts(target, parts: list, how: str) -> None:
         if n:
             await asyncio.sleep(_SEND_PAUSE)
         try:
-            await target.answer(part)
+            _track(await target.answer(
+                part, reply_markup=_DELETE_KB if n == len(parts) - 1 else None))
         except Exception as exc:
             # Приватность: только тип сбоя. В тексте исключения Telegram
             # возвращает фрагмент сообщения, а в нём -- значения из файла.
@@ -384,6 +421,78 @@ def _remember(key: tuple, item: _Pending) -> None:
 
 
 # ============================================================================
+#  Отчёты в чате: (chat_id, message_id) -> когда отправлен
+# ============================================================================
+#
+# Спойлер прячет значение от взгляда, но текст отчёта лежит на серверах
+# Telegram и в истории чата. Поэтому бот помнит свои сообщения с находками и
+# удаляет их: кнопкой, командой /clear или сам через REPORT_TTL_MIN минут.
+# Почищенный файл не удаляется никогда: это результат, а не отчёт.
+#
+# ponytail: реестр в памяти процесса. После перезапуска бот не помнит старые
+# отчёты, их придётся удалить руками (/clear это честно говорит). Хранить на
+# диске -- если перезапуски станут частыми.
+
+_reports: "OrderedDict[tuple, float]" = OrderedDict()
+_REPORTS_MAX = 2000
+
+_DELETE_KB = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="\U0001F5D1 Удалить отчёт из чата", callback_data="rm:all")]])
+
+
+def _track(sent) -> None:
+    """Запомнить отправленное сообщение с находками. Не бросает."""
+    try:
+        key = (sent.chat.id, sent.message_id)
+    except AttributeError:
+        return
+    _reports[key] = time.monotonic()
+    while len(_reports) > _REPORTS_MAX:
+        _reports.popitem(last=False)
+
+
+async def _delete_reports(bot, chat_id=None, cutoff=None) -> int:
+    """Удалить запомненные отчёты: чата chat_id (None -- всех) и отправленные
+    не позже cutoff (monotonic; None -- все). Возврат: сколько удалено.
+    Запись забывается в любом случае: сообщение, которое не удалилось
+    (старше 48 часов или уже удалено руками), повторно пробовать незачем."""
+    keys = [k for k, t in list(_reports.items())
+            if (chat_id is None or k[0] == chat_id) and (cutoff is None or t <= cutoff)]
+    done = 0
+    for chat, mid in keys:
+        _reports.pop((chat, mid), None)
+        try:
+            await bot.delete_message(chat, mid)
+            done += 1
+        except Exception:
+            pass
+    return done
+
+
+async def _reaper(bot) -> None:
+    """Раз в минуту удаляет отчёты старше REPORT_TTL_MIN. Не падает никогда."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            n = await _delete_reports(bot, cutoff=time.monotonic() - config.REPORT_TTL_MIN * 60)
+            if n:
+                log.info("автоудаление: удалено сообщений отчётов=%d", n)
+        except Exception as exc:
+            log.error("сбой автоудаления: %s", type(exc).__name__)
+
+
+def _ttl_text() -> str:
+    m = config.REPORT_TTL_MIN
+    if m <= 0:
+        return "выключено (REPORT_TTL_MIN=0)"
+    return "через %d мин" % m if m < 120 else "через %d ч" % (m // 60)
+
+
+def _help_text() -> str:
+    return HELP_TEXT.format(ttl=_ttl_text())
+
+
+# ============================================================================
 #  Вердикт диспетчера и тексты
 # ============================================================================
 
@@ -396,6 +505,8 @@ def _e(value, cap: int = 40) -> str:
 
 def _opts_for(fmt: str) -> tuple:
     """Какие переключатели «Сохранить» имеют смысл для формата."""
+    if fmt in _LEGACY:
+        return ()  # только пересоздание, а оно whitelist не понимает
     return ("icc",) if fmt in _IMG_FMT else (
         ("title", "author", "icc") if fmt == "zip" else ("title", "author"))
 
@@ -542,7 +653,9 @@ def _keyboard(item: "_Pending | None" = None) -> InlineKeyboardMarkup:
     for opt in _opts_for(fmt):
         on = bool(item) and opt in item.keep
         rows.append(row("%s Сохранить: %s" % ("☑" if on else "☐", _KEEP_OPTS[opt][0]), "kp:" + opt))
-    if batch:
+    if fmt in _LEGACY:
+        rows.append(row("Пересоздать (LibreOffice)", "cl:regen"))
+    elif batch:
         rows.append(row("Имена в архиве: %s" % ("нейтральные" if (not item or item.neutral)
                                                 else "исходные"), "kp:nn"))
         rows += [row("Почистить всё (Stealth)", pre + ":stealth"),
@@ -575,7 +688,70 @@ async def on_help(message: Message) -> None:
     if not _allowed(message):
         await _deny(message)
         return
-    await message.answer(HELP_TEXT)
+    await message.answer(_help_text())
+
+
+@router.message(Command("clear"))
+async def on_clear(message: Message) -> None:
+    """Удалить из чата все отчёты, которые бот помнит."""
+    if not _allowed(message):
+        await _deny(message)
+        return
+    n = await _delete_reports(message.bot, message.chat.id)
+    await _quiet(message.delete())  # и саму команду: она тоже в истории
+    await message.answer(
+        "\U0001F5D1 Удалено сообщений с отчётами: %d.\n<i>Отчёты, отправленные до последнего "
+        "перезапуска бота, он не помнит -- их удалите вручную. Почищенные файлы и ваши "
+        "собственные сообщения бот не трогает.</i>" % n)
+
+
+@router.message(Command("status"))
+async def on_status(message: Message) -> None:
+    """Что умеет бот на этой машине. Путей и значений не показывает."""
+    if not _allowed(message):
+        await _deny(message)
+        return
+
+    def yes(flag, ok, no):
+        return ("✅ " + ok) if flag else ("⛔ " + no)
+
+    soffice = bool(find_soffice())
+    try:
+        exif = bool(_exiftool_exe())
+    except Exception:  # noqa: BLE001 -- обогащение, не повод падать
+        exif = False
+    lines = [
+        "<b>Состояние бота</b>",
+        yes(inspect_file is not None, "инспекция", "инспекция: модуль не загрузился"),
+        yes(clean_file is not None, "чистка Stealth / Paranoid", "чистка: модуль не загрузился"),
+        yes(clean_batch is not None, "пакетная чистка ZIP", "пакетная чистка: модуль не загрузился"),
+        yes(soffice, "LibreOffice: «Пересоздать» и старые doc/xls/ppt",
+            "LibreOffice не найден: «Пересоздать» и doc/xls/ppt недоступны"),
+        yes(exif, "exiftool: расшифровка MakerNotes в фото",
+            "exiftool нет: MakerNotes не расшифровываются (положите exiftool.exe в tools/)"),
+        "\U0001F5D1 Автоудаление отчётов: %s" % _ttl_text(),
+        "\U0001F464 Допущено пользователей: %d" % len(config.ALLOWED_USER_IDS),
+    ]
+    await message.answer("\n".join(lines))
+
+
+@router.callback_query(F.data == "rm:all")
+async def on_delete_reports(cb: CallbackQuery) -> None:
+    """Кнопка «Удалить отчёт»: удаляет все запомненные отчёты этого чата."""
+    try:
+        if not _allowed(cb):
+            await _quiet(cb.answer())
+            return
+        msg = cb.message
+        if msg is None or isinstance(msg, InaccessibleMessage):
+            await _quiet(cb.answer("Сообщение недоступно: удалите его вручную.", show_alert=True))
+            return
+        n = await _delete_reports(msg.bot, msg.chat.id)
+        await _quiet(msg.delete())  # само сообщение с кнопкой, даже если бот его забыл
+        await _quiet(cb.answer("Удалено сообщений: %d" % max(n, 1)))
+    except Exception as exc:
+        log.error("сбой удаления отчёта: %s", type(exc).__name__)
+        await _quiet(cb.answer("Не получилось удалить. Удалите вручную.", show_alert=True))
 
 
 @router.message(F.photo)
@@ -685,13 +861,19 @@ async def _inspect_and_reply(message: Message, doc: Document) -> None:
 
 
 async def _offer_cleaning(message: Message, fmt: str, doc: Document) -> None:
-    """Кнопки -- только там, где чистка есть. Иначе прямо: файл НЕ почищен."""
-    if clean_file is None or fmt not in cleanreport.CLEANABLE:
-        await message.answer(_no_clean_text(fmt))
+    """Кнопки -- только там, где чистка есть. Иначе прямо: файл НЕ почищен.
+    Легаси doc/xls/ppt -- только «Пересоздать», и только если есть LibreOffice."""
+    legacy = fmt in _LEGACY and clean_file is not None and bool(find_soffice())
+    if not legacy and (clean_file is None or fmt not in cleanreport.CLEANABLE):
+        text = _no_clean_text(fmt)
+        if fmt in _LEGACY and clean_file is not None:
+            text += ("\n\nПочистить такой файл можно пересозданием через LibreOffice, но на этой "
+                     "машине он не найден. Установите LibreOffice и пришлите файл снова.")
+        await message.answer(text)
         return
     user = message.from_user
     item = _Pending(doc.file_id, fmt, user.id if user else None, time.monotonic() + _PENDING_TTL)
-    sent = await message.answer(CHOICE_TEXT, reply_markup=_keyboard(item))
+    sent = await message.answer(LEGACY_TEXT if legacy else CHOICE_TEXT, reply_markup=_keyboard(item))
     _remember((sent.chat.id, sent.message_id), item)
 
 
@@ -719,7 +901,7 @@ async def on_other(message: Message) -> None:
     if not _allowed(message):
         await _deny(message)
         return
-    await message.answer(HELP_TEXT)
+    await message.answer(_help_text())
 
 
 @router.callback_query(F.data.startswith(("cl:", "bt:", "kp:")))
@@ -825,7 +1007,8 @@ async def _clean_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
         if ok:
             await _quiet(msg.delete())
             if level != "ok":
-                await msg.answer(note)  # предупреждение раньше отчёта, который может писать «ЧИСТО»
+                # в вердикте бывают выжившие значения -- это тоже отчёт, под удаление
+                _track(await msg.answer(note))  # предупреждение раньше отчёта, который может писать «ЧИСТО»
                 # (и выбор пользователя тоже называем до отчёта, а не прячем в нём)
         else:
             await _say(msg, "⛔ <b>Файл НЕ почищен</b> -- чистка не удалась, почищенной копии нет, "
@@ -921,14 +1104,16 @@ async def _batch_and_reply(msg: Message, item: _Pending, profile: Profile) -> No
         else:
             # Отчёт на сотни файлов в чат не лезет (429 от Telegram): сводка + полный документом.
             head = text.split("\n\n", 1)[0]
-            await msg.answer("<pre>%s</pre>\nПодробно по каждому файлу -- документом ниже."
-                             % html.escape(head, quote=False))
+            _track(await msg.answer("<pre>%s</pre>\nПодробно по каждому файлу -- документом ниже."
+                                    % html.escape(head, quote=False)))
             rep = os.path.join(tmp_dir, "report.txt")
             with open(rep, "w", encoding="utf-8") as fh:
                 fh.write(text)
-            await msg.answer_document(
+            # Исходные имена файлов -- тоже метаданные: документ-отчёт удаляется как отчёт.
+            _track(await msg.answer_document(
                 FSInputFile(rep, filename="report_%s.txt" % secrets.token_hex(3)),
-                caption="Отчёт по каждому файлу (с исходными именами).")
+                caption="Отчёт по каждому файлу (с исходными именами).",
+                reply_markup=_DELETE_KB))
 
         det = _batch_detect_line(res)
         if det:
@@ -981,18 +1166,62 @@ async def _run() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     # Меню команд у кнопки «/» в Telegram. Без него /start не видно.
-    await _quiet(bot.set_my_commands([BotCommand(command="start", description="Как пользоваться"),
-                                      BotCommand(command="help", description="Справка")]))
-    await dp.start_polling(bot)
+    await _quiet(bot.set_my_commands([
+        BotCommand(command="start", description="Как пользоваться"),
+        BotCommand(command="clear", description="Удалить отчёты из чата"),
+        BotCommand(command="status", description="Что доступно на этой машине"),
+        BotCommand(command="help", description="Справка")]))
+    log.info("доступ: пользователей=%d, автоудаление отчётов=%d мин",
+             len(config.ALLOWED_USER_IDS), config.REPORT_TTL_MIN)
+    reaper = asyncio.create_task(_reaper(bot)) if config.REPORT_TTL_MIN > 0 else None
+    try:
+        await dp.start_polling(bot)
+    finally:
+        if reaper:
+            reaper.cancel()
+
+
+def _acquire_lock(path: str):
+    """Захватить файл-замок без ожидания. Возврат: открытый файл (держать до
+    конца процесса) или None, если замок держит другой процесс.
+
+    Замок снимает ОС, когда процесс завершается любым способом, включая
+    убийство из диспетчера задач, -- в отличие от pid-файла, который после
+    аварии остаётся и блокирует запуск."""
+    try:
+        fh = open(path, "a+b")
+    except OSError:
+        return None
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
 
 
 def main() -> None:
     if "--selftest" in sys.argv[1:]:
         raise SystemExit(asyncio.run(_selftest()))
+    lock = _acquire_lock(config.LOCK_PATH)
+    if lock is None:
+        sys.stderr.write(
+            "Бот уже запущен в другом окне или процессе на этой машине.\n"
+            "Два экземпляра с одним токеном мешают друг другу: Telegram отдаёт сообщения "
+            "то одному, то другому.\nОстановите первый (Ctrl+C в его окне) и запустите снова.\n")
+        raise SystemExit(1)
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
         pass
+    finally:
+        lock.close()
 
 
 # ============================================================================
@@ -1027,6 +1256,11 @@ async def _selftest() -> int:
     class FakeBot:
         def __init__(self):
             self.files = {}
+            self.deleted = []
+
+        async def delete_message(self, chat_id, message_id):
+            self.deleted.append((chat_id, message_id))
+            return True
 
         async def download(self, file, destination, timeout=30):
             with open(destination, "wb") as fh:
@@ -1081,10 +1315,20 @@ async def _selftest() -> int:
     grab = Grab()
     log.addHandler(grab)
     work = tempfile.mkdtemp(prefix="botself_")
+    # Свой %TEMP% на время самопроверки: проверки «каталоги убраны» считают
+    # tginsp_*/tgclean_*, и запущенный рядом живой бот давал ложные провалы.
+    saved_tempdir = tempfile.tempdir
+    tempfile.tempdir = tempfile.mkdtemp(prefix="botself_tmp_")
     bot = FakeBot()
     sha = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
     left = lambda: sorted(glob.glob(os.path.join(tempfile.gettempdir(), "tg[ic][nl]*_*")))  # noqa: E731
     texts = lambda ev: [m.text for k, m in ev if k == "text"]  # noqa: E731
+
+    def _is_choice(m):
+        """Сообщение с кнопками чистки (а не кнопка «Удалить отчёт» под отчётом)."""
+        mk = getattr(m, "markup", None)
+        return mk is not None and any(b.callback_data != "rm:all"
+                                      for r in mk.inline_keyboard for b in r)
     docs = lambda ev: [d for k, d in ev if k == "doc"]  # noqa: E731
     saved = (g["clean_file"], g["_CLEAN_TIMEOUT"], dict(core_clean._CLEANERS), list(config.ALLOWED_USER_IDS))
     # Подставные пользователи самопроверки -- 7 и 8. Раньше их пускал пустой
@@ -1103,7 +1347,7 @@ async def _selftest() -> int:
         m = FakeMsg(bot, ev)
         await _inspect_and_reply(m, SimpleNamespace(
             file_id=name, file_name=os.path.basename(path), file_size=len(bot.files[name])))
-        choice = next((x for k, x in ev if k == "text" and x.markup is not None), None)
+        choice = next((x for k, x in ev if k == "text" and _is_choice(x)), None)
         return path, exp, ev, choice
 
     async def click(choice, data, user_id=7):
@@ -1210,13 +1454,39 @@ async def _selftest() -> int:
                   [x.name for x in d])
             check("odt: исходные значения ушли", d and survivors(src, d[0].data, "odt") == [])
 
-        for maker, nm, phase in ((fx.make_doc, "doc", 4),):
-            _, _, ev, ch = await send(maker, nm)
-            last = texts(ev)[-1]
-            check("%s: нет кнопок, нет файла, нет записи" % nm,
-                  ch is None and not docs(ev) and not _pending and all(m.markup is None for k, m in ev if k == "text"))
-            check("%s: «НЕ почищен», только инспектируется, фаза %d" % (nm, phase),
-                  "НЕ почищен" in last and "только инспектируется" in last and "фазе %d" % phase in last, last)
+        # Легаси без LibreOffice: кнопок нет, фаза названа, подсказано, чего не хватает.
+        real_soffice = g["find_soffice"]
+        g["find_soffice"] = lambda: None
+        try:
+            for maker, nm, phase in ((fx.make_doc, "doc", 4),):
+                _, _, ev, ch = await send(maker, nm)
+                last = texts(ev)[-1]
+                check("%s без LibreOffice: нет кнопок чистки, нет файла, нет записи" % nm,
+                      ch is None and not docs(ev) and not _pending
+                      and not any(_is_choice(m) for k, m in ev if k == "text"))
+                check("%s без LibreOffice: «НЕ почищен», фаза %d, подсказка про LibreOffice" % (nm, phase),
+                      "НЕ почищен" in last and "только инспектируется" in last
+                      and "фазе %d" % phase in last and "LibreOffice" in last, last)
+        finally:
+            g["find_soffice"] = real_soffice
+
+        # Легаси с LibreOffice: одна кнопка «Пересоздать», на выходе docx.
+        if real_soffice():
+            src, _, ev, ch = await send(fx.make_doc, "doc_regen")
+            btns = [b.text for r in ch.markup.inline_keyboard for b in r] if ch else []
+            check("doc: только «Пересоздать» и «Не чистить», без «Сохранить»",
+                  btns == ["Пересоздать (LibreOffice)", "Не чистить"], btns)
+            check("doc: текст объясняет, почему только пересоздание",
+                  ch is not None and "вшиты в сам" in ch.text)
+            if ch is not None:
+                await click(ch, "cl:regen")
+                d = docs(ev)
+                check("doc -> пересоздан, отправлен как document_*.docx",
+                      len(d) == 1 and re.fullmatch(r"document_[0-9a-f]{6}\.docx", d[0].name) is not None,
+                      [x.name for x in d] or texts(ev)[-1][:300])
+                check("doc -> исходные значения ушли", d and survivors(src, d[0].data, "docx") == [])
+        else:
+            print("  [пропуск] LibreOffice не найден: пересоздание doc не проверено")
 
         print("4. ok=False: файл не отправляется")
         def refuse(s, d, p, keep=None):
@@ -1338,7 +1608,7 @@ async def _selftest() -> int:
             def __init__(self, fail_on):
                 self.fail_on, self.n, self.sent = fail_on, 0, []
 
-            async def answer(self, text):
+            async def answer(self, text, **kw):
                 self.n += 1
                 if self.n in self.fail_on:
                     raise RuntimeError("boom")
@@ -1684,6 +1954,71 @@ async def _selftest() -> int:
         check("pdf: после чистки в ответе бота есть строка ОЦЕНКА", any("ОЦЕНКА:" in t for t in texts(ev)))
         check("оценка не продублирована ботом там, где её уже печатает cleanreport",
               sum("Заметность чистки" in t for t in texts(ev)) == 0, [t[:80] for t in texts(ev)])
+
+        print("15. отчёты удаляются: кнопка, /clear, таймер; файл-результат не трогается")
+        _reports.clear()
+        bot.deleted.clear()
+        src, exp, ev, ch = await send(fx.make_pdf, "pdf15")
+        rep_msgs = [m for k, m in ev if k == "text" and m.markup is _DELETE_KB]
+        check("под последним сообщением отчёта -- кнопка «Удалить отчёт», ровно одна",
+              len(rep_msgs) == 1, len(rep_msgs))
+        tracked = set(_reports)
+        check("сообщения отчёта запомнены для удаления", len(tracked) >= 1, len(tracked))
+        await click(ch, "cl:stealth")
+        n_before = len(_reports)
+        check("отчёт о чистке тоже запомнен", n_before > len(tracked), (n_before, len(tracked)))
+        cb = FakeCb(rep_msgs[0], "rm:all")
+        await on_delete_reports(cb)
+        check("кнопка удалила все отчёты чата и забыла их",
+              not _reports and set(bot.deleted) >= tracked and cb.acks, (len(_reports), cb.acks))
+        check("почищенный файл не удалялся (он не в реестре)", len(docs(ev)) == 1)
+        cb = FakeCb(rep_msgs[0], "rm:all", user_id=99)
+        bot.deleted.clear()
+        await on_delete_reports(cb)
+        check("чужой не может удалить отчёты", not bot.deleted)
+
+        _reports.clear()
+        bot.deleted.clear()
+        await send(fx.make_pdf, "pdf15b")
+        ev = []
+        m = FakeMsg(bot, ev)
+        await on_clear(m)
+        check("/clear удалил отчёты и сказал сколько",
+              bot.deleted and not _reports and any("Удалено сообщений" in t for t in texts(ev)), texts(ev))
+
+        _reports.clear()
+        _track(SimpleNamespace(chat=SimpleNamespace(id=5), message_id=1))
+        _reports[(5, 1)] -= 3600
+        _track(SimpleNamespace(chat=SimpleNamespace(id=5), message_id=2))
+        bot.deleted.clear()
+        n = await _delete_reports(bot, cutoff=time.monotonic() - 30 * 60)
+        check("таймер удаляет только старше срока", n == 1 and bot.deleted == [(5, 1)]
+              and (5, 2) in _reports, (n, bot.deleted))
+        _track(None)
+        check("_track(None) не падает", True)
+        _reports.clear()
+
+        print("16. /status, /help, замок единственного экземпляра")
+        ev = []
+        await on_status(FakeMsg(bot, ev))
+        st = texts(ev)[-1] if texts(ev) else ""
+        check("/status называет LibreOffice, exiftool и автоудаление",
+              "LibreOffice" in st and "exiftool" in st and "Автоудаление" in st, st)
+        check("/status не раскрывает путей", ":\\" not in st and "/usr" not in st, st)
+        ev = []
+        await on_help(FakeMsg(bot, ev))
+        h = texts(ev)[-1] if texts(ev) else ""
+        check("справка собрана без «{ttl}» и называет /clear", "{" not in h and "/clear" in h, h[-300:])
+        lock_path = os.path.join(work, "t.lock")
+        first = _acquire_lock(lock_path)
+        second = _acquire_lock(lock_path)
+        check("замок: первый взял, второй -- нет", first is not None and second is None)
+        if first:
+            first.close()
+        third = _acquire_lock(lock_path)
+        check("замок: после закрытия снова свободен", third is not None)
+        if third:
+            third.close()
     finally:
         g["clean_file"], g["_CLEAN_TIMEOUT"] = saved[0], saved[1]
         core_clean._CLEANERS.clear()
@@ -1692,7 +2027,10 @@ async def _selftest() -> int:
         config.MAX_SEND_BYTES = 50 * 1024 * 1024
         log.removeHandler(grab)
         shutil.rmtree(work, ignore_errors=True)
+        private_tmp, tempfile.tempdir = tempfile.tempdir, saved_tempdir
+        shutil.rmtree(private_tmp, ignore_errors=True)
         _pending.clear()
+        _reports.clear()
 
     print("\nИТОГО: %d проверок, %d провалено" % (total[0], len(fails)))
     for f in fails:

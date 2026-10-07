@@ -2,6 +2,9 @@
 .env
 *.env
 
+# Замок единственного экземпляра бота.
+.bot.lock
+
 # Python
 __pycache__/
 *.py[cod]

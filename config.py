@@ -143,6 +143,28 @@ ALLOWED_USER_IDS: list[int] = _load_ids()
 ACCESS_CONFIGURED: bool = bool(ALLOWED_USER_IDS)
 
 
+def _load_ttl() -> int:
+    """Через сколько минут бот сам удаляет свои отчёты из чата. 0 -- не удалять.
+
+    Отчёт несёт найденные значения (под спойлером, но текстом на серверах
+    Telegram), поэтому умолчание -- удалять. Удалить своё сообщение бот может
+    только в течение 48 часов, отсюда потолок.
+    """
+    raw = os.environ.get("REPORT_TTL_MIN") or _parse_dotenv(ENV_PATH).get("REPORT_TTL_MIN")
+    try:
+        return max(0, min(int(str(raw).strip()), 47 * 60))
+    except (TypeError, ValueError):
+        return 60
+
+
+REPORT_TTL_MIN: int = _load_ttl()
+
+# Файл-замок: второй экземпляр бота с тем же токеном не запускается. Иначе
+# Telegram раздаёт сообщения то одному, то другому, и ответ приходит от
+# экземпляра со старыми настройками.
+LOCK_PATH = os.path.join(ROOT, ".bot.lock")
+
+
 def require_token() -> str:
     """Вызывается только из точки входа. Без трейсбека объясняет, что делать."""
     if TG_BOT_TOKEN:

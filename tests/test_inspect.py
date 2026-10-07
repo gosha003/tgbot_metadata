@@ -229,6 +229,54 @@ def test_pdf_incremental(tmp):
 
 
 @_with_tmp
+def test_pdf_nested(tmp):
+    """Шрифт, объявленный только во вложенной форме, и XMP у картинки: раньше
+    инспектор смотрел лишь /Resources страницы и корневой XMP и не видел ни то,
+    ни другое. Чистильщик XMP объектов снимал, а отчёт «до» о нём молчал."""
+    import pikepdf
+
+    path = os.path.join(tmp, "nested.pdf")
+    pdf = pikepdf.new()
+    pdf.add_blank_page()
+    font = pdf.make_indirect(pikepdf.Dictionary(
+        Type=pikepdf.Name.Font, Subtype=pikepdf.Name.TrueType, BaseFont=pikepdf.Name("/QWERTY+Aptos")))
+    inner = pikepdf.Stream(pdf, b"BT /F1 12 Tf (x) Tj ET")
+    inner.Type, inner.Subtype, inner.BBox = pikepdf.Name.XObject, pikepdf.Name.Form, [0, 0, 9, 9]
+    inner.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=font))
+    outer = pikepdf.Stream(pdf, b"/Fm2 Do")  # форма в форме: шрифт на два уровня глубже страницы
+    outer.Type, outer.Subtype, outer.BBox = pikepdf.Name.XObject, pikepdf.Name.Form, [0, 0, 9, 9]
+    outer.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Fm2=pdf.make_indirect(inner)))
+    xmp = (b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/'
+           b'22-rdf-syntax-ns#"><rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" '
+           b'xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" xmpMM:DocumentID="xmp.did:NESTED-GUID-77">'
+           b'<dc:creator><rdf:Seq><rdf:li>Nested Author</rdf:li></rdf:Seq></dc:creator>'
+           b'</rdf:Description></rdf:RDF></x:xmpmeta>')
+    meta = pikepdf.Stream(pdf, xmp)
+    meta.Type, meta.Subtype = pikepdf.Name.Metadata, pikepdf.Name.XML
+    img = pikepdf.Stream(pdf, b"\x00\x00\x00")
+    img.Type, img.Subtype, img.Width, img.Height = pikepdf.Name.XObject, pikepdf.Name.Image, 1, 1
+    img.ColorSpace, img.BitsPerComponent = pikepdf.Name.DeviceRGB, 8
+    img.Metadata = pdf.make_indirect(meta)
+    pdf.pages[0].Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(
+        Fm1=pdf.make_indirect(outer), Im1=pdf.make_indirect(img)))
+    pdf.save(path)
+
+    before = _sha256(path)
+    rep = inspect_file(path)
+    _check("pdf_nested: вход не изменён", _sha256(path) == before)
+    _check("pdf_nested: шрифт из формы в форме найден",
+           any("QWERTY+Aptos" in f.value for f in rep.findings),
+           [f.value for f in rep.findings if "Font" in f.location])
+    xmp_found = {f.value: f for f in rep.findings if f.location.startswith("XMP: картинка")}
+    _check("pdf_nested: автор из XMP картинки найден и это IDENTITY",
+           "Nested Author" in xmp_found and xmp_found["Nested Author"].risk is Risk.IDENTITY,
+           list(xmp_found))
+    _check("pdf_nested: GUID из XMP картинки найден",
+           "xmp.did:NESTED-GUID-77" in xmp_found, list(xmp_found))
+    _check("pdf_nested: без ошибок разбора", not rep.errors, rep.errors)
+
+
+@_with_tmp
 def test_jpeg(tmp):
     path, expected = fixtures.make_jpeg(tmp)
     _check_fixture("jpeg", path, expected, "jpeg")
