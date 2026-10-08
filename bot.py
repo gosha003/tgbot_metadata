@@ -729,7 +729,7 @@ async def on_status(message: Message) -> None:
         yes(soffice, "LibreOffice: «Пересоздать» и старые doc/xls/ppt",
             "LibreOffice не найден: «Пересоздать» и doc/xls/ppt недоступны"),
         yes(exif, "exiftool: расшифровка MakerNotes в фото",
-            "exiftool нет: MakerNotes не расшифровываются (положите exiftool.exe в tools/)"),
+            "exiftool нет: MakerNotes не расшифровываются (как поставить -- docs/GUIDE.md, раздел 7)"),
         "\U0001F5D1 Автоудаление отчётов: %s" % _ttl_text(),
         "\U0001F464 Допущено пользователей: %d" % len(config.ALLOWED_USER_IDS),
     ]
@@ -1217,10 +1217,21 @@ def main() -> None:
             "Два экземпляра с одним токеном мешают друг другу: Telegram отдаёт сообщения "
             "то одному, то другому.\nОстановите первый (Ctrl+C в его окне) и запустите снова.\n")
         raise SystemExit(1)
+    from aiogram.exceptions import TelegramNotFound, TelegramUnauthorizedError
+    from aiogram.utils.token import TokenValidationError
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
         pass
+    except (TokenValidationError, TelegramUnauthorizedError, TelegramNotFound):
+        # Самая частая ошибка первого запуска: в .env осталась заглушка из
+        # .env.example или токен скопирован не целиком. На несуществующий токен
+        # Telegram отвечает 404 (NotFound), на отозванный -- 401. Трейсбек тут бесполезен.
+        sys.stderr.write(
+            "Telegram не принял токен из TG_BOT_TOKEN.\n"
+            "Проверьте .env: токен от @BotFather целиком, вида 123456789:AAH..., без пробелов и "
+            "кавычек вокруг. Если токен перевыпускали (/revoke), нужен новый.\n")
+        raise SystemExit(1)
     finally:
         lock.close()
 

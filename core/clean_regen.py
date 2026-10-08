@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 import shutil
@@ -34,12 +35,23 @@ OUTPUT_FMT = {
 }
 
 
-def find_soffice():
-    """Путь к soffice.com, если LibreOffice установлен. Иначе None.
+# Где LibreOffice лежит, если его нет в PATH. Windows и macOS в PATH себя не
+# добавляют; на Linux пакетный soffice обычно в PATH, но snap и ручная
+# установка в /opt -- нет.
+_SOFFICE_PLACES = (
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    os.path.expanduser("~/Applications/LibreOffice.app/Contents/MacOS/soffice"),
+    "/usr/lib/libreoffice/program/soffice",
+    "/opt/libreoffice/program/soffice",
+    "/snap/bin/libreoffice",
+)
 
-    soffice.com, а не soffice.exe: exe отцепляется от консоли и ничего не
-    печатает. Поиск по стандартным каталогам: в PATH LibreOffice себя не
-    добавляет.
+
+def find_soffice():
+    """Путь к soffice, если LibreOffice установлен. Иначе None.
+
+    Windows: soffice.com, а не soffice.exe -- exe отцепляется от консоли и
+    ничего не печатает. Сначала стандартные каталоги установки, потом PATH.
     """
     for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
         if not base:
@@ -47,7 +59,15 @@ def find_soffice():
         path = os.path.join(base, "LibreOffice", "program", "soffice.com")
         if os.path.isfile(path):
             return path
-    return shutil.which("soffice.com") or shutil.which("soffice")
+    found = shutil.which("soffice.com") or shutil.which("soffice") or shutil.which("libreoffice")
+    if found:
+        return found
+    # /opt/libreofficeX.Y -- так ставит официальный .deb/.rpm с сайта
+    extra = sorted(glob.glob("/opt/libreoffice*/program/soffice"), reverse=True)
+    for path in _SOFFICE_PLACES + tuple(extra):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
 
 
 def _file_url(path) -> str:

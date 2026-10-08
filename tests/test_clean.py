@@ -2120,6 +2120,39 @@ def test_26_report_residual_honest():
 # ===========================================================================
 
 
+def test_27_find_soffice_other_os():
+    """LibreOffice на macOS не в PATH: лежит внутри .app. Mac здесь нет, поэтому
+    подменяем окружение, isfile и which -- проверяем сам порядок поиска."""
+    from core import clean_regen as cr
+
+    real = (cr.os.environ.get("ProgramFiles"), cr.os.environ.get("ProgramFiles(x86)"),
+            cr.shutil.which, cr.os.path.isfile, cr.os.access, cr.glob.glob)
+    mac = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    try:
+        for key in ("ProgramFiles", "ProgramFiles(x86)"):
+            cr.os.environ.pop(key, None)
+        cr.shutil.which = lambda name: None
+        cr.os.access = lambda p, mode: True
+        cr.glob.glob = lambda pattern: []
+        cr.os.path.isfile = lambda p: p == mac
+        _check("soffice: macOS -- найден внутри LibreOffice.app", cr.find_soffice() == mac, cr.find_soffice())
+        cr.glob.glob = lambda pattern: ["/opt/libreoffice7.6/program/soffice", "/opt/libreoffice24.8/program/soffice"]
+        cr.os.path.isfile = lambda p: p.startswith("/opt/")
+        _check("soffice: Linux /opt -- найден", (cr.find_soffice() or "").startswith("/opt/libreoffice"),
+               cr.find_soffice())
+        cr.shutil.which = lambda name: "/usr/bin/soffice" if name == "soffice" else None
+        _check("soffice: PATH важнее стандартных мест", cr.find_soffice() == "/usr/bin/soffice")
+        cr.shutil.which = lambda name: None
+        cr.glob.glob = lambda pattern: []
+        cr.os.path.isfile = lambda p: False
+        _check("soffice: нигде нет -- None", cr.find_soffice() is None)
+    finally:
+        for key, val in (("ProgramFiles", real[0]), ("ProgramFiles(x86)", real[1])):
+            if val is not None:
+                cr.os.environ[key] = val
+        cr.shutil.which, cr.os.path.isfile, cr.os.access, cr.glob.glob = real[2:]
+
+
 def test_98_verdicts_agree():
     """Пользователь видит оба текста (CLI печатает вердикт диспетчера сверху и
     отчёт cleanreport ниже). Они не имеют права расходиться ни в одну сторону."""

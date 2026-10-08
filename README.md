@@ -3,6 +3,10 @@
 Телеграм-бот и CLI для **инспекции и чистки метаданных документов**: docx/xlsx/pptx,
 PDF, картинки, легаси `.doc`/`.xls`/`.ppt`, ODF, RTF.
 
+> **Хотите просто установить и пользоваться?** Пошаговая инструкция для
+> Windows, macOS и Linux, без знания программирования:
+> **[docs/GUIDE.md](docs/GUIDE.md)**. Ниже — техническое описание.
+
 Готовы все пять фаз: инспекция, чистка на месте (PDF, картинки, docx/xlsx/pptx,
 ODF, RTF), оценка заметности чистки, пересоздание через LibreOffice
 (`Regenerate`, единственный путь для легаси `.doc`/`.xls`/`.ppt`), whitelist
@@ -16,8 +20,11 @@ ODF, RTF), оценка заметности чистки, пересоздан�
 ## Установка
 
 ```bash
-pip install aiogram pikepdf lxml olefile
+pip install -r requirements.txt
 ```
+
+Нужен Python 3.10+ (проверено на 3.11). На macOS и свежих Linux — в
+виртуальном окружении, см. [docs/GUIDE.md](docs/GUIDE.md#3-установка).
 
 Больше ничего не нужно: инспекция и чистка на месте работают на этом наборе.
 `exiftool`, LibreOffice, Ghostscript, Pillow, pytest — **не требуются**.
@@ -25,7 +32,8 @@ pip install aiogram pikepdf lxml olefile
 Необязательное обогащение (команда бота `/status` показывает, что найдено):
 
 - **LibreOffice** — включает кнопку «Пересоздать» и чистку `.doc`/`.xls`/`.ppt`.
-  Ищется в `Program Files`, в `PATH` он себя не добавляет.
+  Ищется в `Program Files`, в `PATH`, в `/Applications/LibreOffice.app` на macOS
+  и в `/opt/libreoffice*` на Linux.
 - **exiftool** — положить `exiftool.exe` в `tools/`: инспектор картинок
   дополнит находки расшифрованными MakerNotes. Нет его — работает без него.
 
@@ -51,7 +59,9 @@ export TG_BOT_TOKEN=123456:ABC...        # Bash
 $env:TG_BOT_TOKEN = "123456:ABC..."      # PowerShell
 ```
 
-либо файл `.env` в корне проекта (он в `.gitignore`):
+либо файл `.env` в корне проекта (он в `.gitignore`). Образец со всеми
+настройками — `.env.example`: `copy .env.example .env` (Windows) или
+`cp .env.example .env`.
 
 ```
 TG_BOT_TOKEN=123456:ABC...
@@ -94,7 +104,7 @@ TG_OWNER_ID=123456789
 PYTHONIOENCODING=utf-8 python -m tests.test_inspect
 ```
 
-**5150 проверок**: 429 на инспекцию (`tests.test_inspect`), 1381 на чистку
+**5154 проверок**: 429 на инспекцию (`tests.test_inspect`), 1385 на чистку
 (`tests.test_clean`), 1637 в самопроверке `core.zipfix`, 1289 в
 `core.clean_ooxml`, 130 в `core.clean_pdf`, 80 в `core.clean --selftest`,
 56 в `core.clean_batch`, 148 в `bot.py --selftest`.
