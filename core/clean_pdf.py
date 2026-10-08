@@ -771,6 +771,37 @@ def _drop_id(path):
     return True
 
 
+_ID_PAIR_RE = re.compile(rb"/ID\s*\[\s*<([0-9A-Fa-f]*)>\s*<([0-9A-Fa-f]*)>\s*\]")
+
+
+def _reroll_id(path, same):
+    """STEALTH: заменить оба значения /ID в трейлере результата случайными той же длины.
+
+    deterministic_id выводит /ID из содержимого. Повторная чистка уже чищеного файла даёт то
+    же содержимое, а значит тот же /ID: две копии связываются, и оракул честно видит выжившее
+    значение (замерено на настоящем PDF, вычищенном ботом дважды). Случайное значение ни с
+    чем не связано. same -- сохранить форму пары (ID[0]==ID[1], как у Word и Chrome).
+    Длина не меняется, поэтому смещения xref не плывут. False -- /ID не найден, файл не тронут."""
+    with open(path, "r+b") as fh:
+        fh.seek(0, 2)
+        fh.seek(max(0, fh.tell() - 64))
+        m = re.search(rb"startxref\s+(\d+)", fh.read())
+        if not m:
+            return False
+        off = int(m.group(1))
+        fh.seek(off)
+        m = _ID_PAIR_RE.search(fh.read())
+        if not m or not m.group(1) or len(m.group(1)) % 2 or len(m.group(2)) % 2:
+            return False
+        a = os.urandom(len(m.group(1)) // 2).hex().encode()
+        b = a if same and len(m.group(1)) == len(m.group(2)) else os.urandom(len(m.group(2)) // 2).hex().encode()
+        fh.seek(off + m.start(1))
+        fh.write(a)
+        fh.seek(off + m.start(2))
+        fh.write(b)
+    return True
+
+
 def _fix_header(path, src):
     """Заменить маркер qpdf в заголовке на равный по длине маркер исходника. -> (было, стало)."""
     with open(src, "rb") as fh:
@@ -884,6 +915,9 @@ def _clean(res, src, dst, profile, keep, force_signed, tmp):
 
     marks = _fix_header(tmp, src)
     id_dropped = c.paranoid and _drop_id(tmp)
+    if not c.paranoid:
+        # Без исходного /ID QPDF пишет пару равной -- форму сохраняем такую же.
+        _reroll_id(tmp, before_id[1] if before_id else True)
     bad = _verify(res, tmp, snap, npages, c.paranoid)
     for b in bad:
         res.err(b)
@@ -910,8 +944,8 @@ def _clean(res, src, dst, profile, keep, force_signed, tmp):
             after = "/".join(bytes(x).hex()[:8] for x in q.trailer.get("/ID", []))
         res.act(Act.REGENERATED, "trailer", "/ID", before_id[0], after,
                 "ID[0] у многих продюсеров выведен из пути и имени файла и связывает файлы. Оба значения "
-                "новые; пара %s, как у исходника (разошедшаяся пара выдаёт пересохранение). ID[1] выведен "
-                "из содержимого результата (deterministic_id), не из времени и не из имени файла."
+                "новые и случайные; пара %s, как у исходника (разошедшаяся пара выдаёт пересохранение). "
+                "Не из содержимого: иначе повторная чистка того же файла давала бы тот же /ID."
                 % ("совпадает" if before_id[1] else "различна"))
     if marks:
         res.act(Act.NORMALIZED, "заголовок", "бинарный маркер qpdf", marks[0], marks[1],
@@ -1137,6 +1171,13 @@ def _selftest():
             ids = [bytes(x) for x in q.trailer["/ID"]]
         _check("фикстура: исходная пара равна", old[0] == old[1])
         _check("пара совпадала -- совпадает, значение новое", res.ok and ids[0] == ids[1] and ids[0] != old[0])
+        # Повторная чистка результата: раньше /ID выводился из содержимого и совпадал с входом,
+        # оракул видел выжившее значение, бот отвечал «почищено не полностью».
+        res2, dst2 = run(dst, "eqid_again")
+        with pikepdf.open(dst2) as q:
+            ids2 = [bytes(x) for x in q.trailer["/ID"]]
+        _check("повторная чистка: /ID снова новый, пара равна",
+               res2.ok and ids2[0] == ids2[1] and ids2[0] != ids[0], res2.errors)
 
         # --- 3. PARANOID ----------------------------------------------------------
         print("3. PARANOID: оракул требует critical == 0")
