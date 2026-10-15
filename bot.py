@@ -87,8 +87,10 @@ except ImportError:
     clean_batch = None
 
 try:
-    from core.clean_regen import find_soffice
+    from core.clean_regen import OUTPUT_FMT as _REGEN_FMT, find_soffice
 except ImportError:
+    _REGEN_FMT = {}
+
     def find_soffice():
         return None
 
@@ -212,13 +214,19 @@ CHOICE_TEXT = (
     "пустые метаданные сами выдают, что файл чистили.\n"
     "• <b>Paranoid</b> -- убирает всё, включая приложение и даты. Чище, но "
     "результат выглядит обработанным.\n"
+    "{regen}\n"
+    "<i>Переключатели «Сохранить»: поле остаётся как было, поэтому файл НЕ "
+    "будет чистым -- отчёт назовёт это вашим выбором.</i>"
+)
+
+# Только для форматов, которые LibreOffice умеет пересохранить (clean_regen.OUTPUT_FMT).
+# PDF и картинки он не пересоздаёт: кнопка там вела бы в гарантированный отказ.
+REGEN_BULLET = (
     "• <b>Пересоздать</b> -- сохранить заново через LibreOffice. Следа чистки "
     "нет, потому что файл никто не чистил, но приложение становится "
     "LibreOffice и вёрстка может измениться. Нет LibreOffice -- отказ, "
     "а не другая чистка. Переключатели «Сохранить» с пересозданием не "
-    "работают: бот откажет, а не проигнорирует их молча.\n\n"
-    "<i>Переключатели «Сохранить»: поле остаётся как было, поэтому файл НЕ "
-    "будет чистым -- отчёт назовёт это вашим выбором.</i>"
+    "работают: бот откажет, а не проигнорирует их молча.\n"
 )
 
 LEGACY_TEXT = (
@@ -664,8 +672,9 @@ def _keyboard(item: "_Pending | None" = None) -> InlineKeyboardMarkup:
                  row("Пересоздать всё (LibreOffice)", pre + ":regen")]
     else:
         rows += [row("Почистить (Stealth)", pre + ":stealth"),
-                 row("Почистить (Paranoid)", pre + ":paranoid"),
-                 row("Пересоздать (LibreOffice)", pre + ":regen")]
+                 row("Почистить (Paranoid)", pre + ":paranoid")]
+        if fmt in _REGEN_FMT:
+            rows.append(row("Пересоздать (LibreOffice)", pre + ":regen"))
     rows.append(row("Не чистить", "cl:no"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -874,7 +883,9 @@ async def _offer_cleaning(message: Message, fmt: str, doc: Document) -> None:
         return
     user = message.from_user
     item = _Pending(doc.file_id, fmt, user.id if user else None, time.monotonic() + _PENDING_TTL)
-    sent = await message.answer(LEGACY_TEXT if legacy else CHOICE_TEXT, reply_markup=_keyboard(item))
+    text = LEGACY_TEXT if legacy else CHOICE_TEXT.format(
+        regen=REGEN_BULLET if fmt in _REGEN_FMT else "")
+    sent = await message.answer(text, reply_markup=_keyboard(item))
     _remember((sent.chat.id, sent.message_id), item)
 
 
@@ -1379,13 +1390,14 @@ async def _selftest() -> int:
         src, exp, ev, ch = await send(fx.make_pdf, "pdf")
         before = sha(bot.files["pdf"])
         btns = [b.text for r in ch.markup.inline_keyboard for b in r] if ch else []
-        check("кнопки: переключатели «Сохранить», Stealth, Paranoid, Пересоздать, Не чистить",
+        # PDF LibreOffice не пересоздаёт: кнопка «Пересоздать» вела бы в гарантированный отказ.
+        check("кнопки: переключатели «Сохранить», Stealth, Paranoid, Не чистить (без Пересоздать)",
               btns == ["☐ Сохранить: заголовок документа", "☐ Сохранить: автора",
-                       "Почистить (Stealth)", "Почистить (Paranoid)",
-                       "Пересоздать (LibreOffice)", "Не чистить"], btns)
-        check("профили объяснены прямо в сообщении",
+                       "Почистить (Stealth)", "Почистить (Paranoid)", "Не чистить"], btns)
+        check("профили объяснены прямо в сообщении, пересоздание для PDF не обещано",
               ch and "Stealth" in ch.text and "оставляет" in ch.text and "Paranoid" in ch.text
-              and "выглядит обработанным" in ch.text)
+              and "выглядит обработанным" in ch.text and "Пересоздать" not in ch.text
+              and "{" not in ch.text)
         check("запомнен file_id, на диске после инспекции ничего нет", len(_pending) == 1 and left() == base)
         cb = await click(ch, "cl:stealth")
         d = docs(ev)
@@ -1429,6 +1441,9 @@ async def _selftest() -> int:
             check("%s: кнопки чистки показаны" % nm, ch is not None and ch.markup is not None)
             if ch is None:
                 continue
+            check("%s: есть «Пересоздать» и его описание" % nm,
+                  "Пересоздать (LibreOffice)" in [b.text for r in ch.markup.inline_keyboard for b in r]
+                  and "Пересоздать" in ch.text)
             await click(ch, "cl:stealth")
             d = docs(ev)
             check("%s: файл отправлен, имя нейтральное и с родным расширением" % nm,
@@ -2022,7 +2037,7 @@ async def _selftest() -> int:
         h = texts(ev)[-1] if texts(ev) else ""
         check("справка собрана без «{ttl}» и называет /clear", "{" not in h and "/clear" in h, h[-300:])
         check("в текстах бота нет буквального \\n (его видно в Telegram)",
-              not any("\\n" in t for t in (HELP_TEXT, CHOICE_TEXT, LEGACY_TEXT, BATCH_TEXT)))
+              not any("\\n" in t for t in (HELP_TEXT, CHOICE_TEXT, REGEN_BULLET, LEGACY_TEXT, BATCH_TEXT)))
         lock_path = os.path.join(work, "t.lock")
         first = _acquire_lock(lock_path)
         second = _acquire_lock(lock_path)

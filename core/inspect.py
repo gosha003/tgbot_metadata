@@ -311,7 +311,9 @@ def _extract_zip_children(rep, path, tmpdir, budget, match, kind_label):
             if scanned >= MAX_ZIP_SCAN:
                 break
             name = info.filename
-            if not match(name):
+            # Запись-каталог («word/media/») -- не вложенный объект: её пустое
+            # тело давало ошибку «файл пустой», и чистота файла не доказывалась никогда.
+            if name.endswith("/") or not match(name):
                 continue
             cap = _reserve(budget)
             if cap is None:
@@ -501,13 +503,17 @@ def inspect_file(path, max_size=None) -> Report:
     fam = sniff.family(fmt)
     rep = _run_inspector(path, fam, fmt)
 
-    tmpdir = tempfile.mkdtemp(prefix="inspect_")
+    tmpdir = None
     try:
+        # mkdtemp тоже внутри try: нет места или прав на %TEMP% -- это запись в
+        # errors, а не исключение из функции, которая не имеет права бросать.
+        tmpdir = tempfile.mkdtemp(prefix="inspect_")
         _recurse_into(rep, path, fam, fmt, "", 1, {"objects": 0, "bytes": 0}, tmpdir)
     except Exception as exc:  # noqa: BLE001 -- рекурсия не должна ронять основной отчёт
         rep.err("рекурсивная инспекция вложений упала целиком: %s: %s" % (type(exc).__name__, exc))
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
     return rep
 
 

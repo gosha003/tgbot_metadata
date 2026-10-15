@@ -1327,7 +1327,8 @@ def _sec_settings(pkg):
     gone = 0
     for n in docvars:
         nm_, val = n.get("name", W_NSES) or "", n.get("val", W_NSES) or ""
-        if pkg.paranoid or pkg.leaky(val) or pkg.leaky(nm_):
+        # Имя переменной как у человека -- личность (то же правило, что у инспектора).
+        if pkg.paranoid or pkg.leaky(val) or pkg.leaky(nm_) or (val and _PERSON_NAME_RE.search(nm_)):
             P.remove(n)
             gone += 1
             pkg.act(Act.REMOVED, name, "w:docVar %s" % nm_, val, "",

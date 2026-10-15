@@ -29,6 +29,7 @@ sha256 ВХОДНОГО файла до и после совпадает.
 from __future__ import annotations
 
 import binascii
+import dataclasses
 import hashlib
 import io
 import os
@@ -2114,6 +2115,241 @@ def test_26_report_residual_honest():
            "НОВЫЕ значения" not in old and "Поле подписи" in old, old[:300])
     new = cleanreport.render_plain(mk([("trailer", "/ID[0]", True)]))
     _check("отчёт: только новые -- так и сказано", "НОВЫЕ значения" in new, new[:300])
+
+
+def _repack(src, out, edits=(), add=()):
+    """Копия ZIP-пакета с заменой байтов в частях и добавленными частями."""
+    with zipfile.ZipFile(src) as zi, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zo:
+        for info in zi.infolist():
+            data = zi.read(info.filename)
+            for part, old, new in edits:
+                if info.filename == part:
+                    assert old in data, (part, old)
+                    data = data.replace(old, new, 1)
+            zo.writestr(info, data)
+        for part, data in add:
+            zo.writestr(part, data)
+    return out
+
+
+def _values(rep):
+    return " | ".join(f.value for f in rep.findings)
+
+
+@_with_tmp
+def test_28_dispatcher_and_sniff_regressions(tmp):
+    """Регрессии ревью: поле new_signals, ZIP с несжатым PDF, записи-каталоги, скраб путей."""
+    from core.model import Report as _Rep
+
+    # new_signals было присвоено на лету, а поле dataclass потерялось в 89121fc:
+    # в --json его не было, а при отказе оставались сигналы невыданного файла.
+    _check("new_signals -- настоящее поле DispatchResult (видно в asdict / --json)",
+           "new_signals" in dataclasses.asdict(DispatchResult("a", "b", "pdf", "stealth")))
+    res = clean_file(os.path.join(tmp, "нет.pdf"), os.path.join(tmp, "o.pdf"))
+    _check("при отказе new_signals и detect пусты", res.new_signals == [] and res.detect == "")
+
+    # ZIP, где первая запись -- несжатый PDF: «%PDF-» в первой сотне байт.
+    pdf, _ = fixtures.make_pdf(tmp)
+    zpath = os.path.join(tmp, "pdfs.zip")
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:
+        z.write(pdf, "a.pdf")
+        z.write(pdf, "b.pdf")
+    _check("ZIP с несжатыми PDF определяется как zip, а не pdf", sniff.sniff(zpath) == "zip",
+           sniff.sniff(zpath))
+    junk = _write(os.path.join(tmp, "junk.pdf"), b"garbage line\n" + _read(pdf))
+    _check("PDF с мусором перед %PDF- по-прежнему pdf", sniff.sniff(junk) == "pdf", sniff.sniff(junk))
+
+    # Записи-каталоги в word/media/: пустое тело давало «файл пустой», и чистота
+    # не доказывалась никогда (gaps).
+    docx, _ = fixtures.make_docx(tmp)
+    dirs = _repack(docx, os.path.join(tmp, "dirs.docx"),
+                   add=(("word/media/", b""), ("word/embeddings/", b"")))
+    rep = inspect_file(dirs)
+    _check("запись-каталог не даёт ошибки «файл пустой»",
+           not any("пустой" in e for e in rep.errors), rep.errors)
+    res, _dst = _clean("docx-каталоги", tmp, dirs)
+    if res is not None:
+        _check("docx с записями-каталогами: чистота доказана", res.ok and res.clean,
+               (res.errors[:2], res.gaps[:2]))
+
+    # Скраб путей в ошибках не должен калечить имена частей и URL.
+    r = _Rep(path="x", fmt="docx")
+    r.err("word/media/image1.png: битая картинка")
+    r.err("см. http://example.com/x")
+    r.err("не открылся C:\\Users\\owner\\AppData\\Local\\Temp\\x.bin")
+    r.err("не открылся '/home/owner/tmp/x.bin'")
+    _check("скраб: относительное имя части и URL целы, абсолютные пути скрыты",
+           r.errors[0].startswith("word/media/image1.png") and "http://example.com" in r.errors[1]
+           and "owner" not in r.errors[2] and "owner" not in r.errors[3], r.errors)
+
+
+@_with_tmp
+def test_29_pdf_info_bad_key_and_broken_xmp(tmp):
+    """Регрессии фаззинга: ключ /Info не в UTF-8 ронял секцию /Info (TypeError в
+    get()), а XMP с байтом Latin-1 не разбирался вовсе -- автор в XMP переживал чистку."""
+    src = os.path.join(tmp, "badkey.pdf")
+    pdf = pikepdf.new()
+    pdf.add_blank_page()
+    pdf.trailer.Info = pdf.make_indirect(pikepdf.Dictionary(Author=pikepdf.String("Bad Key Author")))
+    pdf.save(src, object_stream_mode=pikepdf.ObjectStreamMode.disable, compress_streams=False)
+    raw = _read(src)
+    _write(src, raw.replace(b"/Author", b"/Au\x9dhor", 1))     # та же длина: xref цел
+    res, dst = _clean("pdf-ключ-не-utf8", tmp, src, PARANOID)
+    if res is not None:
+        _check("pdf: ключ /Info не в UTF-8 -- секция не падает",
+               res.ok and not res.count(Act.FAILED) and not any("/Info" in e for e in res.errors),
+               res.errors[:2])
+        _check("pdf: значение под битым ключом убрано",
+               res.ok and "Bad Key Author" not in _values(inspect_file(dst)))
+
+    xmp = (b'<?xpacket begin="\xef\xbb\xbf" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+           b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+           b'<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" '
+           b'xmlns:xmp="http://ns.adobe.com/xap/1.0/"><dc:creator><rdf:Seq><rdf:li>Latin Xmp Creator</rdf:li>'
+           b'</rdf:Seq></dc:creator><xmp:CreatorTool>Caf\xe9 Writer</xmp:CreatorTool></rdf:Description>'
+           b'</rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
+    src = os.path.join(tmp, "latin1xmp.pdf")
+    pdf = pikepdf.new()
+    pdf.add_blank_page()
+    pdf.Root.Metadata = pdf.make_stream(xmp)
+    pdf.save(src, fix_metadata_version=False)   # иначе pikepdf сам заменит битый XMP пустым
+    _check("pdf: XMP с байтом Latin-1 инспектор разбирает и видит автора",
+           any(f.value == "Latin Xmp Creator" and f.risk is Risk.IDENTITY for f in inspect_file(src).findings))
+    for profile in PROFILES:
+        res, dst = _clean("pdf-xmp-latin1", tmp, src, profile)
+        if res is None:
+            continue
+        _check("pdf XMP Latin-1/%s: чисто, автора в результате нет" % _pname(profile),
+               res.ok and res.clean and "Latin Xmp Creator" not in _values(inspect_file(dst)),
+               (res.errors[:2], [s.value for s in res.survived]))
+
+
+def test_30_regen_defang_links():
+    """Регрессия: обезвреживание перед LibreOffice ловило только http/ftp в сырых
+    байтах. Замерено: по file://-ссылке LO открывает файл (на Windows file://сервер
+    -- SMB и NTLM-хэш владельца), а «&#104;ttp://» обходил проверку и давал запросы."""
+    from core.clean_regen import _defang_bytes
+
+    remote = (b'Target="http://x/a.png"', b'Target="&#104;ttp://x/a.png"',
+              b'Target="file:///C:/a.png"', b'Target="file://srv/share/a.png"',
+              b'Target="\\\\srv\\share\\a.png"', b'xlink:href="//srv/share/a.png"',
+              b'src="C:\\Users\\a.png"', b"Target=' HTTPS://x'", b'o:href="smb://srv/a"')
+    local = (b'Target="media/image1.png"', b'Target="/word/document.xml"',
+             b'Target="../customXml/item1.xml"', b'xlink:href="vnd.sun.star.GraphicObject:1000"',
+             b'xlink:href="Pictures/1.png"', b'r:link="rId9"', b'Target="#_Toc1"',
+             b'TargetMode="External"')
+    for raw in remote:
+        new, n = _defang_bytes(raw)
+        _check("defang: %r обезврежено" % raw, n == 1 and new.endswith((b'""', b"''")), new)
+    for raw in local:
+        new, n = _defang_bytes(raw)
+        _check("defang: %r не тронуто" % raw, n == 0 and new == raw, new)
+
+
+@_with_tmp
+def test_31_regenerate_rtf_scrubbed(tmp):
+    """Регрессия: после пересоздания RTF -> RTF дочистка не запускалась («формат не
+    поддержан дочисткой»), а LibreOffice переносит \\info с автором как есть."""
+    from core.clean_regen import find_soffice
+
+    if not find_soffice():
+        _check("regenerate rtf: LibreOffice не найден -- проверка пропущена", True)
+        return
+    src, _exp = fixtures.make_rtf(tmp)
+    res, _dst = _clean("regen-rtf", tmp, src, Profile.REGENERATE)
+    if res is None:
+        return
+    _check("regenerate rtf: дочистка выполнена",
+           not any("не поддержан дочисткой" in e for e in res.errors), res.errors[:2])
+    _check("regenerate rtf: файл выдан и чист", res.ok and res.clean,
+           [(s.label, s.value) for s in res.survived][:3])
+
+
+@_with_tmp
+def test_32_odf_template_and_broken(tmp):
+    """Регрессия: путь к шаблону ODF лежит в xlink:href пустого meta:template.
+    Инспектор читал текст элемента («Шаблон: (пусто)»), чистка элемент не трогала:
+    C:/Users/ИМЯ/... уезжал в «почищенном» файле мимо оракула."""
+    src, _exp = fixtures.make_odt(tmp)
+    links = (b'<meta:template xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" '
+             b'xlink:title="Blank > Odt" xlink:href="file:///C:/Users/tpl.owner/Templates/blank.ott" '
+             b'meta:date="2024-01-01T10:00:00"/>'
+             b'<meta:auto-reload xmlns:xlink="http://www.w3.org/1999/xlink" '
+             b'xlink:href="file://fileserver01/share/x.odt" meta:delay="PT0S"></meta:auto-reload>')
+    tpl = _repack(src, os.path.join(tmp, "tpl.odt"),
+                  edits=(("meta.xml", b"<meta:generator>", links + b"<meta:generator>"),))
+    tpl_f = [f for f in inspect_file(tpl).findings if f.label == "Шаблон"]
+    _check("odt: инспектор видит путь шаблона из xlink:href",
+           any("tpl.owner" in f.value and f.risk is Risk.ENVIRONMENT for f in tpl_f), tpl_f)
+    for profile in PROFILES:
+        res, dst = _clean("odt-шаблон", tmp, tpl, profile)
+        if res is None or not res.ok:
+            _check("odt шаблон/%s: файл выдан" % _pname(profile), False, res and res.errors[:2])
+            continue
+        with zipfile.ZipFile(dst) as z:
+            meta = z.read("meta.xml")
+        _check("odt шаблон/%s: путь и сервер убраны, файл чист" % _pname(profile),
+               res.clean and b"tpl.owner" not in meta and b"fileserver01" not in meta
+               and b"<meta:generator>" in meta, ([s.value for s in res.survived], meta[:200]))
+
+    # Битая запись ZIP -- порча файла, а не «внутренняя ошибка».
+    broken = os.path.join(tmp, "broken.odt")
+    with zipfile.ZipFile(src) as zi, zipfile.ZipFile(broken, "w", zipfile.ZIP_STORED) as zo:
+        for info in zi.infolist():
+            info.compress_type = zipfile.ZIP_STORED
+            zo.writestr(info, zi.read(info.filename))
+    raw = _read(broken)
+    _write(broken, raw.replace(b"Test ODT Fixture", b"Test ODT Fixturx", 1))   # CRC не сойдётся
+    res = clean_file(broken, os.path.join(tmp, "broken_out.odt"))
+    _check("odt с битой записью: «повреждён», а не «внутренняя ошибка»",
+           not res.ok and any("повреждён" in e for e in res.errors)
+           and not any("Внутренняя ошибка" in e for e in res.errors), res.errors)
+
+
+@_with_tmp
+def test_33_ooxml_blind_spots(tmp):
+    """Регрессии: x15ac:absPath и fileSharing в xlsx, ppt/authors.xml чистка убирала,
+    а инспектор (оракул, отчёт пользователю) их не видел; w:docVar «Owner» с ФИО
+    числился провенансом, и Stealth оставлял имя в файле."""
+    xlsx, _ = fixtures.make_xlsx(tmp)
+    xlsx = _repack(xlsx, os.path.join(tmp, "abs.xlsx"), edits=((
+        "xl/workbook.xml", b"<sheets>",
+        b'<fileSharing userName="Reserved Byuser" reservationPassword="CF1A"/>'
+        b'<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+        b'<mc:Choice Requires="x15"><x15ac:absPath xmlns:x15ac="http://schemas.microsoft.com/office/'
+        b'spreadsheetml/2010/11/ac" url="C:\\Users\\absuser.secret\\Documents\\"/></mc:Choice>'
+        b'</mc:AlternateContent><sheets>'),))
+    pptx, _ = fixtures.make_pptx(tmp)
+    pptx = _repack(pptx, os.path.join(tmp, "authors.pptx"), add=((
+        "ppt/authors.xml",
+        b'<p188:authorLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main">'
+        b'<p188:author id="{11111111-2222-3333-4444-555555555555}" name="Modern Commenter" '
+        b'initials="MC" userId="modern.commenter@corp.example" providerId="AD"/></p188:authorLst>'),))
+    docx, _ = fixtures.make_docx(tmp)
+    docx = _repack(docx, os.path.join(tmp, "docvars.docx"), edits=((
+        "word/settings.xml", b"</w:settings>",
+        b'<w:docVars><w:docVar w:name="Owner" w:val="DocVar Ownername"/>'
+        b'<w:docVar w:name="Stage" w:val="draft-stage-1"/></w:docVars></w:settings>'),))
+    cases = ((xlsx, {"absuser.secret": Risk.ENVIRONMENT, "Reserved Byuser": Risk.IDENTITY}),
+             (pptx, {"Modern Commenter": Risk.IDENTITY, "modern.commenter@corp.example": Risk.IDENTITY}),
+             (docx, {"DocVar Ownername": Risk.IDENTITY}))
+    for path, secrets in cases:
+        tag = os.path.basename(path)
+        rep = inspect_file(path)
+        for value, risk in secrets.items():
+            _check("%s: инспектор видит %r как %s" % (tag, value, risk.value),
+                   any(value in f.value and f.risk is risk for f in rep.findings))
+        res, dst = _clean(tag, tmp, path, STEALTH)
+        if res is None or not res.ok:
+            _check("%s: файл выдан" % tag, False, res and res.errors[:2])
+            continue
+        with zipfile.ZipFile(dst) as z:
+            blob = b"".join(z.read(n) for n in z.namelist())
+        left = [v for v in secrets if v.encode() in blob]
+        _check("%s: Stealth чист, значений нет в байтах" % tag, res.clean and not left,
+               (left, [s.value for s in res.survived][:3]))
+        if tag == "docvars.docx":
+            _check("docx: безобидная переменная документа на месте", b"draft-stage-1" in blob)
 
 
 # 98. Вердикты диспетчера и отчёта не противоречат друг другу

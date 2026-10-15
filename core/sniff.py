@@ -88,9 +88,6 @@ def sniff(path) -> str:
 
     if head[:5] == b"%PDF-":
         return "pdf"
-    # Некоторые PDF начинаются с мусора; спека допускает %PDF- в первых 1024 байт.
-    if b"%PDF-" in head[:1024]:
-        return "pdf"
     if head[:8] == OLE_MAGIC:
         return _sniff_ole(path)
     if head[:5] == b"{\\rtf":
@@ -111,6 +108,11 @@ def sniff(path) -> str:
             return "heic"
     if head[:2] == b"PK":
         return _sniff_zip(path)
+    # Некоторые PDF начинаются с мусора; спека допускает %PDF- в первых 1024 байт.
+    # Только ПОСЛЕ точных сигнатур: ZIP, где первая запись -- несжатый PDF, несёт
+    # %PDF- в первой сотне байт и раньше определялся как PDF, а не как архив.
+    if b"%PDF-" in head[:1024]:
+        return "pdf"
 
     # Текст: нет NUL-байтов и декодируется.
     if b"\x00" not in head:

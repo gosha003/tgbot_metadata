@@ -47,7 +47,8 @@ from lxml import etree
 from .clean_image import _clean_jpeg
 from .cleanmodel import PROFILE_REMOVES, Act, CleanResult, Profile
 from .insp_pdf import (RDF, _INFO_MAP, _XMP_IDENTITY, _flatten,
-                       _looks_like_path, _qname, _s, _walk_name_tree, is_jpeg_image)
+                       _looks_like_path, _qname, _s, _walk_name_tree, _xmp_fromstring,
+                       is_jpeg_image)
 from .model import Risk
 
 # --- лимиты: чистка обязана обработать ВСЁ, иначе отказ (частично чистый файл
@@ -230,7 +231,10 @@ def _sec_info(pdf, c):
     if not isinstance(info, pikepdf.Dictionary):
         return
     for key in list(info.keys()):
-        raw = _s(info.get(key))
+        # info[key], а не info.get(key): имя ключа не в UTF-8 (/Auth#9Dor) pikepdf
+        # отдаёт строкой с суррогатом, и get() на ней бросает TypeError -- секция
+        # обрывалась, а ключи после такого оставались в файле. [] и del работают.
+        raw = _s(info[key])
         risk = _info_risk(key, raw)
         ua_title = key == "/Title" and c.ua
         if (risk in c.removes or key.startswith("/PTEX")) and not ua_title:
@@ -297,8 +301,7 @@ def _xmp_drop(key, value, c):
 
 def _xmp_clean(raw, c, where):
     """-> (новые байты | None, если менять нечего; есть ли что-то, кроме пустой оболочки)."""
-    parser = etree.XMLParser(recover=True, resolve_entities=False, no_network=True, huge_tree=False)
-    root = etree.fromstring(raw, parser=parser)
+    root = _xmp_fromstring(raw)
     if root is None:
         return _EMPTY_XMP, False
     c.ua = c.ua or b"/pdfua/ns/id/" in raw
@@ -363,7 +366,15 @@ def _xmp_holder(holder, where, c):
     if c.held(where, "/Metadata"):
         return
     raw = _read_xmp(meta)
-    if raw is None:                  # слишком большой или экзотический фильтр: не читаем
+    cleaned = None
+    if raw is not None:
+        try:
+            cleaned = _xmp_clean(raw, c, where)
+        except etree.XMLSyntaxError:
+            # Не разбирается даже после починки байтов. Оставить как есть нельзя:
+            # секция падала, и вся личность в XMP переживала чистку.
+            cleaned = None
+    if cleaned is None:              # слишком большой, экзотический фильтр или не XML: не читаем
         if c.paranoid:
             _pop(c, holder, "/Metadata", where, "нечитаемый XMP", "Поток слишком велик или в нестандартном кодировании.")
         else:
@@ -371,7 +382,7 @@ def _xmp_holder(holder, where, c):
             c.res.act(Act.NORMALIZED, where, "/Metadata", "нечитаемый XMP", "пустая оболочка",
                       "Поток не разбирается безопасно: заменён пустым пакетом, чтобы XMP остался на месте.")
         return
-    new, payload = _xmp_clean(raw, c, where)
+    new, payload = cleaned
     if c.paranoid and not payload:   # от XMP ничего не осталось
         del holder["/Metadata"]
         c.res.act(Act.REMOVED, where, "/Metadata", "XMP-пакет", note="PARANOID: пакет пуст, поток убран целиком.")
