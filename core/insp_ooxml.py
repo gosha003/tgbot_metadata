@@ -813,6 +813,14 @@ def _sec_settings(zf, rep, ctx):
                 value,
                 "Переменные макросов, надстроек и шаблонов СЭД: там регулярно "
                 "лежат ФИО согласующих, номера договоров и пути к базам.")
+        # Переменная, названная как человек («Owner», «Исполнитель»), -- личность,
+        # как одноимённое свойство в custom.xml. Отдельной находкой: в общей строке
+        # выше её значение терялось в PROVENANCE, и Stealth оставлял ФИО в файле.
+        for var in _iter_tag(el, "docVar"):
+            if _PERSON_NAME_RE.search(_attr(var, "name") or ""):
+                rep.add_nonempty(Risk.IDENTITY, loc,
+                                 "w:docVar %s" % (_attr(var, "name") or "")[:60], _attr(var, "val"),
+                                 "Переменная документа хранит человека: ФИО из шаблона или СЭД.")
 
 
 # === Ж. word/document.xml и его соседи ====================================
@@ -942,7 +950,8 @@ def _sec_document(zf, rep, ctx):
 def _is_person_part(name):
     if name in ("word/comments.xml", "word/commentsExtended.xml",
                 "word/commentsIds.xml", "word/people.xml",
-                "word/commentsExtensible.xml", "ppt/commentAuthors.xml"):
+                "word/commentsExtensible.xml", "ppt/commentAuthors.xml",
+                "ppt/authors.xml"):     # авторы «современных» комментариев PowerPoint 365
         return True
     return bool(
         re.match(r"^xl/persons/.*\.xml$", name)
@@ -1362,6 +1371,18 @@ def _sec_excel(zf, rep, ctx):
                             "workbookPr", "; ".join(parts),
                             "filterPrivacy=1 означает, что книгу уже помечали "
                             "как содержащую персональные данные.")
+            # Чистильщик эти два места убирает давно, а инспектор их не видел: отчёт
+            # молчал о самой частой утечке Excel, и оракулу не с чем было сверять.
+            for el in _iter_tag(root, "absPath"):
+                rep.add_nonempty(Risk.ENVIRONMENT, "xl/workbook.xml",
+                                 "x15ac:absPath — папка, где сохраняли книгу", _attr(el, "url"),
+                                 "Excel молча пишет полный путь к папке книги, обычно "
+                                 "C:\\Users\\ИМЯ\\...: в свойствах документа его не видно.")
+            for el in _iter_tag(root, "fileSharing"):
+                rep.add_nonempty(Risk.IDENTITY, "xl/workbook.xml",
+                                 "fileSharing — кто зарезервировал книгу", _attr(el, "userName"),
+                                 "Имя пользователя, включившего «рекомендовать только чтение» "
+                                 "или пароль на изменение.")
             hidden = []
             for el in _iter_tag(root, "sheet"):
                 state = (_attr(el, "state") or "").lower()

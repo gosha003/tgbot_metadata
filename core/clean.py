@@ -157,6 +157,7 @@ class DispatchResult(CleanResult):
     # cp:lastModifiedBy вместе сами являются признаком, а любая альтернатива
     # либо течёт, либо подделывает провенанс. Настоящее решение -- Regenerate
     # (фаза 4), то есть пересоздание файла стоковым приложением.
+    new_signals: list = dataclasses.field(default_factory=list)   # [(kind, detail)]
     # Оценка по сигналам результата. none -- инспектор не видит обработки.
     detect: str = ""
     detect_why: list = dataclasses.field(default_factory=list)
@@ -433,6 +434,7 @@ def clean_file(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False,
         res.actions.clear()
         res.verified = False
         res.survived, res.residual, res.gaps = [], [], []
+        res.new_signals, res.detect, res.detect_why = [], "", []
         res.critical_before = res.critical_after = res.sensitive_before = res.sensitive_after = -1
     return res
 

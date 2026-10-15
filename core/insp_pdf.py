@@ -195,6 +195,12 @@ def _get(dct, key):
     """dct.get(key), не падающий на битых/чужих объектах."""
     try:
         return dct.get(key)
+    except TypeError:
+        # Ключ не в UTF-8 (/Auth#9Dor): get() такую строку не принимает, а [] -- да.
+        try:
+            return dct[key] if key in dct else None
+        except Exception:
+            return None
     except Exception:
         return None
 
@@ -521,12 +527,28 @@ def _sec_object_xmp(pdf, report, ctx):
     ctx["object_xmp"] = holders
 
 
+def _xmp_fromstring(raw: bytes):
+    """XMP -> корень lxml (или None). Общий для инспектора и чистильщика.
+
+    XMP в Latin-1/cp1252 при заявленном UTF-8 -- частая ошибка старых
+    продюсеров, и lxml такой пакет не берёт даже с recover=True. Тогда битые
+    байты заменяются на U+FFFD и разбор повторяется: иначе весь пакет вместе с
+    автором и путями был бы невидим инспектору и нетронут чисткой."""
+    parser = etree.XMLParser(recover=True, resolve_entities=False,
+                             no_network=True, huge_tree=False)
+    try:
+        return etree.fromstring(raw, parser=parser)
+    except etree.XMLSyntaxError:
+        fixed = raw.decode("utf-8", "replace").encode("utf-8")
+        if fixed == raw:
+            raise
+        return etree.fromstring(fixed, parser=parser)
+
+
 def _parse_xmp(raw: bytes, report) -> list:
     """Разбор XMP-пакета в плоский список (ключ, значение), включая History."""
     try:
-        parser = etree.XMLParser(recover=True, resolve_entities=False,
-                                 no_network=True, huge_tree=False)
-        root = etree.fromstring(raw, parser=parser)
+        root = _xmp_fromstring(raw)
     except Exception as exc:
         report.err("XMP не разбирается как XML: %s" % exc)
         return []

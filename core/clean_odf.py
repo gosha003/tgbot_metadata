@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import zipfile
+import zlib
 
 from core.cleanmodel import Act, CleanResult, Profile
 from core.insp_legacy import _PATH_RE
@@ -47,6 +48,14 @@ _STAT = re.compile(
     br"<((?:[\w.-]+:)?)document-statistic\b[^>]*/>")
 _ENTRY = re.compile(
     br"<((?:[\w.-]+:)?)file-entry\b([^>]*?)/>")
+# Элементы meta.xml, у которых путь лежит в атрибуте xlink:href, а не в тексте:
+# шаблон документа (у LibreOffice -- file:///C:/Users/ИМЯ/...) и автоперезагрузка.
+# _LEAF их не видит: они пустые. Убираем целиком -- файл без шаблона рядовой, а
+# пустой href был бы следом. Значения атрибутов могут содержать «>», поэтому
+# кавычки разбираем явно.
+_LINKED = re.compile(
+    br"<((?:[\w.-]+:)?)(template|auto-reload)(?=[\s/>])"
+    br"""(?:[^>"']|"[^"]*"|'[^']*')*?(?:/>|>\s*</\1\2\s*>)""")
 
 
 def _kept(keep, name) -> bool:
@@ -143,6 +152,20 @@ def _clean(res, src, dst, paranoid, keep):
         want |= _PROV
     want = {n for n in want if not _kept(keep, n)}
     new_meta = _blank_leaves(meta, want)
+    linked = []
+
+    def drop_linked(m):
+        local = m.group(2).decode("ascii")
+        if _kept(keep, local):
+            return m.group(0)
+        linked.append(local)
+        return b""
+
+    new_meta = _LINKED.sub(drop_linked, new_meta)
+    if linked:
+        res.act(Act.REMOVED, "meta.xml", "ссылки на файлы (%s)" % ", ".join(linked), "", "",
+                "Шаблон и автоперезагрузка хранят путь в атрибуте xlink:href: обычно это "
+                "file:///C:/Users/ИМЯ/... или сетевой ресурс.")
     if paranoid and not _kept(keep, "document-statistic"):
         new_meta = _strip_stats(new_meta)
     if new_meta != meta:
@@ -225,7 +248,12 @@ def clean_odf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) 
         _clean(res, str(src), str(dst), prof is Profile.PARANOID, keep)
     except Exception as exc:  # noqa: BLE001
         res.ok = False
-        res.err("Внутренняя ошибка чистки ODF: %s" % type(exc).__name__)
+        if isinstance(exc, (zipfile.BadZipFile, zlib.error, EOFError)):
+            # Битая запись (CRC, обрезанный deflate) -- это порча файла, а не наша ошибка.
+            res.err("ODF-контейнер повреждён: часть не распаковывается (%s). Выход не создан."
+                    % type(exc).__name__)
+        else:
+            res.err("Внутренняя ошибка чистки ODF: %s" % type(exc).__name__)
         if os.path.exists(str(dst)):
             try:
                 os.remove(dst)

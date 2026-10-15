@@ -65,6 +65,11 @@
 - `w:mailMerge` — пути к источнику данных
 - `w:documentProtection` — хеш и соль пароля
 - `w:proofState`, `w:trackChanges`, `w:hdrShapeDefaults`, `w:docVars`
+  (значения в атрибутах `w:name`/`w:val`; переменная с именем вида «Owner»,
+  «Исполнитель» — это ФИО из шаблона или СЭД, то есть личность, а не провенанс)
+
+В PowerPoint 365 авторы «современных» комментариев лежат в **`ppt/authors.xml`**
+(`name`, `initials`, `userId` — обычно рабочий email), а не в `commentAuthors.xml`.
 
 ### `word/document.xml`
 `w:ins` / `w:del` — правки с атрибутами `w:author` и `w:date`. Атрибуты `w:rsid*`
@@ -123,6 +128,7 @@ UNC-пути. Ложная находка в отчёте о приватнос�
 | Где | Что |
 |---|---|
 | `xl/workbook.xml` | `fileVersion` c `rupBuild` — точный билд Excel; `workbookPr/@filterPrivacy`; листы `state="hidden"` и `"veryHidden"`; `definedName` со ссылками на внешние книги с локальными путями |
+| `xl/workbook.xml` ⚠ | **`x15ac:absPath/@url`** внутри `mc:AlternateContent` — полный путь к папке, где книгу сохраняли (`C:\Users\ИМЯ\...`). Excel пишет молча, в свойствах не видно. `fileSharing/@userName` — кто включил резервирование книги |
 | `xl/pivotCache/*.xml` ⚠ | **`refreshedBy`** — имя человека, `refreshedDate`. Классическая утечка |
 | `xl/connections.xml` ⚠ | строки подключения ODBC/OLEDB: имена серверов, логины, иногда пароли |
 | `xl/externalLinks/*` | пути к внешним книгам |
@@ -332,6 +338,12 @@ XMP бывает не только в корне: постраничные и XO
 **`meta:editing-duration`**, `meta:printed-by`, `meta:document-statistic`, все
 `meta:user-defined`. Плюс `settings.xml` с локальными путями, `Basic/` и
 `Scripts/` с макросами, отслеженные изменения в `content.xml`.
+
+⚠ **`meta:template` — пустой элемент, путь в атрибуте `xlink:href`**
+(`file:///C:/Users/ИМЯ/.../template/бланк.ott`), название шаблона — в
+`xlink:title`. Читать текст элемента бесполезно: он всегда пуст, и отчёт
+показывал «Шаблон: (пусто)», пропуская имя пользователя. Так же устроен
+`meta:auto-reload` (ссылка, часто на файловый сервер).
 
 ⚠ **Таймстемпы ZIP у ODF зависят от производителя, а не от формата.**
 LibreOffice пишет **реальное время**. Word, экспортирующий в `.odt`, пишет

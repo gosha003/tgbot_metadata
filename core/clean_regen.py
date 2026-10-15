@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import glob
+import html
 import os
 import re
 import shutil
@@ -113,13 +114,44 @@ def _empty_profile(root) -> str:
     return root
 
 
-_NET_RE = re.compile(
-    rb'(Target|xlink:href|r:link|href)\s*=\s*(["\'])\s*(https?|ftp)://[^"\']*\2',
-    re.IGNORECASE)
+# Атрибуты, по которым LibreOffice при конвертации сам что-то загружает:
+# Target у .rels, xlink:href у ODF, href/src у VML.
+_LINK_ATTR_RE = re.compile(
+    rb'((?:Target|href|r:link|src)\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE | re.DOTALL)
+# Куда загрузка уводит с машины: любая схема с «//» (http, ftp, smb, dav...),
+# file: и UNC (\\сервер, //сервер) -- на Windows это SMB-подключение, которое
+# отдаёт чужому серверу IP и NTLM-хэш владельца бота, -- и абсолютный путь с
+# диском. Замерено: по file://-ссылке на картинку LibreOffice открывает файл.
+# Внутренние цели пакета («media/x.png», «/word/document.xml») сюда не попадают.
+_REMOTE_RE = re.compile(r"^(?:[a-z][a-z0-9+.\-]*:)?(?://|\\\\)|^file:|^[a-z]:[\\/]",
+                        re.IGNORECASE)
+
+
+def _remote(value: bytes) -> bool:
+    """Значение атрибута уводит наружу. Проверяем РАСКОДИРОВАННОЕ значение:
+    «&#104;ttp://» XML-парсер LibreOffice прочтёт как http://, а по сырым байтам
+    такой адрес проходил мимо. Пробелы и управляющие символы внутри адреса
+    URL-парсеры выбрасывают -- выбрасываем и мы."""
+    text = html.unescape(value.decode("utf-8", "replace"))
+    return bool(_REMOTE_RE.match(re.sub(r"[\x00-\x20]", "", text)))
+
+
+def _defang_bytes(raw: bytes):
+    """Ссылки наружу -> пустая строка той же формы. Возврат: (байты, сколько)."""
+    hits = 0
+
+    def sub(m):
+        nonlocal hits
+        if not _remote(m.group(3)):
+            return m.group(0)
+        hits += 1
+        return m.group(1) + m.group(2) + m.group(2)
+
+    return _LINK_ATTR_RE.sub(sub, raw), hits
 
 
 def _defang_external(src, work, res):
-    """Копия файла без ссылок на сеть; при любой заминке -- исходный путь.
+    """Копия файла без ссылок наружу; при любой заминке -- None (отказ).
 
     Работает по сырым байтам XML-частей ZIP-пакета (OOXML и ODF) и по тексту
     RTF. Разбирать XML ради этого не нужно: цель -- чтобы LibreOffice не нашёл
@@ -142,10 +174,10 @@ def _defang_external(src, work, res):
             replace, hits = {}, 0
             with zipfile.ZipFile(src) as z:
                 for name in z.namelist():
-                    if not name.lower().endswith((".xml", ".rels")):
+                    if not name.lower().endswith((".xml", ".rels", ".vml")):
                         continue
                     raw = z.read(name)
-                    new, n = _NET_RE.subn(rb'\1=\2\2', raw)
+                    new, n = _defang_bytes(raw)
                     if n:
                         replace[name] = new
                         hits += n
@@ -163,8 +195,9 @@ def _defang_external(src, work, res):
             return out
 
         if fam == "rtf":
-            raw = open(src, "rb").read()
-            new, n = _NET_RE.subn(rb'\1=\2\2', raw)
+            with open(src, "rb") as fh:
+                raw = fh.read()
+            new, n = _defang_bytes(raw)
             if not n:
                 return src
             with open(out, "wb") as fh:
@@ -202,6 +235,9 @@ def _scrub_after_convert(path, res) -> None:
             _inner = functools.partial(clean_ooxml, drop_custom=True)
         elif fam == "odf":
             from .clean_odf import clean_odf as _inner
+        elif fam == "rtf":
+            # RTF -> RTF: LibreOffice переносит \info так же, как свойства OOXML.
+            from .clean_rtf import clean_rtf as _inner
         else:
             res.err("После конвертации формат не поддержан дочисткой: "
                     "свойства документа могли остаться.")

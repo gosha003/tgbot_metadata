@@ -1318,6 +1318,14 @@ def _odf_meta(zf, by_name, report):
         known = _ODF_META.get(tag)
         if known:
             risk, label, note = known
+            if tag == "{%s}template" % _NS["meta"]:
+                # Путь к шаблону лежит в атрибуте xlink:href, текста у элемента нет.
+                # По el.text отчёт показывал «Шаблон: (пусто)», а путь с именем
+                # пользователя уезжал дальше незамеченным -- и мимо оракула чистки.
+                text = el.get("{%s}href" % _NS["xlink"], "").strip() or text
+                report.add_nonempty(Risk.PROVENANCE, "meta.xml", "Название шаблона",
+                                    el.get("{%s}title" % _NS["xlink"], ""),
+                                    "Имя шаблона, из которого создан документ.")
             report.add(risk, "meta.xml", label, text, note)
             values[tag] = text
             if tag.endswith("}generator"):
