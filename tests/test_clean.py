@@ -2307,6 +2307,37 @@ def test_32_odf_template_and_broken(tmp):
 
 
 @_with_tmp
+def test_34_odt_photo_exif(tmp):
+    """Регрессия: картинки из Pictures/ ODF оставались как есть вместе с EXIF.
+    Инспектор разбирает Pictures/ рекурсивно, поэтому любой .odt с фотографией
+    после чистки получал «НЕ ЧИСТО»: GPS, серийник и автор фото переживали чистку."""
+    jpg, _ = fixtures.make_jpeg(tmp)
+    src, _exp = fixtures.make_odt(tmp)
+    entry = (b'<manifest:file-entry manifest:full-path="Pictures/photo.jpg" '
+             b'manifest:media-type="image/jpeg"/></manifest:manifest>')
+    src = _repack(src, os.path.join(tmp, "photo.odt"),
+                  edits=(("META-INF/manifest.xml", b"</manifest:manifest>", entry),),
+                  add=(("Pictures/photo.jpg", _read(jpg)),))
+    rep = inspect_file(src)
+    _check("odt+фото: инспектор видит серийник в картинке",
+           any(fixtures.JPEG_SERIAL in f.value for f in rep.findings))
+    for profile in PROFILES:
+        res, dst = _clean("odt+фото", tmp, src, profile)
+        if res is None or not _check("odt+фото/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+            continue
+        _check("odt+фото/%s: clean (оракул ничего не нашёл)" % _pname(profile), res.clean,
+               [(s.label, s.value) for s in res.survived][:4])
+        raw = _read(dst)
+        with zipfile.ZipFile(dst) as z:
+            pic = z.read("Pictures/photo.jpg")
+            raw += pic   # запись могла быть сжата: смотрим и распакованные байты
+        _check("odt+фото/%s: серийника и автора нет в байтах результата" % _pname(profile),
+               fixtures.JPEG_SERIAL.encode() not in raw and fixtures.JPEG_ARTIST.encode() not in raw)
+        _check("odt+фото/%s: картинка на месте и осталась JPEG" % _pname(profile),
+               pic[:2] == b"\xff\xd8" and pic.rstrip()[-2:] == b"\xff\xd9" and b"Exif" not in pic)
+
+
+@_with_tmp
 def test_33_ooxml_blind_spots(tmp):
     """Регрессии: x15ac:absPath и fileSharing в xlsx, ppt/authors.xml чистка убирала,
     а инспектор (оракул, отчёт пользователю) их не видел; w:docVar «Owner» с ФИО

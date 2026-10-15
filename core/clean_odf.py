@@ -1,4 +1,4 @@
-"""Чистка ODF на месте: meta.xml, settings.xml, комментарии, миниатюра.
+"""Чистка ODF на месте: meta.xml, settings.xml, комментарии, миниатюра, Pictures/.
 
 Фаза 2. Диспетчер core.clean вызывает clean_odf для семейства odf
 (.odt/.ods/.odp). Контейнер перекладывает core.zipfix: меняются только
@@ -20,14 +20,19 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import tempfile
 import zipfile
 import zlib
 
+from core import sniff
 from core.cleanmodel import Act, CleanResult, Profile
 from core.insp_legacy import _PATH_RE
 from core.zipfix import rebuild
 
 __all__ = ["clean_odf"]
+
+MAX_PICTURE = 64 * 1024 * 1024   # одна картинка из Pictures/, как MAX_NESTED у OOXML
 
 # Листья, чей текст -- личность или окружение. Префикс пространства имён
 # любой: у Word и LibreOffice он разный.
@@ -135,7 +140,94 @@ def _generator(meta):
     return ""
 
 
-def _clean(res, src, dst, paranoid, keep):
+def _clean_one(tmp, i, data, prof, keep):
+    """Байты вложения -> (семейство, CleanResult | None, новые байты | None)."""
+    p_in = os.path.join(tmp, "p%04d.in" % i)
+    p_out = os.path.join(tmp, "p%04d.out" % i)
+    with open(p_in, "wb") as fh:
+        fh.write(data)
+    fam = sniff.family(sniff.sniff(p_in))
+    if fam == "image":
+        from core.clean_image import clean_image
+        sub = clean_image(p_in, p_out, prof, keep)
+    elif fam == "pdf":
+        # LibreOffice кладёт вставленный PDF в Pictures/ как картинку.
+        from core.clean_pdf import clean_pdf
+        sub = clean_pdf(p_in, p_out, prof, keep)
+    else:
+        return fam, None, None
+    out = None
+    if sub.ok and os.path.isfile(p_out):
+        with open(p_out, "rb") as fh:
+            out = fh.read()
+    return fam, sub, out
+
+
+def _clean_pictures(res, src, names, prof, keep, replace):
+    """Pictures/ -> чистильщик картинок, как media/ у OOXML. Инспектор разбирает
+    Pictures/ рекурсивно, так что EXIF фото без этого валил оракул."""
+    pics = [n for n in names if n.startswith("Pictures/") and not n.endswith("/")]
+    if not pics:
+        return
+    what = "Вложенное изображение"
+    skipped = {}
+    tmp = tempfile.mkdtemp(prefix=".odf_")
+    try:
+        with zipfile.ZipFile(src) as zf:
+            for i, name in enumerate(pics):
+                try:
+                    # file_size из заголовка может врать: читаем с потолком сами.
+                    with zf.open(name) as fh:
+                        data = fh.read(MAX_PICTURE + 1)
+                    if len(data) > MAX_PICTURE:
+                        res.act(Act.UNREMOVABLE, name, what, "> %d МБ" % (MAX_PICTURE >> 20), "",
+                                "Вложение больше %d МБ: в память не берём, метаданные внутри "
+                                "остались." % (MAX_PICTURE >> 20))
+                        continue
+                    fam, sub, out = _clean_one(tmp, i, data, prof, keep)
+                except (zipfile.BadZipFile, zlib.error, EOFError):
+                    raise   # порча контейнера -- это решает clean_odf целиком
+                except Exception as exc:  # noqa: BLE001 -- одна картинка не валит остальные
+                    res.act(Act.FAILED, name, what, "", "",
+                            "Чистка вложения упала (%s): метаданные внутри остались."
+                            % type(exc).__name__)
+                    continue
+                finally:
+                    for p in os.listdir(tmp):
+                        try:
+                            os.remove(os.path.join(tmp, p))
+                        except OSError:
+                            pass
+                if sub is None:
+                    tail = name.rsplit("/", 1)[-1]
+                    ext = tail.rsplit(".", 1)[-1].lower() if "." in tail else "?"
+                    skipped[ext] = skipped.get(ext, 0) + 1
+                    continue
+                if not (sub.ok and out is not None):
+                    res.act(Act.UNREMOVABLE, name, what, "", "",
+                            "Вычистить вложение не удалось (%s): метаданные внутри остались."
+                            % "; ".join(sub.errors)[:300])
+                    continue
+                if sub.actions and all(a.act is Act.KEPT for a in sub.actions):
+                    res.act(Act.KEPT, name, "Вложенный файл без метаданных", "", "",
+                            "Чистильщик вложения ничего не убирал.")
+                else:
+                    for a in sub.actions:
+                        res.act(a.act, "%s > %s" % (name, a.location), a.label, a.before,
+                                a.after, a.note)
+                if out != data:
+                    replace[name] = out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if skipped:
+        res.act(Act.KEPT, "Pictures/", "Нерастровые изображения",
+                ", ".join("%s: %d" % kv for kv in sorted(skipped.items())), "",
+                "Форматы, которые чистильщик картинок не разбирает (SVM, EMF, WMF, SVG): "
+                "метаданные в них не искались и не убирались.")
+
+
+def _clean(res, src, dst, prof, keep):
+    paranoid = prof is Profile.PARANOID
     try:
         names = _names(src)
     except Exception as exc:  # noqa: BLE001
@@ -212,12 +304,7 @@ def _clean(res, src, dst, paranoid, keep):
         res.act(Act.REMOVED, "Thumbnails/", "миниатюра", "%d" % len(drop), "",
                 "Картинка предпросмотра может показывать прежнюю страницу.")
 
-    pics = [n for n in names if n.startswith("Pictures/")]
-    if pics:
-        res.act(Act.UNREMOVABLE, "Pictures/", "вложенные изображения",
-                "%d" % len(pics), "",
-                "Картинки лежат как есть, вместе со своим Exif. Чистка meta.xml "
-                "их не касается.")
+    _clean_pictures(res, src, names, prof, keep, replace)
 
     if not replace and not drop:
         res.act(Act.KEPT, "ODF", "нечего убирать", "", "",
@@ -245,7 +332,7 @@ def clean_odf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) 
         res.err("Неизвестный профиль чистки.")
         return res
     try:
-        _clean(res, str(src), str(dst), prof is Profile.PARANOID, keep)
+        _clean(res, str(src), str(dst), prof, keep)
     except Exception as exc:  # noqa: BLE001
         res.ok = False
         if isinstance(exc, (zipfile.BadZipFile, zlib.error, EOFError)):

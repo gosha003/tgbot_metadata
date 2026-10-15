@@ -1526,13 +1526,17 @@ def _odf_extras(by_name, report):
     thumbs = [n for n in by_name if n.startswith("Thumbnails/")]
 
     if pictures:
-        report.add(Risk.IDENTITY, "Pictures/", "Вложенные изображения",
+        # STRUCTURAL, а не IDENTITY: значение -- список имён частей, на них ссылается
+        # content.xml, чистка их сохраняет. Как IDENTITY оракул видел бы его «выжившим»
+        # в любом почищенном файле с картинкой. Сам Exif каждой картинки разбирает
+        # рекурсия диспетчера (core.inspect) -- там и GPS, и серийник, со своим риском.
+        report.add(Risk.STRUCTURAL, "Pictures/", "Вложенные изображения",
                    "%d файл(ов): %s" % (len(pictures),
                                         ", ".join(sorted(pictures)[:MAX_LIST])),
                    "Картинки кладутся в контейнер КАК ЕСТЬ, вместе со своим Exif: "
                    "GPS-координатами, моделью камеры, серийным номером и датой "
-                   "съёмки. Чистка meta.xml их не касается -- нужен отдельный "
-                   "проход по каждому файлу.", False)
+                   "съёмки. Exif каждой картинки показан отдельными находками "
+                   "Pictures/... и чистится отдельным проходом.", False)
     if thumbs:
         report.add(Risk.PROVENANCE, "Thumbnails/", "Миниатюра предпросмотра",
                    ", ".join(sorted(thumbs)),
