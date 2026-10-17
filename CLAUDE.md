@@ -1,53 +1,60 @@
 # tgbot_metadata
 
-Телеграм-бот для инспекции и чистки метаданных документов (docx/xlsx/pptx, PDF,
-картинки, легаси .doc/.xls, ODF, RTF). Запускается локально на Windows, только
-для владельца. Приоритет при конфликте: **незаметность чистки важнее точного
-сохранения вёрстки** (профиль Stealth по умолчанию).
+A Telegram bot for inspecting and cleaning document metadata (docx/xlsx/pptx,
+PDF, images, legacy .doc/.xls, ODF, RTF). It runs locally on Windows, for the
+owner only. Priority in a conflict: **undetectable cleaning matters more than
+exact layout preservation** (the Stealth profile is the default).
 
-## Модель для агентов — обязательное правило
+See [AGENTS.md](AGENTS.md) for the reading order, the checks to run first, and
+the rules that break the product when violated.
 
-**Все агенты, которых запускает Claude в этом проекте, работают на Sonnet.
-Всегда, без исключений.**
+## Code rules
 
-Это не наследуется автоматически: ключа «модель для сабагентов» в settings.json
-нет, агенты по умолчанию берут модель родительской сессии. Поэтому модель надо
-задавать в каждом вызове явно:
+- Inspectors never raise: each parsing section gets its own `try/except`, and
+  the problem is reported through `Report.err()`. We receive broken and
+  deliberately malformed files.
+- The inspection phase is strictly read-only: the input file is never modified
+  (the tests check this by comparing sha256 before and after).
+- Zero required external binaries. exiftool / LibreOffice / Ghostscript are
+  optional enrichment only: if they are missing, we work without them.
+- Values from files are untrusted: pass them through `model.clip()`, never into
+  a shell, and through `html.escape` when rendering HTML.
+- Privacy: don't log file names, their contents, or the contents of findings.
+  This is a privacy tool; logs here are themselves the leak.
+- Code, comments, docs, the CLI and the tests are in English.
 
-- **Workflow-скрипты:** `agent(prompt, { model: 'sonnet', ... })` — в КАЖДОМ
-  вызове `agent()`, включая вложенные в `pipeline()` и `parallel()`.
-- **Tool `Agent`:** параметр `model: "sonnet"`.
-- **Хуки** типа `prompt` / `agent`: поле `model: "claude-sonnet-5"`.
+## Languages (i18n)
 
-`.claude/settings.json` задаёт `"model": "sonnet"` как модель сессии для этого
-проекта, но на уже запущенную сессию это не действует — только на новые.
-Полагаться на наследование нельзя: указывай модель в вызове.
+The bot is bilingual: Russian is the default language of its replies, English is
+available. Everything lives in `core/i18n.py` and `core/i18n_ru.py`.
 
-Исключение только одно: если пользователь в конкретном запросе прямо просит
-другую модель.
+- Wrap every user-visible string in `tr()`. Module-level display constants are
+  marked with `N_()` and wrapped in `tr()` at every place they are shown.
+- Never evaluate `tr()` at import time: that freezes the language.
+- Add the Russian version of each new string to `core/i18n_ru.py` (`RU =
+  {english: russian}`), with the same placeholders.
+- Use `both()` for logic that must accept either language and `plural()` for
+  Russian plural forms.
+- **Only presentation changes with the language, never a verdict.** Logic must
+  not compare a translated string with an untranslated one; the oracle's presence
+  markers (present/absent, yes/no, empty, not set, on/off) are matched in both
+  languages.
+- `tests/test_i18n.py` enforces this: every `tr()`/`N_()` literal has a Russian
+  version with matching placeholders, `tr()` is never evaluated at import time,
+  and every fixture gets identical inspection and cleaning verdicts in English and
+  Russian. The CLI and the tests never set a language, so they run in English.
 
-## Правила кода
+## Testing on Windows
 
-- Инспекторы никогда не бросают исключения наружу: каждая секция разбора в свой
-  `try/except`, проблема пишется через `Report.err()`. Нам присылают битые и
-  намеренно кривые файлы.
-- Фаза инспекции строго read-only: входной файл не модифицируется никогда
-  (проверяется сверкой sha256 до и после в тестах).
-- Ноль обязательных внешних бинарников. exiftool / LibreOffice / Ghostscript —
-  только необязательное обогащение: нет на машине — работаем без них.
-- Значения из файлов недоверенные: через `model.clip()`, никогда в shell,
-  при рендере в HTML — через `html.escape`.
-- Приватность: не логировать имена файлов, их содержимое и содержимое находок.
-  Это инструмент приватности, логи здесь — сама утечка.
-- Комментарии и человекочитаемые строки — по-русски.
+Always `PYTHONIOENCODING=utf-8 python ...`, otherwise the console mangles
+Cyrillic and it looks like a bug in the code. This is a cp866 artifact, not a
+defect.
 
-## Тестирование на Windows
+`PYTHONIOENCODING=utf-8 python -m tests.run_all` runs every test suite and
+module self-test, each in its own process.
 
-Всегда `PYTHONIOENCODING=utf-8 python ...` — иначе консоль калечит кириллицу и
-выглядит как баг в коде. Это артефакт cp866, а не дефект.
+## Contract
 
-## Контракт
-
-`core/model.py` (Risk / Finding / Signal / Report) и `core/sniff.py` — общий
-контракт всех инспекторов. Менять только осознанно и целиком: против него
-пишется весь остальной код.
+`core/model.py` (Risk / Finding / Signal / Report) and `core/sniff.py` are the
+shared contract of all inspectors. Change them only deliberately and as a whole:
+all the other code is written against it.

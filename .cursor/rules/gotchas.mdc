@@ -1,118 +1,144 @@
 ---
-description: Неочевидные связи и ловушки tgbot_metadata. Читать до правок в core/ и bot.py.
+description: Non-obvious links and traps in tgbot_metadata. Read before editing core/ and bot.py.
 alwaysApply: true
 ---
 
 # Gotchas
 
-Только то, что не видно из импортов и ломается молча. Записи не переписывать и
-не удалять — только дописывать новые.
+Only what isn't visible from the imports and breaks silently. Don't rewrite or
+delete entries, only append new ones.
 
-- **`cleanreport.CLEANABLE` — настоящий гейт чистки в боте.** Добавить формат в
-  `core.clean._CLEANERS` недостаточно: `bot._offer_cleaning` проверяет именно
-  `CLEANABLE` и без него молча не покажет кнопки, а бот будет отказывать в
-  чистке формата, который ядро уже чистит.
-- **`bot._EXT` и `bot._STEM` надо расширять вместе с `CLEANABLE`.** Иначе
-  почищенный файл уедет пользователю с именем `image_ab12cd.bin`.
-- **Две таблицы номеров фаз:** `core.clean._PLANNED` и `cleanreport._PHASE`.
-  `cleanreport._no_cleaner()` предпочитает `planned_phase` от диспетчера, своя
-  таблица — запасной путь, поэтому расхождение между ними не падает в тестах, а
-  тихо ждёт. Для RTF/ODF они уже расходятся (2 против 4).
-- **Таймстемпы ZIP в фикстурах разные по смыслу.** `fixtures.make_docx` собран
-  библиотекой и несёт реальное время, `make_docx_wordlike` — `1980-01-01`, как
-  Word. Поэтому «таймстемпы сохранены как в исходнике» — верное требование
-  только для второй: для первой сохранить их значит оставить утечку времени
-  сохранения, и `clean_ooxml` осознанно приводит их к `1980-01-01`.
-- **XML частей OOXML правится побайтово, не через lxml/ElementTree.** Круг через
-  сериализатор переставляет `xmlns`, меняет `\r\n` на `\n` и пишет `<a/>` —
-  отпечаток обработки на каждой изменённой части.
-- **`STEALTH` для OOXML чист, но не незаметен.** Пустые `dc:creator` +
-  `cp:lastModifiedBy` инспектор сам считает сигналом `scrubbed`. Предел формата,
-  не дефект; диспетчер отдаёт это в `DispatchResult.new_signals`, и отчёт обязан
-  предупредить пользователя.
-- **PowerShell 5.1 на этой машине не понимает `&&`.** Команды разделять `;`, и
-  `$LASTEXITCODE` проверять сразу после запуска, а не после пайпа.
-- **`bot._no_clean_text()` берёт номер фазы из `cleanreport._PHASE`, не у
-  диспетчера:** он строит пустой `CleanResult`, у которого `planned_phase=0`.
-  Поэтому сообщение бота ДО чистки и отчёт ПОСЛЕ приходят из разных таблиц, и
-  рассинхрон увидит пользователь. Расхождение по RTF/ODF снято в пользу фазы 2.
-- **Проверка «части больше нет» легко вакуумна.** `printerSettings*.bin` есть
-  только у `fixtures.make_pptx`, `word/people.xml` — только у `make_docx`.
-  Требовать их отсутствия на фикстуре, где их и не было, значит не проверять
-  ничего; сверяйся с `src_order`, как это делает `test_20_ooxml_cleaning`.
-- **Сырой XML в качестве значения находки отравляет оракул чистки.** Оракул ищет
-  исходное значение в результате; дамп части содержит имена тегов и URI схем,
-  одинаковые у всех документов такого типа, поэтому законно оставленная часть
-  считается «пережившим значением» и корректно почищенный файл получает вердикт
-  «почищено не полностью». Отдавать только значения: текст плюс атрибуты.
-- **Словесная заглушка вместо пустого значения — тоже «выжившее значение».**
-  Строка «без значений» в находке `ENVIRONMENT` совпадает сама с собой. Если
-  значений нет, это не утечка: риск `PROVENANCE`, который оракул не проверяет.
-- **Списки корней `customXml` дублированы в двух модулях и обязаны совпадать:**
-  `insp_ooxml._CX_SHAREPOINT_NS` / `_CX_CONTENT_NS` и
-  `clean_ooxml._SP_ROOT_NS` / `_CONTENT_ROOT_NS`. Инспектор не имеет права
-  зависеть от чистильщика, поэтому совпадение охраняет
+- **`cleanreport.CLEANABLE` is the real cleaning gate in the bot.** Adding a
+  format to `core.clean._CLEANERS` isn't enough: `bot._offer_cleaning` checks
+  `CLEANABLE` specifically and without it silently won't show the buttons, so
+  the bot will refuse to clean a format the core already cleans.
+- **`bot._EXT` and `bot._STEM` have to be extended together with `CLEANABLE`.**
+  Otherwise the cleaned file goes to the user named `image_ab12cd.bin`.
+- **Two tables of phase numbers:** `core.clean._PLANNED` and
+  `cleanreport._PHASE`. `cleanreport._no_cleaner()` prefers the dispatcher's
+  `planned_phase`, its own table is the fallback, so a mismatch between them
+  doesn't fail the tests but waits quietly. For RTF/ODF they already differ
+  (2 vs 4).
+- **ZIP timestamps in the fixtures mean different things.**
+  `fixtures.make_docx` is built by a library and carries real time,
+  `make_docx_wordlike` has `1980-01-01`, like Word. So "timestamps kept as in
+  the original" is a correct requirement only for the second one: for the
+  first, keeping them means leaving the save time leak, and `clean_ooxml`
+  deliberately brings them to `1980-01-01`.
+- **OOXML part XML is edited byte by byte, not through lxml/ElementTree.** A
+  round trip through a serializer reorders `xmlns`, turns `\r\n` into `\n` and
+  writes `<a/>`: a processing fingerprint on every changed part.
+- **`STEALTH` for OOXML is clean but not undetectable.** Empty `dc:creator` +
+  `cp:lastModifiedBy` are themselves a `scrubbed` signal for the inspector. A
+  limit of the format, not a defect; the dispatcher passes it on in
+  `DispatchResult.new_signals`, and the report has to warn the user.
+- **PowerShell 5.1 on this machine doesn't understand `&&`.** Separate commands
+  with `;`, and check `$LASTEXITCODE` right after the run, not after a pipe.
+- **`bot._no_clean_text()` takes the phase number from `cleanreport._PHASE`,
+  not from the dispatcher:** it builds an empty `CleanResult` whose
+  `planned_phase=0`. So the bot's message BEFORE cleaning and the report AFTER
+  come from different tables, and the user will see a mismatch. The RTF/ODF
+  mismatch was resolved in favor of phase 2.
+- **A "the part is gone" check is easily vacuous.** `printerSettings*.bin`
+  exists only in `fixtures.make_pptx`, `word/people.xml` only in `make_docx`.
+  Requiring their absence on a fixture that never had them checks nothing;
+  compare against `src_order`, like `test_20_ooxml_cleaning` does.
+- **Raw XML as a finding's value poisons the cleaning oracle.** The oracle
+  looks for the original value in the output; a dump of a part contains tag
+  names and schema URIs that are the same in every document of that type, so a
+  legitimately kept part counts as a "surviving value" and a correctly cleaned
+  file gets a "not fully cleaned" verdict. Return only values: text plus
+  attributes.
+- **A verbal placeholder instead of an empty value is a "surviving value" too.**
+  The string "no values" in an `ENVIRONMENT` finding matches itself. If there
+  are no values, it isn't a leak: use the `PROVENANCE` risk, which the oracle
+  doesn't check.
+- **The `customXml` root lists are duplicated in two modules and must match:**
+  `insp_ooxml._CX_SHAREPOINT_NS` / `_CX_CONTENT_NS` and
+  `clean_ooxml._SP_ROOT_NS` / `_CONTENT_ROOT_NS`. The inspector must not depend
+  on the cleaner, so the match is guarded by
   `tests.test_clean.test_15_customxml_namespaces_agree`.
-- **`insp_ooxml._sec_excel` вызывается для всех форматов, не только для Excel.**
-  Внутри живёт разбор `customXml/`, который у настоящих `.docx` встречается чаще,
-  чем у `.xlsx`. Имя секции обманывает.
-- **`<tg-spoiler>` оборачивает `<code>`, а не наоборот.** Telegram запрещает
-  вложенные сущности внутри `code` и `pre`, но разрешает внутри `spoiler`.
-  Перестановка даёт невалидный HTML и Telegram отклоняет всё сообщение.
-- **Маскировка значений живёт в одном флаге `core.report.MASK_VALUES`**, и
-  `core/cleanreport.py` импортирует оттуда `spoiler()`. Отчёт о чистке
-  перечисляет те же значения, что отчёт инспекции, — добавить площадку вывода
-  значения и забыть про спойлер значит протечь в историю чата Telegram.
-- **`PARANOID` на файле от Word даёт сигнал `ai`, а не только `scrubbed`.**
-  Профиль убирает rsid, и инспектор заключает, что пакет собран библиотекой.
-  Файл выглядит не чищеным, а сгенерированным машиной — для многих задач это
-  хуже. Измерено `python -m core.clean_ooxml --real-word`.
-- **Приёмка на настоящих файлах — `tests/real_office.py`.** Office
-  необязателен: нет Word — `Unavailable`, и вызывающий обязан это пережить.
-  Три приёма внутри неочевидны и каждый стоил отладки: `InvokeMember` вместо
-  прямого обращения к COM-свойствам (иначе `$null` и невидимый модальный
-  диалог «Сохранить как»), отключение
-  `Options.WarnBeforeSavingPrintingSendingMarkup` (иначе висяк на файле с
-  исправлениями) и UTF-8 **с BOM** для `.ps1` (PowerShell 5.1 без BOM читает
-  скрипт как cp1251).
-- **Таймстемпы ZIP у ODF зависят от производителя, а не от формата.** Word,
-  сохраняющий в `.odt`, пишет `1980-01-01`; реальное время пишет LibreOffice.
-  `clean_odf` обязан решать по `meta:generator`, иначе оставит отпечаток на
-  половине файлов. Прежняя формулировка в ROADMAP («у ODF таймстемпы реальные»)
-  была неверным обобщением.
-- **Даты в `core.xml` имеют точность до минуты, секунды у Word всегда `00`.**
-  Поэтому `created == modified` — рядовое состояние, а не признак подделки, и
-  `cp:revision` не корроборация (у Word 16 было `revision=2` при четырёх
-  сохранениях в одну минуту). Улику даёт только `TotalTime`.
-- **`\*\revtbl` в RTF начинается служебной записью `Unknown`.** Word пишет её
-  всегда. Принять её за человека значит выдать лишнюю находку `IDENTITY`,
-  завысить счётчик авторов и — главное — отравить оракул чистки: слово длиннее
-  `clean.MIN_VALUE_LEN` и «переживёт» любую чистку.
-- **Пути в RTF проверять после декодирования, а не до.** `_PATH_RE` работает по
-  сырому тексту, где backslash удвоен и между символами стоят control words;
-  `\\\hich\f37` выглядит как UNC, а декодируется в один символ `\`. Поэтому
-  есть второй фильтр `_PATH_DECODED_RE`.
-- **`SttbfRMark` в `.doc` начинается с `Unknown`, как `\*\revtbl` в RTF.**
-  Пара `fc`/`lcb` — индекс 51 в `FibRgFcLcb`; база считается по `csw`/`cslw`
-  из файла, а не константой 154. Служебную запись за человека принимать нельзя.
-- **Рендерер не ограничивает число сообщений, это делает `bot._MAX_PARTS`.**
-  Нарезка идёт по лимиту 4096 символов, и на сотнях находок выходят десятки
-  сообщений; Telegram отвечает 429 и временно банит бота. Лимит обязан стоять
-  в хендлере: только он знает, что получатель — чат, а не консоль.
-- **pikepdf: `dct.get(key)` падает на имени ключа не в UTF-8, `dct[key]` — нет.**
-  Имя вида `/Auth#9Dor` приходит из `keys()` строкой с суррогатом, и `get()`
-  бросает `TypeError`; `[]`, `in` и `del` с той же строкой работают. Перебирая
-  ключи словаря PDF, читать значения только через `[]` (или `insp_pdf._get`).
-- **XMP в Latin-1 при заявленном UTF-8 lxml не берёт даже с `recover=True`.**
-  Разбирать только через `insp_pdf._xmp_fromstring` (чинит байты и повторяет).
-  И в тестах: `pdf.save()` по умолчанию (`fix_metadata_version=True`) сам
-  заменяет такой XMP пустым — фикстура тихо перестаёт быть битой.
-- **Обезвреживание ссылок перед LibreOffice сравнивает РАСКОДИРОВАННОЕ значение.**
-  `&#104;ttp://` в сырых байтах не похоже на http, а XML-парсер LO читает его как
-  адрес и идёт в сеть. По `file://` LO открывает файл (замерено по времени
-  доступа), а `file://сервер/...` на Windows — это SMB и NTLM-хэш владельца.
-- **`model._ABS_PATH` ловит путь только с начала «слова».** Без этого имя части
-  `word/media/image1.png` в тексте ошибки превращалось в `word<путь скрыт>`, а
-  `http://` — в `htt<путь скрыт>`. Новые префиксы добавлять с той же оговоркой.
-- **`meta:template` в ODF пустой: путь в `xlink:href`.** Читать `el.text` у
-  элементов-ссылок ODF бесполезно; то же у `meta:auto-reload`.
+- **`insp_ooxml._sec_excel` is called for every format, not only Excel.** It
+  holds the `customXml/` parse, which real `.docx` files have more often than
+  `.xlsx`. The section name is misleading.
+- **`<tg-spoiler>` wraps `<code>`, not the other way round.** Telegram forbids
+  nested entities inside `code` and `pre` but allows them inside `spoiler`. The
+  reverse order produces invalid HTML and Telegram rejects the whole message.
+- **Value masking lives in one flag, `core.report.MASK_VALUES`**, and
+  `core/cleanreport.py` imports `spoiler()` from there. The cleaning report
+  lists the same values as the inspection report: adding a place that prints a
+  value and forgetting the spoiler means leaking into the Telegram chat history.
+- **`PARANOID` on a file from Word gives an `ai` signal, not just `scrubbed`.**
+  The profile removes rsids, and the inspector concludes the package was built
+  by a library. The file looks not cleaned but machine-generated, which is
+  worse for many purposes. Measured with `python -m core.clean_ooxml --real-word`.
+- **Acceptance testing on real files is `tests/real_office.py`.** Office is
+  optional: no Word means `Unavailable`, and the caller has to survive that.
+  Three tricks inside are non-obvious and each cost a debugging session:
+  `InvokeMember` instead of direct access to COM properties (otherwise `$null`
+  and an invisible modal "Save As" dialog), turning off
+  `Options.WarnBeforeSavingPrintingSendingMarkup` (otherwise a hang on a file
+  with tracked changes) and UTF-8 **with a BOM** for `.ps1` (PowerShell 5.1
+  reads a script without a BOM as cp1251).
+- **ODF ZIP timestamps depend on the producer, not on the format.** Word saving
+  to `.odt` writes `1980-01-01`; LibreOffice writes the real time. `clean_odf`
+  has to decide by `meta:generator`, otherwise it leaves a fingerprint on half
+  the files. The old wording in ROADMAP ("ODF has real timestamps") was a wrong
+  generalization.
+- **Dates in `core.xml` are accurate to the minute, Word's seconds are always
+  `00`.** So `created == modified` is an ordinary state, not a sign of forgery,
+  and `cp:revision` is no corroboration (Word 16 had `revision=2` after four
+  saves within one minute). Only `TotalTime` gives evidence.
+- **`\*\revtbl` in RTF starts with the service entry `Unknown`.** Word always
+  writes it. Taking it for a person means an extra `IDENTITY` finding, an
+  inflated author count and, most importantly, a poisoned cleaning oracle: the
+  word is longer than `clean.MIN_VALUE_LEN` and "survives" any cleaning.
+- **Check RTF paths after decoding, not before.** `_PATH_RE` works on the raw
+  text, where backslashes are doubled and control words sit between
+  characters; `\\\hich\f37` looks like UNC but decodes into a single `\`. Hence
+  the second filter, `_PATH_DECODED_RE`.
+- **`SttbfRMark` in `.doc` starts with `Unknown`, like `\*\revtbl` in RTF.**
+  The `fc`/`lcb` pair is index 51 in `FibRgFcLcb`; the base is computed from
+  `csw`/`cslw` in the file, not a constant 154. The service entry must not be
+  taken for a person.
+- **The renderer doesn't limit the number of messages, `bot._MAX_PARTS` does.**
+  Splitting goes by the 4096-character limit, and hundreds of findings make
+  dozens of messages; Telegram answers 429 and temporarily bans the bot. The
+  limit has to sit in the handler: only it knows the recipient is a chat, not a
+  console.
+- **pikepdf: `dct.get(key)` crashes on a non-UTF-8 key name, `dct[key]`
+  doesn't.** A name like `/Auth#9Dor` comes out of `keys()` as a string with a
+  surrogate, and `get()` raises `TypeError`; `[]`, `in` and `del` with the same
+  string work. When iterating over the keys of a PDF dictionary, read values
+  only through `[]` (or `insp_pdf._get`).
+- **lxml won't take Latin-1 XMP declared as UTF-8, even with `recover=True`.**
+  Parse only through `insp_pdf._xmp_fromstring` (it fixes the bytes and
+  retries). And in tests: `pdf.save()` by default (`fix_metadata_version=True`)
+  itself replaces such XMP with an empty one, so the fixture silently stops
+  being broken.
+- **Defanging links before LibreOffice compares the DECODED value.**
+  `&#104;ttp://` in the raw bytes doesn't look like http, but LO's XML parser
+  reads it as an address and goes to the network. Via `file://` LO opens the
+  file (measured by access time), and `file://server/...` on Windows means SMB
+  and the owner's NTLM hash.
+- **`model._ABS_PATH` only catches a path at the start of a "word".** Without
+  that, the part name `word/media/image1.png` in an error text turned into
+  `word<path hidden>`, and `http://` into `htt<path hidden>`. Add new prefixes
+  with the same caveat.
+- **`meta:template` in ODF is empty: the path is in `xlink:href`.** Reading
+  `el.text` on ODF link elements is useless; the same goes for
+  `meta:auto-reload`.
+- **Only presentation changes with the language, never a verdict.** `tr()`
+  reads the language from a ContextVar at call time, so calling it at import
+  time freezes one language: module-level display constants are marked with
+  `N_()` and wrapped in `tr()` where they're shown. Logic must never compare a
+  translated string with an untranslated one; the oracle's presence markers
+  (present/absent, yes/no, empty, not set, on/off) are matched in both
+  languages through `both()` (`clean._PLACEHOLDERS`). A new `tr()` string
+  without a Russian entry in `core/i18n_ru.py` fails `tests/test_i18n.py`,
+  which also checks that every fixture gets identical verdicts in both
+  languages.
+- **Outside a handler everything speaks English.** The bot wraps each update in
+  `use_lang()` (`_LangMiddleware`); the CLI, the tests and the console messages
+  at startup run with the default language, English. Test substring checks
+  match the English text for that reason.

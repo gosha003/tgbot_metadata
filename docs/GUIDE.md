@@ -1,154 +1,156 @@
-# Инструкция: как установить и пользоваться ботом
+# Guide: installing and using the bot
 
-Эта инструкция для того, кто получил ссылку на репозиторий и хочет запустить
-бота у себя. Опыт программирования не нужен: все команды можно копировать как
-есть. На всё уходит минут 15–20.
+[Русская версия](GUIDE.ru.md)
 
-**Содержание**
+This guide is for someone who has the link to the repository and wants to run
+the bot on their own machine. No programming experience is needed: every
+command can be copied as is. It takes about 15–20 minutes.
 
-1. [Что это за бот](#1-что-это-за-бот)
-2. [Как это работает и что понадобится](#2-как-это-работает-и-что-понадобится)
-3. [Установка](#3-установка) — [Windows](#windows) · [macOS](#macos) · [Linux](#linux)
-4. [Свой бот в Telegram (@BotFather)](#4-свой-бот-в-telegram-botfather)
-5. [Файл настроек .env](#5-файл-настроек-env)
-6. [Запуск и остановка](#6-запуск-и-остановка)
-7. [Необязательное: LibreOffice и exiftool](#7-необязательное-libreoffice-и-exiftool)
-8. [Как пользоваться](#8-как-пользоваться)
-9. [Какой профиль выбрать](#9-какой-профиль-выбрать)
-10. [Как читать ответы бота](#10-как-читать-ответы-бота)
-11. [Ограничения](#11-ограничения)
-12. [Приватность: куда уходят файлы](#12-приватность-куда-уходят-файлы)
-13. [Частые проблемы](#13-частые-проблемы)
-14. [Обновление](#14-обновление)
-15. [Без Telegram: командная строка](#15-без-telegram-командная-строка)
+**Contents**
+
+1. [What the bot does](#1-what-the-bot-does)
+2. [How it works and what you need](#2-how-it-works-and-what-you-need)
+3. [Installation](#3-installation) — [Windows](#windows) · [macOS](#macos) · [Linux](#linux)
+4. [Your own Telegram bot (@BotFather)](#4-your-own-telegram-bot-botfather)
+5. [The .env settings file](#5-the-env-settings-file)
+6. [Starting and stopping](#6-starting-and-stopping)
+7. [Optional: LibreOffice and exiftool](#7-optional-libreoffice-and-exiftool)
+8. [How to use it](#8-how-to-use-it)
+9. [Which profile to choose](#9-which-profile-to-choose)
+10. [Reading the bot's replies](#10-reading-the-bots-replies)
+11. [Limits](#11-limits)
+12. [Privacy: where files go](#12-privacy-where-files-go)
+13. [Common problems](#13-common-problems)
+14. [Updating](#14-updating)
+15. [Without Telegram: the command line](#15-without-telegram-the-command-line)
 
 ---
 
-## 1. Что это за бот
+## 1. What the bot does
 
-В каждом документе и каждой фотографии, кроме видимого содержимого, лежат
-**метаданные** — скрытые сведения о том, кто, где, когда и чем сделал файл.
-Например:
+Besides the visible content, every document and every photo carries
+**metadata**: hidden information about who made the file, where, when and with
+what. For example:
 
-- в документе Word — имя автора и того, кто сохранял последним, название
-  организации, путь к папке на компьютере (`C:\Users\Иван\Документы\...`),
-  имя принтера, сколько минут документ редактировали;
-- в PDF — программа, в которой его сделали, даты, «прошлые версии» страниц и
-  текст под «замазкой», если правки дописывались поверх;
-- в фотографии с телефона — **GPS-координаты места съёмки**, модель и
-  серийный номер камеры, дата и время.
+- in a Word document: the author's name and the name of whoever saved it last,
+  the organization, a folder path on the computer (`C:\Users\John\Documents\...`),
+  the printer name, how many minutes the document was edited;
+- in a PDF: the program that made it, dates, "earlier versions" of pages and
+  the text under a "redaction" if the edits were appended on top;
+- in a phone photo: **the GPS coordinates of where it was taken**, the camera
+  model and serial number, the date and time.
 
-Бот делает две вещи:
+The bot does two things:
 
-1. **Показывает**, что лежит в файле (инспекция). Сам файл при этом не
-   меняется.
-2. **Чистит** — присылает новую копию файла без личных данных. Исходный файл
-   не меняется никогда.
+1. **Shows** what's in the file (inspection). The file itself is not changed.
+2. **Cleans**: sends back a new copy of the file without personal data. The
+   original file is never changed.
 
-Главная особенность: бот старается, чтобы **по почищенному файлу не было
-видно, что его чистили**. Файл, у которого все поля пустые, так же
-подозрителен, как файл с полными данными. Поэтому по умолчанию бот убирает
-личное, но оставляет то, что выглядит естественно (например, «сделано в
-Word» — это правда).
+The key feature: the bot tries to make sure **a cleaned file doesn't look
+cleaned**. A file with every field empty is as suspicious as a file with all
+the data in place. So by default the bot removes what's personal but keeps
+what looks natural (for example, "made in Word" is simply true).
 
-**Поддерживаемые форматы**
+**Supported formats**
 
-| Формат | Показать | Почистить |
+| Format | Show | Clean |
 |---|---|---|
-| Word / Excel / PowerPoint (`.docx`, `.xlsx`, `.pptx`) | да | да |
-| PDF | да | да |
-| Фото и картинки: JPEG, PNG, WebP, GIF | да | да |
-| OpenDocument (`.odt`, `.ods`, `.odp`), RTF | да | да |
-| Старые Word / Excel / PowerPoint (`.doc`, `.xls`, `.ppt`) | да | только пересозданием, нужен LibreOffice ([раздел 7](#7-необязательное-libreoffice-и-exiftool)) |
-| TIFF, HEIC (фото iPhone) | да | нет |
-| ZIP-архив с документами | — | да, все файлы внутри разом |
+| Word / Excel / PowerPoint (`.docx`, `.xlsx`, `.pptx`) | yes | yes |
+| PDF | yes | yes |
+| Photos and images: JPEG, PNG, WebP, GIF | yes | yes |
+| OpenDocument (`.odt`, `.ods`, `.odp`), RTF | yes | yes |
+| Old Word / Excel / PowerPoint (`.doc`, `.xls`, `.ppt`) | yes | only by regenerating, needs LibreOffice ([section 7](#7-optional-libreoffice-and-exiftool)) |
+| TIFF, HEIC (iPhone photos) | yes | no |
+| A ZIP archive of documents | — | yes, all files inside at once |
 
 ---
 
-## 2. Как это работает и что понадобится
+## 2. How it works and what you need
 
-Бот — это программа, которая работает **на вашем компьютере**. Telegram
-только передаёт ей файлы и показывает ответы. Пока программа запущена, бот
-отвечает. Компьютер выключили или закрыли окно — бот молчит.
+The bot is a program that runs **on your computer**. Telegram only delivers
+files to it and shows its replies. While the program runs, the bot answers.
+Turn the computer off or close the window, and the bot goes quiet.
 
-Каждый запускает **своего** бота: у каждого свой «ключ» (токен) от Telegram.
-Если двое запустят программу с одним токеном, бот будет отвечать через раз.
+Everyone runs **their own** bot: each has its own "key" (token) from Telegram.
+If two people run the program with the same token, the bot answers every other
+time.
 
-Понадобится:
+You need:
 
-- компьютер с Windows, macOS или Linux;
-- **Python 3.10 или новее** (бесплатный, установка описана ниже);
-- аккаунт в Telegram;
-- около 200 МБ места на диске.
+- a computer with Windows, macOS or Linux;
+- **Python 3.10 or newer** (free, installation is described below);
+- a Telegram account;
+- about 200 MB of disk space.
 
 ---
 
-## 3. Установка
+## 3. Installation
 
 ### Windows
 
-**Шаг 1. Python.**
+**Step 1. Python.**
 
-1. Откройте [python.org/downloads](https://www.python.org/downloads/) и
-   нажмите большую жёлтую кнопку «Download Python 3.x».
-2. Запустите скачанный файл. **Обязательно поставьте галочку «Add python.exe
-   to PATH»** внизу первого окна, затем «Install Now».
-3. Проверьте: откройте меню «Пуск», наберите `cmd`, откройте «Командная
-   строка» и введите:
+1. Open [python.org/downloads](https://www.python.org/downloads/) and click
+   the big yellow "Download Python 3.x" button.
+2. Run the downloaded file. **Be sure to tick "Add python.exe to PATH"** at
+   the bottom of the first window, then click "Install Now".
+3. Check it: open the Start menu, type `cmd`, open "Command Prompt" and enter:
 
    ```
    python --version
    ```
 
-   Должно ответить `Python 3.10` или новее. Если пишет «не является внутренней
-   или внешней командой», значит, галочку PATH не поставили: переустановите
-   Python с галочкой.
+   It should say `Python 3.10` or newer. If it says "is not recognized as an
+   internal or external command", the PATH box wasn't ticked: reinstall Python
+   with the box ticked.
 
-**Шаг 2. Скачать бота.**
+**Step 2. Download the bot.**
 
-Проще всего без git: на странице репозитория на GitHub нажмите зелёную кнопку
-**Code → Download ZIP**, распакуйте архив, например, в `C:\tgbot_metadata`.
+The simplest way, without git: on the repository's GitHub page click the green
+**Code → Download ZIP** button and unpack the archive, for example into
+`C:\tgbot_metadata`.
 
-Если git установлен:
+If git is installed:
 
 ```
 git clone https://github.com/gosha003/tgbot_metadata.git C:\tgbot_metadata
 ```
 
-**Шаг 3. Установить зависимости.** В командной строке:
+**Step 3. Install the dependencies.** In the Command Prompt:
 
 ```
 cd C:\tgbot_metadata
 python -m pip install -r requirements.txt
 ```
 
-Если папка называется иначе (после ZIP она бывает `tgbot_metadata-main`),
-подставьте свой путь. В конце должно быть `Successfully installed ...`.
+If the folder has a different name (after the ZIP it's often
+`tgbot_metadata-main`), use your path. It should end with
+`Successfully installed ...`.
 
-Дальше — [раздел 4](#4-свой-бот-в-telegram-botfather).
+Next: [section 4](#4-your-own-telegram-bot-botfather).
 
 ### macOS
 
-**Шаг 1. Python.** Скачайте установщик с
-[python.org/downloads](https://www.python.org/downloads/) и установите. Затем
-откройте «Терминал» (Программы → Утилиты → Терминал) и проверьте:
+**Step 1. Python.** Download the installer from
+[python.org/downloads](https://www.python.org/downloads/) and install it. Then
+open Terminal (Applications → Utilities → Terminal) and check:
 
 ```
 python3 --version
 ```
 
-На macOS команда называется `python3`, а не `python`.
+On macOS the command is `python3`, not `python`.
 
-**Шаг 2. Скачать бота.** Code → Download ZIP на GitHub и распакуйте, например,
-в папку «Документы». Или:
+**Step 2. Download the bot.** Code → Download ZIP on GitHub and unpack it, for
+example into Documents. Or:
 
 ```
 git clone https://github.com/gosha003/tgbot_metadata.git ~/tgbot_metadata
 ```
 
-**Шаг 3. Зависимости в виртуальном окружении.** Новые macOS не дают ставить
-пакеты в системный Python, поэтому делаем отдельное окружение прямо в папке
-бота:
+**Step 3. Dependencies in a virtual environment.** Recent macOS versions don't
+allow installing packages into the system Python, so we create a separate
+environment right in the bot's folder:
 
 ```
 cd ~/tgbot_metadata
@@ -157,12 +159,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Строку `source .venv/bin/activate` нужно повторять **каждый раз** перед
-запуском бота в новом окне терминала (в начале строки появится `(.venv)`).
+The `source .venv/bin/activate` line has to be repeated **every time** before
+starting the bot in a new terminal window (`(.venv)` appears at the start of
+the line).
 
 ### Linux
 
-Для Ubuntu / Debian:
+For Ubuntu / Debian:
 
 ```
 sudo apt update
@@ -174,30 +177,30 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Как и на macOS, `source .venv/bin/activate` повторять перед каждым запуском.
+As on macOS, repeat `source .venv/bin/activate` before every start.
 
 ---
 
-## 4. Свой бот в Telegram (@BotFather)
+## 4. Your own Telegram bot (@BotFather)
 
-1. В Telegram найдите **@BotFather** (с синей галочкой) и нажмите «Start».
-2. Отправьте ему команду `/newbot`.
-3. Он спросит **имя** бота — любое, например `Мой чистильщик`.
-4. Затем **username** — уникальный, латиницей, обязательно с `bot` на конце,
-   например `ivan_cleaner_bot`. Если занят — придумайте другой.
-5. BotFather пришлёт сообщение с **токеном** — строкой вида
-   `7123456789:AAHk3j...`. Это ключ от бота. **Никому его не показывайте**:
-   кто знает токен, тот управляет ботом. Если токен утёк, отправьте BotFather
-   `/revoke` и получите новый.
+1. In Telegram, find **@BotFather** (with the blue check mark) and press "Start".
+2. Send it the `/newbot` command.
+3. It asks for the bot's **name**: anything, for example `My cleaner`.
+4. Then the **username**: unique, Latin letters, ending in `bot`, for example
+   `john_cleaner_bot`. If it's taken, pick another one.
+5. BotFather sends a message with the **token**, a string like
+   `7123456789:AAHk3j...`. This is the key to the bot. **Never show it to
+   anyone**: whoever knows the token controls the bot. If the token leaks, send
+   BotFather `/revoke` and get a new one.
 
 ---
 
-## 5. Файл настроек .env
+## 5. The .env settings file
 
-В папке бота лежит образец `.env.example`. Из него делается рабочий файл
-`.env`.
+The bot's folder has a sample file, `.env.example`. The working `.env` file is
+made from it.
 
-**Windows** (в командной строке, в папке бота):
+**Windows** (in the Command Prompt, in the bot's folder):
 
 ```
 copy .env.example .env
@@ -211,381 +214,395 @@ cp .env.example .env
 nano .env
 ```
 
-(в nano: сохранить — `Ctrl+O`, Enter; выйти — `Ctrl+X`).
+(in nano: save with `Ctrl+O`, Enter; exit with `Ctrl+X`).
 
-Впишите токен из раздела 4 в строку `TG_BOT_TOKEN=` — целиком, без пробелов и
-кавычек:
+Put the token from section 4 into the `TG_BOT_TOKEN=` line, whole, without
+spaces or quotes:
 
 ```
-TG_BOT_TOKEN=7123456789:AAHk3j...весь_токен
+TG_BOT_TOKEN=7123456789:AAHk3j...the_whole_token
 TG_OWNER_ID=
 ```
 
-`TG_OWNER_ID` пока оставьте пустым — свой номер вы узнаете на следующем шаге.
+Leave `TG_OWNER_ID` empty for now: you'll learn your number in the next step.
 
-> Почему без `TG_OWNER_ID` бот никого не обслуживает: иначе любой, кто найдёт
-> бота поиском, сможет гонять через него свои файлы на вашем компьютере. Бот
-> закрыт по умолчанию и отвечает только тем, кого вы назвали.
+> Why the bot serves no one without `TG_OWNER_ID`: otherwise anyone who finds
+> the bot through search could push their files through it on your computer.
+> The bot is closed by default and answers only the people you name.
 
-**Узнать свой user_id.** Запустите бота (раздел 6), найдите его в Telegram по
-username и напишите ему что угодно. Он ответит:
+**Find your user_id.** Start the bot (section 6), find it in Telegram by its
+username and send it anything. It replies:
 
-> Доступ к боту ещё не настроен… Ваш Telegram user_id: `123456789`
+> Access to the bot is not configured yet, so it serves no one. Your Telegram
+> user_id: `123456789`
 
-Остановите бота, впишите число в `.env`:
+Stop the bot and put the number into `.env`:
 
 ```
 TG_OWNER_ID=123456789
 ```
 
-и запустите снова. Теперь бот ваш.
+and start it again. Now the bot is yours.
 
-Остальные настройки в `.env` необязательны:
+The other settings in `.env` are optional:
 
-| Строка | Что значит |
+| Line | Meaning |
 |---|---|
-| `TG_ALLOWED_IDS=111,222` | ещё кому разрешено пользоваться ботом (их user_id через запятую) |
-| `REPORT_TTL_MIN=60` | через сколько минут бот сам удаляет свои отчёты из чата; `0` — не удалять |
+| `TG_ALLOWED_IDS=111,222` | who else may use the bot (their user_ids, comma-separated) |
+| `REPORT_TTL_MIN=60` | after how many minutes the bot deletes its own reports from the chat; `0` means never |
+| `BOT_LANG=ru` | the default reply language: `ru` (Russian, the default) or `en` (English). Each user can change it with `/lang` |
 
-После любого изменения `.env` бота нужно перезапустить.
+Restart the bot after any change to `.env`.
 
 ---
 
-## 6. Запуск и остановка
+## 6. Starting and stopping
 
-**Запуск.** В папке бота:
+**Start.** In the bot's folder:
 
 - Windows: `python bot.py`
-- macOS / Linux: `source .venv/bin/activate`, затем `python3 bot.py`
+- macOS / Linux: `source .venv/bin/activate`, then `python3 bot.py`
 
-Если всё хорошо, в окне появится примерно:
+If all is well, the window shows something like:
 
 ```
-INFO доступ: пользователей=1, автоудаление отчётов=60 мин
+INFO access: users=1, report auto-deletion=60 min
 INFO Start polling
-INFO Run polling for bot @ivan_cleaner_bot ...
+INFO Run polling for bot @john_cleaner_bot ...
 ```
 
-Окно **не закрывайте** — пока оно открыто, бот работает.
+**Don't close** the window: the bot works while it's open.
 
-**Остановка.** В этом окне нажмите `Ctrl+C`.
+**Stop.** Press `Ctrl+C` in that window.
 
-**Только один экземпляр.** Если запустить бота второй раз, пока работает
-первый, второй сразу завершится с сообщением «Бот уже запущен в другом окне».
-Это защита: два экземпляра с одним токеном мешают друг другу.
+**Only one instance.** If you start the bot a second time while the first one
+is running, the second exits right away with the message "The bot is already
+running in another window or process on this machine". This is a safeguard:
+two instances with the same token get in each other's way.
 
 ---
 
-## 7. Необязательное: LibreOffice и exiftool
+## 7. Optional: LibreOffice and exiftool
 
-Бот полностью работает и без них. Они добавляют возможности. Что найдено,
-показывает команда `/status` в чате с ботом.
+The bot works fully without them. They add capabilities. The `/status` command
+in the chat with the bot shows what was found.
 
-**LibreOffice** — бесплатный офисный пакет. Нужен для кнопки «Пересоздать» и
-для чистки старых `.doc` / `.xls` / `.ppt`.
+**LibreOffice** is a free office suite. It's needed for the "Regenerate"
+button and for cleaning old `.doc` / `.xls` / `.ppt` files.
 
-- Windows и macOS: скачать с [libreoffice.org](https://www.libreoffice.org/download/download/)
-  и установить как обычную программу. Бот найдёт его сам.
+- Windows and macOS: download it from [libreoffice.org](https://www.libreoffice.org/download/download/)
+  and install it like any program. The bot finds it on its own.
 - Linux: `sudo apt install libreoffice`.
 
-**exiftool** — расшифровывает скрытые служебные данные камер (MakerNotes) в
-фотографиях: серийники, настройки съёмки.
+**exiftool** decodes the hidden vendor data of cameras (MakerNotes) in photos:
+serial numbers, shooting settings.
 
-- Windows: на [exiftool.org](https://exiftool.org/) скачайте «Windows
-  Executable» (zip, 64-bit). Внутри архива папка `exiftool-XX.XX_64`. Из неё
-  в папку `tools` бота скопируйте файл `exiftool(-k).exe`, **переименовав его
-  в `exiftool.exe`**, и рядом папку `exiftool_files`. Должно получиться:
+- Windows: on [exiftool.org](https://exiftool.org/) download the "Windows
+  Executable" (zip, 64-bit). The archive has an `exiftool-XX.XX_64` folder.
+  From it, copy `exiftool(-k).exe` into the bot's `tools` folder,
+  **renaming it to `exiftool.exe`**, and the `exiftool_files` folder next to
+  it. The result should be:
 
   ```
   tgbot_metadata\tools\exiftool.exe
   tgbot_metadata\tools\exiftool_files\...
   ```
 
-- macOS: `brew install exiftool` (нужен [Homebrew](https://brew.sh/)).
+- macOS: `brew install exiftool` (needs [Homebrew](https://brew.sh/)).
 - Linux: `sudo apt install libimage-exiftool-perl`.
 
-После установки перезапустите бота и проверьте `/status`.
+After installing, restart the bot and check `/status`.
 
 ---
 
-## 8. Как пользоваться
+## 8. How to use it
 
-### Главное правило: отправляйте файл как «Файл», а не как «Фото»
+### The main rule: send the file as a "File", not as a "Photo"
 
-Если отправить картинку как фото, Telegram пережмёт её **до того**, как бот
-её увидит, и все метаданные уже будут стёрты. Бот на такое ответит, что
-проверять нечего.
+If you send a picture as a photo, Telegram recompresses it **before** the bot
+sees it, and all the metadata is already gone. The bot will reply that there's
+nothing to check.
 
-- **Компьютер:** скрепка 📎 → «Файл» → выберите файл. Или перетащите файл в
-  чат и в появившемся окне выберите отправку **без сжатия / как файл**.
-- **Android:** скрепка 📎 → «Файл». Для фото: «Файл» → «Галерея» внутри
-  этого меню — так фото уходит без сжатия (обычная «Галерея» сжимает).
-- **iPhone:** скрепка 📎 → «Файл». Для фото: «Файл» → «Выбрать фото или
-  видео» — так фото уходит файлом, без сжатия.
+- **Desktop:** paperclip 📎 → "File" → choose the file. Or drag the file into
+  the chat and in the window that appears choose sending **without
+  compression / as a file**.
+- **Android:** paperclip 📎 → "File". For photos: "File" → "Gallery" inside
+  that menu: this way the photo goes without compression (the regular
+  "Gallery" compresses).
+- **iPhone:** paperclip 📎 → "File". For photos: "File" → "Choose Photo or
+  Video": this way the photo goes as a file, without compression.
 
-### Обычный сценарий
+### The usual flow
 
-1. **Отправьте файл.** Бот ответит «Принято, разбираю…», затем пришлёт
-   **отчёт**: что найдено в файле. Значения скрыты под спойлером — нажмите на
-   серую полоску, чтобы увидеть.
-2. Под отчётом будет кнопка **«🗑 Удалить отчёт из чата»**, а ниже — сообщение
-   **«Почистить файл?»** с кнопками:
-   - **Почистить (Stealth)** — рекомендуемый вариант;
-   - **Почистить (Paranoid)** — убрать вообще всё;
-   - **Пересоздать (LibreOffice)** — сохранить файл заново через LibreOffice
-     (только для документов Office, ODF и RTF: PDF и картинки LibreOffice не
-     пересоздаёт, поэтому для них этой кнопки нет);
-   - **Не чистить**;
-   - переключатели **☐ Сохранить: …** — см. ниже.
+1. **Send the file.** The bot acknowledges it, then sends a **report**: what
+   was found in the file. The values are hidden under a spoiler: tap the grey
+   bar to see them.
+2. Under the report there's a **"🗑 Delete report from chat"** button, and
+   below it a **"Clean the file?"** message with buttons:
+   - **Clean (Stealth)**: the recommended option;
+   - **Clean (Paranoid)**: remove absolutely everything;
+   - **Regenerate (LibreOffice)**: save the file anew through LibreOffice
+     (only for Office documents, ODF and RTF: LibreOffice doesn't regenerate
+     PDFs and images, so they don't get this button);
+   - **Don't clean**;
+   - the **☐ Keep: …** toggles, see below.
 
-   Разница между вариантами — в [разделе 9](#9-какой-профиль-выбрать).
-3. **Нажмите кнопку.** Через несколько секунд бот пришлёт отчёт о чистке и
-   **новый файл** с нейтральным именем вида `document_3fa9c1.docx`. Сохраните
-   его — это и есть почищенная копия. Подпись под файлом говорит, чисто ли
-   получилось ([раздел 10](#10-как-читать-ответы-бота)).
+   The difference between the options is in [section 9](#9-which-profile-to-choose).
+3. **Press a button.** A few seconds later the bot sends a cleaning report and
+   a **new file** with a neutral name like `document_3fa9c1.docx`. Save it:
+   that's the cleaned copy. The caption under the file says whether the result
+   is clean ([section 10](#10-reading-the-bots-replies)).
 
-Кнопки живут 30 минут. Позже бот ответит «кнопка устарела» — просто
-отправьте файл ещё раз.
+The buttons live for 30 minutes. After that the bot replies that the button
+has expired: just send the file again.
 
-### Переключатели «Сохранить»
+### The "Keep" toggles
 
-Иногда что-то из метаданных нужно оставить. Нажмите переключатель — он
-станет ☑ — и затем кнопку чистки.
+Sometimes part of the metadata needs to stay. Press a toggle (it becomes ☑)
+and then a cleaning button.
 
-| Переключатель | Когда нужен |
+| Toggle | When it's needed |
 |---|---|
-| Сохранить: заголовок документа | публикуемый отчёт, у которого заголовок — часть оформления |
-| Сохранить: автора | документ и должен быть подписан вашим именем |
-| Сохранить: ICC-профиль (картинки) | важна точная цветопередача при печати |
+| Keep: document title | a published report where the title is part of the layout |
+| Keep: author | the document is supposed to carry your name |
+| Keep: ICC profile (images) | exact color reproduction in print matters |
 
-Сохранённое поле остаётся **как было**, поэтому бот честно напишет «📌 файл
-НЕ чистый: по вашему выбору сохранено …». Это не ошибка, а ваш выбор.
-С кнопкой «Пересоздать» переключатели не работают — бот откажет и скажет об
-этом.
+A kept field stays **exactly as it was**, so the bot honestly says "📌 … the
+file is NOT clean: kept by your choice …". That's not an error, it's your
+choice. The toggles don't work with "Regenerate": the bot refuses and says so.
 
-### Старые .doc / .xls / .ppt
+### Old .doc / .xls / .ppt
 
-Их на месте почистить нельзя в принципе: метаданные и **удалённый текст
-прошлых версий** зашиты внутрь файла. Поэтому для них одна кнопка —
-**«Пересоздать (LibreOffice)»**: на выходе получится современный `.docx` /
-`.xlsx` / `.pptx` без истории правок. Это занимает до минуты. Если
-LibreOffice не установлен, бот так и скажет и файл не тронет.
+They can't be cleaned in place at all: the metadata and **deleted text from
+earlier versions** are woven into the file. So they get one button,
+**"Regenerate (LibreOffice)"**: the output is a modern `.docx` / `.xlsx` /
+`.pptx` without the edit history. This takes up to a minute. If LibreOffice
+isn't installed, the bot says so and leaves the file alone.
 
-### Много файлов сразу: ZIP
+### Many files at once: ZIP
 
-Сложите файлы в ZIP-архив и отправьте его. Бот покажет, сколько файлов
-внутри, и предложит «Почистить всё». В ответ придёт:
+Put the files into a ZIP archive and send it. The bot shows how many files are
+inside and offers to clean them all. In return you get:
 
-- отчёт по каждому файлу;
-- новый архив, в котором **только те файлы, чистота которых проверена**.
-  Что не удалось почистить (например, неподдерживаемый формат), в архив не
-  попадёт — его нельзя случайно отправить дальше как чистое.
+- a report for each file;
+- a new archive with **only the files whose cleanliness was verified**.
+  Whatever couldn't be cleaned (an unsupported format, for example) doesn't go
+  into the archive, so it can't accidentally be passed on as clean.
 
-Переключатель **«Имена в архиве: нейтральные / исходные»**: имена файлов —
-тоже метаданные (`Договор_Иванов_финал.docx`). С нейтральными внутри будут
-`doc_0001.docx`, `doc_0002.pdf`…, а соответствие номеров настоящим именам
-будет только в отчёте в чате.
+The **"neutral / original names"** toggle: file names are metadata too
+(`Contract_Smith_final.docx`). With neutral names the archive holds
+`doc_0001.docx`, `doc_0002.pdf`…, and the mapping from numbers to real names
+is only in the report in the chat.
 
-### Команды
+### Commands
 
-Наберите `/` в чате с ботом — появится меню.
+Type `/` in the chat with the bot to get the menu.
 
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `/start`, `/help` | справка |
-| `/status` | что доступно на этом компьютере: LibreOffice, exiftool, автоудаление |
-| `/clear` | удалить из чата все отчёты бота |
+| `/start`, `/help` | help |
+| `/lang` | switch the reply language: Русский / English (`/lang en`, `/lang ru` also work) |
+| `/status` | what's available on this machine: LibreOffice, exiftool, auto-deletion |
+| `/clear` | delete all the bot's reports from the chat |
 
-### Удаление отчётов
+### Deleting reports
 
-Отчёт содержит найденные значения: ваше имя, пути, координаты. Они под
-спойлером, но текст всё равно хранится на серверах Telegram. Поэтому:
+A report contains the values that were found: your name, paths, coordinates.
+They're under a spoiler, but the text is still stored on Telegram's servers.
+So:
 
-- кнопка **«🗑 Удалить отчёт из чата»** под каждым отчётом удаляет отчёты
-  сразу;
-- **`/clear`** — то же самое командой;
-- бот **сам** удаляет отчёты через 60 минут (настраивается в `.env`).
+- the **"🗑 Delete report from chat"** button under every report deletes the
+  reports immediately;
+- **`/clear`** does the same as a command;
+- the bot deletes reports **on its own** after 60 minutes (configurable in
+  `.env`).
 
-Почищенные файлы и ваши собственные сообщения бот **не удаляет никогда**.
-Отправленный вами исходный файл тоже остаётся в чате — удалите его сами, если
-он чувствительный. Бот помнит свои отчёты, только пока запущен: после
-перезапуска старые отчёты удаляйте вручную.
+The bot **never** deletes cleaned files or your own messages. The original
+file you sent also stays in the chat: delete it yourself if it's sensitive.
+The bot remembers its reports only while it's running: after a restart, delete
+old reports by hand.
 
-### Имя файла
+### The file name
 
-Имя файла — тоже метаданные, и Telegram его показывает получателю. Бот всегда
-отдаёт почищенный файл с нейтральным именем и напоминает, если исходное имя
-выглядит «говорящим». Если будете пересылать исходник — переименуйте его.
+The file name is metadata too, and Telegram shows it to the recipient. The bot
+always returns the cleaned file with a neutral name and reminds you if the
+original name looks "telling". If you forward the original, rename it.
 
 ---
 
-## 9. Какой профиль выбрать
+## 9. Which profile to choose
 
-| Профиль | Что делает | Плюс | Минус |
+| Profile | What it does | Pro | Con |
 |---|---|---|---|
-| **Stealth** (по умолчанию) | убирает личность и окружение: автора, пути, принтеры, GPS, серийники, внутренние идентификаторы. Оставляет приложение и его версию | файл выглядит естественно | для Word/Excel/PowerPoint пустое поле «автор» само может выдать, что файл чистили — бот об этом предупредит |
-| **Paranoid** | убирает всё, включая приложение и даты | гарантированно чисто | видно, что файл обрабатывали |
-| **Пересоздать** | сохраняет файл заново через LibreOffice и дочищает | никаких следов чистки: файл просто «сделан в LibreOffice» | вёрстка может немного измениться; программой-автором станет LibreOffice |
+| **Stealth** (default) | removes identity and environment: author, paths, printers, GPS, serial numbers, internal identifiers. Keeps the application and its version | the file looks natural | for Word/Excel/PowerPoint an empty "author" field can itself give away that the file was cleaned; the bot warns about this |
+| **Paranoid** | removes everything, including the application and dates | guaranteed clean | it's visible that the file was processed |
+| **Regenerate** | saves the file anew through LibreOffice and cleans what's left | no cleaning traces: the file is simply "made in LibreOffice" | the layout may shift slightly; LibreOffice becomes the authoring program |
 
-Как выбрать:
+How to choose:
 
-- **Отправить документ коллеге, клиенту, в госорган** — Stealth.
-- **Выложить в открытый доступ, передать журналисту, тому, кто будет
-  копать** — Paranoid: важнее, чтобы не осталось ничего.
-- **Документ Word, и важно, чтобы не было видно чистки** — Пересоздать.
-- **Фото с телефона перед публикацией** — Stealth: убирает GPS и данные
-  камеры, но сохраняет ориентацию (иначе фото повернётся на бок).
+- **Sending a document to a colleague, a client, a government office**: Stealth.
+- **Publishing it, handing it to a journalist or anyone who will dig**:
+  Paranoid. What matters more is that nothing is left.
+- **A Word document where the cleaning must not be visible**: Regenerate.
+- **A phone photo before posting it**: Stealth. It removes GPS and camera
+  data but keeps the orientation (otherwise the photo would turn on its side).
 
 ---
 
-## 10. Как читать ответы бота
+## 10. Reading the bot's replies
 
-**Отчёт инспекции** делит находки на четыре группы:
+The **inspection report** sorts findings into four groups:
 
-| Значок | Группа | Примеры |
+| Icon | Group | Examples |
 |---|---|---|
-| 🔴 | Личность и персональные данные | имя автора, email, GPS, серийный номер камеры |
-| 🟠 | Окружение | пути к папкам, имя компьютера, принтер, сервер |
-| 🟡 | Происхождение | программа, версия, даты, история правок |
-| ⚪ | Структурное (обычно сохраняем) | язык документа, оглавление, цветовой профиль |
+| 🔴 | Identity and personal data | author name, email, GPS, camera serial number |
+| 🟠 | Environment | folder paths, computer name, printer, server |
+| 🟡 | Provenance | program, version, dates, edit history |
+| ⚪ | Structural (usually kept) | document language, outline, color profile |
 
-Внизу отчёта — **выводы**: чем сделан файл, нет ли признаков, что его уже
-чистили или сгенерировала программа, нет ли противоречий (например, дата
-изменения раньше даты создания).
+At the bottom of the report are the **conclusions**: what made the file,
+whether there are signs that it was already cleaned or generated by a program,
+whether there are contradictions (for example, a modification date earlier
+than the creation date).
 
-**Подпись под почищенным файлом:**
+**The caption under a cleaned file:**
 
-| Значок | Значит |
+| Icon | Meaning |
 |---|---|
-| ✅ | чисто: повторная проверка не нашла в новом файле ни одного исходного личного значения |
-| 📌 | не чисто по вашему выбору: вы просили что-то сохранить |
-| ⚠ | чистоту не удалось доказать — прочитайте предупреждение выше |
-| ⛔ | почищено не полностью: часть исходных значений осталась. **Не отправляйте этот файл дальше** — попробуйте Paranoid или Пересоздать |
+| ✅ | clean: a second inspection found not a single original personal value in the new file |
+| 📌 | not clean by your choice: you asked to keep something |
+| ⚠ | cleanliness couldn't be proven: read the warning above |
+| ⛔ | not fully cleaned: some original values remained. **Don't send this file on**: try Paranoid or Regenerate |
 
-Если чистка не удалась совсем, бот **не пришлёт файл** и объяснит почему.
-Он никогда не выдаёт непочищенный файл за почищенный.
+If cleaning fails completely, the bot **doesn't send a file** and explains
+why. It never passes off an uncleaned file as a cleaned one.
 
-**Строка «Заметность чистки»** — видно ли по файлу, что его обрабатывали:
+**The detectability line** says whether the file shows that it was processed:
 
-- **не видно** — файл выглядит как обычный;
-- **заметно** — внимательный проверяющий может догадаться;
-- **очевидно** — файл опознаётся как обработанный или собранный программой.
-
----
-
-## 11. Ограничения
-
-- **Размер файла — до 20 МБ.** Это ограничение Telegram для ботов, обойти его
-  нельзя. Архив с результатом пакетной чистки — до 50 МБ.
-- **Картинка, отправленная как «Фото»**, уже без метаданных — см. раздел 8.
-- **PDF с цифровой подписью** бот не чистит: любая чистка ломает подпись.
-  Бот об этом скажет.
-- **PDF под паролем** не чистится.
-- **Одна задача за раз.** Пока бот чистит большой архив, следующий файл
-  подождёт.
-- **Бот не делает** документ «не написанным ИИ», не меняет текст и
-  оформление, не трогает историю версий в облаке (Google Drive, SharePoint).
-- **Бот не подделывает** данные: не вписывает чужое имя или другую дату. Он
-  только убирает.
+- **the inspector doesn't see any**: the file looks ordinary;
+- **noticeable on a closer look**: a careful examiner may guess;
+- **obvious**: the file is recognizable as processed or assembled by a program.
 
 ---
 
-## 12. Приватность: куда уходят файлы
+## 11. Limits
 
-- Файл идёт **через серверы Telegram** к программе на вашем компьютере.
-  Telegram видит файл так же, как любую пересылку в чате.
-- На компьютере файл кладётся во временную папку и **удаляется сразу после
-  обработки**. Бот его не хранит.
-- В окне бота пишется только формат, размер, число находок и время — **без
-  имён файлов и содержимого**.
-- Отчёты удаляются из чата по таймеру и кнопкой (раздел 8).
-- Если файл совсем секретный, не отправляйте его в Telegram вовсе — проверьте
-  через командную строку ([раздел 15](#15-без-telegram-командная-строка)).
-
----
-
-## 13. Частые проблемы
-
-**Бот не отвечает вообще.**
-Проверьте, что окно с ботом открыто и в нём нет ошибки. Компьютер должен быть
-включён и не спать. Убедитесь, что пишете именно своему боту (username из
-раздела 4).
-
-**«Доступ к боту ещё не настроен» / «Доступ ограничен».**
-Не заполнен `TG_OWNER_ID` в `.env` или там чужое число. Впишите user_id из
-ответа бота и **перезапустите** бота.
-
-**«Не найден TG_BOT_TOKEN».**
-Файл называется не `.env` (Блокнот мог сохранить `.env.txt`) или лежит не в
-папке с `bot.py`. В Блокноте при сохранении выберите «Тип файла: Все файлы»
-и имя `.env`.
-
-**«Telegram не принял токен».**
-Токен скопирован не целиком, с пробелом или кавычками, либо его отозвали.
-Скопируйте заново из сообщения BotFather.
-
-**«Бот уже запущен в другом окне».**
-Найдите первое окно и закройте его (`Ctrl+C`), или перезагрузите компьютер.
-
-**Бот отвечает через раз или старыми сообщениями.**
-Этот же токен запущен где-то ещё — на другом компьютере. Остановите там.
-
-**«No module named aiogram» (или pikepdf, lxml).**
-Не установлены зависимости (раздел 3, шаг 3). На macOS/Linux — забыли
-`source .venv/bin/activate`.
-
-**«python не является внутренней или внешней командой» (Windows).**
-При установке Python не поставили галочку «Add python.exe to PATH».
-Переустановите.
-
-**`/status` пишет «LibreOffice не найден», хотя он установлен.**
-Перезапустите бота после установки LibreOffice. На Linux проверьте, что
-работает команда `soffice --version`.
-
-**Пересоздание пишет «LibreOffice не сохранил файл».**
-Файл повреждён или LibreOffice его не понимает. Закройте открытый
-LibreOffice, если он запущен, и попробуйте ещё раз, либо выберите Stealth.
-
-**«Кнопка устарела».**
-Прошло больше 30 минут или бот перезапускался. Отправьте файл снова.
+- **File size up to 20 MB.** That's Telegram's limit for bots and it can't be
+  bypassed. The archive with a batch cleaning result is up to 50 MB.
+- **A picture sent as a "Photo"** has no metadata left: see section 8.
+- **A digitally signed PDF** is not cleaned: any cleaning breaks the
+  signature. The bot says so.
+- **A password-protected PDF** is not cleaned.
+- **One job at a time.** While the bot cleans a big archive, the next file
+  waits.
+- **The bot doesn't** make a document "not written by AI", doesn't change the
+  text or layout, doesn't touch version history in the cloud (Google Drive,
+  SharePoint).
+- **The bot doesn't forge** data: it doesn't write in someone else's name or a
+  different date. It only removes.
 
 ---
 
-## 14. Обновление
+## 12. Privacy: where files go
 
-Если ставили через git:
+- The file travels **through Telegram's servers** to the program on your
+  computer. Telegram sees the file the same way it sees any forwarded file.
+- On the computer the file goes into a temporary folder and is **deleted right
+  after processing**. The bot doesn't keep it.
+- The bot's window logs only the format, size, number of findings and timing,
+  **without file names or contents**.
+- Reports are deleted from the chat by the timer and by the button (section 8).
+- If a file is truly secret, don't send it to Telegram at all: check it from
+  the command line ([section 15](#15-without-telegram-the-command-line)).
+
+---
+
+## 13. Common problems
+
+**The bot doesn't answer at all.**
+Check that the bot's window is open and shows no error. The computer must be
+on and not asleep. Make sure you're writing to your own bot (the username from
+section 4).
+
+**"Access to the bot is not configured yet" / "Access to this bot is restricted".**
+`TG_OWNER_ID` in `.env` is empty or holds someone else's number. Put in the
+user_id from the bot's reply and **restart** the bot.
+
+**"TG_BOT_TOKEN not found".**
+The file isn't named `.env` (Notepad may have saved it as `.env.txt`) or it
+isn't in the folder with `bot.py`. When saving in Notepad, choose "Save as
+type: All files" and the name `.env`.
+
+**"Telegram did not accept the token".**
+The token was copied incompletely, with a space or quotes, or it was revoked.
+Copy it again from BotFather's message.
+
+**"The bot is already running in another window".**
+Find the first window and close it (`Ctrl+C`), or restart the computer.
+
+**The bot answers every other time or with old messages.**
+The same token is running somewhere else, on another computer. Stop it there.
+
+**"No module named aiogram" (or pikepdf, lxml).**
+The dependencies aren't installed (section 3, step 3). On macOS/Linux you
+forgot `source .venv/bin/activate`.
+
+**"'python' is not recognized as an internal or external command" (Windows).**
+"Add python.exe to PATH" wasn't ticked when installing Python. Reinstall it.
+
+**`/status` says LibreOffice isn't found, although it's installed.**
+Restart the bot after installing LibreOffice. On Linux, check that the
+`soffice --version` command works.
+
+**Regeneration says LibreOffice didn't save the file.**
+The file is damaged or LibreOffice doesn't understand it. Close LibreOffice if
+it's open and try again, or choose Stealth.
+
+**"Button expired".**
+More than 30 minutes have passed or the bot was restarted. Send the file
+again.
+
+**The bot replies in the wrong language.**
+Send `/lang` and pick Русский or English. The choice is remembered per user.
+
+---
+
+## 14. Updating
+
+If you installed with git:
 
 ```
-cd C:\tgbot_metadata          (или ~/tgbot_metadata)
+cd C:\tgbot_metadata          (or ~/tgbot_metadata)
 git pull
 python -m pip install -r requirements.txt
 ```
 
-Если скачивали ZIP — скачайте новый, распакуйте и **перенесите в новую папку
-свой `.env`** (и папку `tools`, если ставили exiftool). Затем
-`pip install -r requirements.txt` и перезапуск.
+If you downloaded the ZIP, download the new one, unpack it and **move your
+`.env` into the new folder** (and the `tools` folder if you installed
+exiftool). Then run `pip install -r requirements.txt` and restart.
 
 ---
 
-## 15. Без Telegram: командная строка
+## 15. Without Telegram: the command line
 
-Файл можно проверить и почистить, не отправляя его никуда. В папке бота
-(на macOS/Linux — после `source .venv/bin/activate` и с `python3`):
+A file can be checked and cleaned without sending it anywhere. In the bot's
+folder (on macOS/Linux, after `source .venv/bin/activate` and with `python3`):
 
-Показать метаданные:
-
-```
-python -m core.inspect путь\к\файлу.docx
-```
-
-Почистить (результат появится рядом, с `.clean` в имени):
+Show the metadata:
 
 ```
-python -m core.clean путь\к\файлу.docx --profile stealth
+python -m core.inspect path\to\file.docx
 ```
 
-Профили: `stealth`, `paranoid`, `regenerate`. Токен для этого не нужен.
+Clean it (the result appears next to it, with `.clean` in the name):
 
-На Windows, если вместо русских букв видны «кракозябры», перед командой
-выполните `set PYTHONIOENCODING=utf-8` (в PowerShell:
+```
+python -m core.clean path\to\file.docx --profile stealth
+```
+
+Profiles: `stealth`, `paranoid`, `regenerate`. No token is needed for this.
+The command line always answers in English.
+
+On Windows, if Cyrillic values show up as garbage, run
+`set PYTHONIOENCODING=utf-8` before the command (in PowerShell:
 `$env:PYTHONIOENCODING="utf-8"`).

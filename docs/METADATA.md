@@ -1,394 +1,400 @@
-# Где прячутся метаданные
+# Where metadata hides
 
-Справочник по форматам: что именно течёт и где лежит. Основа для инспекторов
-(фаза 0) и для правил чистки (фазы 1–4). Пункты, отмеченные **⚠**, — те,
-которые пропускают почти все готовые инструменты.
+A reference by format: what exactly leaks and where it lives. The basis for the
+inspectors (phase 0) and for the cleaning rules (phases 1–4). Items marked
+**⚠** are the ones almost every off-the-shelf tool misses.
 
-Главная мысль: метаданные — это **не** «автор и дата». Их десятки мест, и
-самые опасные лежат не там, где смотрят.
+The main idea: metadata is **not** "author and date". There are dozens of
+places, and the most dangerous ones are not where people look.
 
 ---
 
-## OOXML — `.docx` / `.xlsx` / `.pptx`
+## OOXML: `.docx` / `.xlsx` / `.pptx`
 
-Контейнер — обычный ZIP. Работать через `zipfile` + `lxml`.
+The container is a plain ZIP. Work with it through `zipfile` + `lxml`.
 
-### Сам ZIP-контейнер ⚠
+### The ZIP container itself ⚠
 
-| Что | Почему важно |
+| What | Why it matters |
 |---|---|
-| DOS-таймстемпы записей | Word/Excel/PowerPoint ставят всем `1980-01-01 00:00`. `openpyxl`/`python-docx` — **реальное время сохранения**. Расхождение с заявленным в `app.xml` приложением = файл сделан библиотекой, и время утекло через контейнер |
-| Порядок записей | Word пишет части в характерном порядке, начиная с `[Content_Types].xml`. Пересборка в другом порядке детектируема |
-| Метод и уровень сжатия | Другой уровень deflate меняет сжатый размер каждой записи |
-| Extra fields локальных заголовков | Некоторые реализации ZIP добавляют Unix-таймстемпы |
+| DOS timestamps of the entries | Word/Excel/PowerPoint set `1980-01-01 00:00` on all of them. `openpyxl`/`python-docx` write **the real save time**. A mismatch with the application declared in `app.xml` means the file was made by a library, and the time leaked through the container |
+| Entry order | Word writes the parts in a characteristic order, starting with `[Content_Types].xml`. A rebuild in a different order is detectable |
+| Compression method and level | A different deflate level changes the compressed size of every entry |
+| Extra fields of the local headers | Some ZIP implementations add Unix timestamps |
 
 ### `docProps/core.xml`
 `dc:creator`, `cp:lastModifiedBy`, `dcterms:created`, `dcterms:modified`,
 `cp:revision`, `cp:lastPrinted`, `dc:title`, `dc:subject`, `dc:description`,
 `cp:keywords`, `cp:category`, `cp:contentStatus`, `dc:identifier`, `dc:language`.
 
-⚠ **Даты здесь имеют точность до минуты: секунды у Word всегда `00`.** Поэтому
-`created == modified` означает лишь «создан и сохранён в пределах одной
-минуты» — рядовое состояние любого документа, сделанного одним заходом, и
-признаком подделки дат само по себе не является. `cp:revision` в улику тоже не
-годится: у файла от Word 16 было `revision=2` при четырёх сохранениях подряд,
-и все они попали в ту же минуту. Единственное настоящее противоречие даёт
-`TotalTime`: заявленные минуты активного редактирования не могут поместиться в
-одну минуту жизни документа.
+⚠ **The dates here are accurate to the minute: Word's seconds are always
+`00`.** So `created == modified` only means "created and saved within one
+minute", the ordinary state of any document made in one sitting, and is not a
+sign of forged dates by itself. `cp:revision` doesn't work as evidence either:
+a file from Word 16 had `revision=2` after four saves in a row, all within the
+same minute. The only real contradiction comes from `TotalTime`: the claimed
+minutes of active editing can't fit into one minute of the document's life.
 
 ### `docProps/app.xml`
 `Application`, `AppVersion`, `Company`, `Manager`,
-**`TotalTime`** (минуты редактирования ⚠), `Pages`/`Words`/`Characters`/`Lines`,
+**`TotalTime`** (editing minutes ⚠), `Pages`/`Words`/`Characters`/`Lines`,
 `Template`, `DocSecurity`, `ScaleCrop`, `LinksUpToDate`, `SharedDoc`,
-`HyperlinksChanged`, `HeadingPairs`, `TitlesOfParts` (выдаёт структуру документа
-и имена листов).
+`HyperlinksChanged`, `HeadingPairs`, `TitlesOfParts` (gives away the document
+structure and the sheet names).
 
 ### `docProps/custom.xml` ⚠
-Произвольные свойства. Здесь живут метки Microsoft Purview: префикс
-`MSIP_Label_<GUID>_*` несёт GUID метки, `SetDate`, **`SetBy` — реальный email**,
-`SiteId` — GUID тенанта. Плюс `ContentTypeId` SharePoint и свойства аддинов.
-Смотри также `docMetadata/LabelInfo.xml`.
+Arbitrary properties. This is where Microsoft Purview labels live: the
+`MSIP_Label_<GUID>_*` prefix carries the label GUID, `SetDate`, **`SetBy`, a
+real email**, and `SiteId`, the tenant GUID. Plus SharePoint's `ContentTypeId`
+and add-in properties. See also `docMetadata/LabelInfo.xml`.
 
-> Снятие корпоративной метки может само быть нарушением политики и
-> **детектируется на стороне тенанта**. Предупреждать пользователя.
+> Removing a corporate label may itself violate a policy and is **detectable
+> on the tenant side**. Warn the user.
 
 ### `docProps/thumbnail.*` ⚠
-Отрендеренное превью. Иногда — с **предыдущей** версии документа.
+A rendered preview. Sometimes of the **previous** version of the document.
 
 ### `word/settings.xml`
-- **`w:rsid`** ⚠ — revision save ID. Word выдаёт по одному на сессию правки и
-  помечает ими каждый ран текста в `document.xml`. Статистика выдаёт число
-  сессий; совпадение rsid между документами доказывает общую родословную
-  установки Word. Используется в судебной экспертизе.
-- `w:attachedTemplate` — через `r:id` разрешается в `.rels`, часто оказывается
-  `file:///C:/Users/ИМЯ/...`
-- `w:mailMerge` — пути к источнику данных
-- `w:documentProtection` — хеш и соль пароля
+- **`w:rsid`** ⚠: revision save ID. Word issues one per editing session and
+  tags every text run in `document.xml` with them. The statistics give away the
+  number of sessions; matching rsids between documents prove a shared Word
+  installation lineage. Used in forensics.
+- `w:attachedTemplate`: resolves through `r:id` in `.rels`, often to
+  `file:///C:/Users/NAME/...`
+- `w:mailMerge`: paths to the data source
+- `w:documentProtection`: the password hash and salt
 - `w:proofState`, `w:trackChanges`, `w:hdrShapeDefaults`, `w:docVars`
-  (значения в атрибутах `w:name`/`w:val`; переменная с именем вида «Owner»,
-  «Исполнитель» — это ФИО из шаблона или СЭД, то есть личность, а не провенанс)
+  (values in the `w:name`/`w:val` attributes; a variable named like "Owner" or
+  its localized equivalent holds a full name from a template or a document
+  management system, so it's identity, not provenance)
 
-В PowerPoint 365 авторы «современных» комментариев лежат в **`ppt/authors.xml`**
-(`name`, `initials`, `userId` — обычно рабочий email), а не в `commentAuthors.xml`.
+In PowerPoint 365 the authors of "modern" comments live in **`ppt/authors.xml`**
+(`name`, `initials`, `userId`, usually a work email), not in `commentAuthors.xml`.
 
 ### `word/document.xml`
-`w:ins` / `w:del` — правки с атрибутами `w:author` и `w:date`. Атрибуты `w:rsid*`
-на каждом абзаце и ране. Закладка `_GoBack` (безвредна, но подпись Word).
-`w:permStart` с именами редакторов. Разбирать потоково через `iterparse` —
-файл бывает в десятки мегабайт.
+`w:ins` / `w:del`: tracked changes with the `w:author` and `w:date` attributes.
+`w:rsid*` attributes on every paragraph and run. The `_GoBack` bookmark
+(harmless, but a Word signature). `w:permStart` with editor names. Parse it as a
+stream with `iterparse`: the file can be tens of megabytes.
 
 ### `word/people.xml` ⚠
-`w15:presenceInfo` с атрибутом `userId` — **реальные email-адреса**.
-Аналоги: `xl/persons/person.xml`, `xl/threadedComments/*`, `ppt/comments*`.
+`w15:presenceInfo` with the `userId` attribute: **real email addresses**.
+Counterparts: `xl/persons/person.xml`, `xl/threadedComments/*`, `ppt/comments*`.
 
 ### `word/comments.xml`, `commentsExtended.xml`
-Авторы, инициалы, даты.
+Authors, initials, dates.
 
-### Все `*.rels`
-Отношения с `TargetMode="External"`: `file:///`, абсолютные пути `C:\...`,
-UNC `\\сервер\...`, http-гиперссылки, источники OLE.
+### Every `*.rels`
+Relationships with `TargetMode="External"`: `file:///`, absolute `C:\...`
+paths, UNC `\\server\...`, http hyperlinks, OLE sources.
 
 ### `word/media/*`, `xl/media/*`, `ppt/media/*`
-Картинки с **полным EXIF**: GPS, серийник камеры, исходное имя файла.
-Требует рекурсии — см. раздел про картинки.
+Images with **full EXIF**: GPS, the camera serial number, the original file
+name. Needs recursion: see the images section.
 
 ### `*/embeddings/*.bin` ⚠
-Вложенные OLE-объекты. У встроенной в docx таблицы Excel **свои собственные
-`docProps`** — рекурсия на один уровень глубже.
+Embedded OLE objects. An Excel table embedded in a docx has **its own
+`docProps`**: recursion one level deeper.
 
 ### `word/printerSettings/printerSettings*.bin` ⚠
-Структура `DEVMODEW`, за ней — приватные данные драйвера. На настоящих
-скачанных из интернета `.xlsx` этот разбор стабильно находит принтеры того, кто
-файл готовил, — даже когда `docProps` вычищен.
+A `DEVMODEW` structure followed by the driver's private data. On real `.xlsx`
+files downloaded from the internet this parse consistently finds the printers
+of whoever prepared the file, even when `docProps` was scrubbed.
 
-| Смещение | Поле | Что даёт |
+| Offset | Field | What it gives |
 |---|---|---|
-| 0 | `dmDeviceName[32]` WCHAR | **имя принтера**: имя хоста, инвентарный номер, локация офиса (`HP-LaserJet-FLOOR3-NYC`, `BUH-01`) |
-| 68 | `dmSize` WORD | длина самой структуры; с неё начинаются данные драйвера |
-| 70 | `dmDriverExtra` WORD | длина приватного блока драйвера |
-| 78 | `dmPaperSize` short | код формата: `1` Letter, `5` Legal, `9` A4 |
-| 102 | `dmFormName[32]` WCHAR | имя формы; нестандартное заводит админ и оно несёт название отдела |
-| `dmSize`… | данные драйвера | **UNC-путь к серверу печати** (`\\PRINTSRV01\WC7845-BUH`), порт, очередь |
+| 0 | `dmDeviceName[32]` WCHAR | **the printer name**: host name, asset tag, office location (`HP-LaserJet-FLOOR3-NYC`, `BUH-01`) |
+| 68 | `dmSize` WORD | the length of the structure itself; the driver data starts after it |
+| 70 | `dmDriverExtra` WORD | the length of the driver's private block |
+| 78 | `dmPaperSize` short | the paper code: `1` Letter, `5` Legal, `9` A4 |
+| 102 | `dmFormName[32]` WCHAR | the form name; a custom one is set up by an admin and carries a department name |
+| `dmSize`… | driver data | **the UNC path to the print server** (`\\PRINTSRV01\WC7845-BUH`), port, queue |
 
-**32 WCHAR — это 64 байта, а не 32.** Поле читается как
-`blob[0:64].decode("utf-16le")` до первого NUL. Прочитать 32 байта значит
-обрезать имя принтера на 16-м символе и не заметить этого: `HP LaserJet M404
-(BUH-01)` превратится в `HP LaserJet M40`, и локация офиса — ровно то, что
-здесь ищут, — окажется отрезанной.
+**32 WCHARs are 64 bytes, not 32.** The field is read as
+`blob[0:64].decode("utf-16le")` up to the first NUL. Reading 32 bytes cuts the
+printer name at the 16th character without anyone noticing:
+`HP LaserJet M404 (BUH-01)` turns into `HP LaserJet M40`, and the office
+location, exactly what's being looked for here, is cut off.
 
-**Формат бумаги — геолокация.** `Letter`/`Legal` означает Северную Америку,
-`A4` — почти весь остальной мир; формат ставится по локали системы, а не
-выбирается осознанно. Поэтому это `Signal(kind="dating")`, а не просто находка.
+**The paper size is geolocation.** `Letter`/`Legal` means North America, `A4`
+almost the whole rest of the world; the size follows the system locale rather
+than a deliberate choice. That's why it's a `Signal(kind="dating")` and not
+just a finding.
 
-Формат приватного блока драйвера недокументирован и у разных драйверов разный,
-поэтому полностью он не разбирается: ищутся только однозначно опознаваемые
-UNC-пути. Ложная находка в отчёте о приватности дороже пропущенной.
+The format of the driver's private block is undocumented and differs between
+drivers, so it isn't parsed fully: only unambiguously recognizable UNC paths
+are searched for. A false finding in a privacy report costs more than a missed
+one.
 
-### Специфика Excel
-| Где | Что |
+### Excel specifics
+| Where | What |
 |---|---|
-| `xl/workbook.xml` | `fileVersion` c `rupBuild` — точный билд Excel; `workbookPr/@filterPrivacy`; листы `state="hidden"` и `"veryHidden"`; `definedName` со ссылками на внешние книги с локальными путями |
-| `xl/workbook.xml` ⚠ | **`x15ac:absPath/@url`** внутри `mc:AlternateContent` — полный путь к папке, где книгу сохраняли (`C:\Users\ИМЯ\...`). Excel пишет молча, в свойствах не видно. `fileSharing/@userName` — кто включил резервирование книги |
-| `xl/pivotCache/*.xml` ⚠ | **`refreshedBy`** — имя человека, `refreshedDate`. Классическая утечка |
-| `xl/connections.xml` ⚠ | строки подключения ODBC/OLEDB: имена серверов, логины, иногда пароли |
-| `xl/externalLinks/*` | пути к внешним книгам |
-| `xl/queryTables/*`, `customXml/*` | код Power Query M, биндинги SharePoint |
-| `xl/revisions/*` | история общей книги |
+| `xl/workbook.xml` | `fileVersion` with `rupBuild`: the exact Excel build; `workbookPr/@filterPrivacy`; sheets with `state="hidden"` and `"veryHidden"`; `definedName` with references to external workbooks by local paths |
+| `xl/workbook.xml` ⚠ | **`x15ac:absPath/@url`** inside `mc:AlternateContent`: the full path to the folder where the workbook was saved (`C:\Users\NAME\...`). Excel writes it silently, it's not visible in the properties. `fileSharing/@userName`: who turned on workbook reservation |
+| `xl/pivotCache/*.xml` ⚠ | **`refreshedBy`**: a person's name, `refreshedDate`. A classic leak |
+| `xl/connections.xml` ⚠ | ODBC/OLEDB connection strings: server names, logins, sometimes passwords |
+| `xl/externalLinks/*` | paths to external workbooks |
+| `xl/queryTables/*`, `customXml/*` | Power Query M code, SharePoint bindings |
+| `xl/revisions/*` | the shared workbook history |
 
-Плюс не-метаданные, но скрытая информация: скрытые строки и столбцы, скрытые
-листы, неиспользуемые именованные диапазоны, кешированные результаты формул от
-удалённых исходных данных, белый текст на белом, шрифт размера 1.
+Plus hidden information that isn't metadata: hidden rows and columns, hidden
+sheets, unused named ranges, cached formula results from deleted source data,
+white text on white, size-1 fonts.
 
-### `customXml/` — риск определяется корнем, а не самим наличием части ⚠
-Бывает в любом OOXML-пакете, у настоящих `.docx` — чаще, чем у `.xlsx`. Под
-одним и тем же именем `customXml/item1.xml` лежат вещи противоположной природы,
-и путь тут не говорит ни о чём. Смотреть надо пространство имён корня:
+### `customXml/`: the risk is defined by the root, not by the part's presence ⚠
+It occurs in any OOXML package, in real `.docx` files more often than in
+`.xlsx`. Things of opposite nature live under the same `customXml/item1.xml`
+name, and the path says nothing. Look at the namespace of the root:
 
-| Корень | Что это | Риск |
+| Root | What it is | Risk |
 |---|---|---|
-| `…microsoft.com/office/2006/metadata/properties` и соседние, `…sharepoint/v3/contenttype/forms` | колонки библиотеки SharePoint, схема типа контента, шаблоны форм | ENVIRONMENT: имена сотрудников, даты, GUID сайта |
-| `…openxmlformats.org/officeDocument/2006/bibliography` | список литературы | STRUCTURAL: **это содержимое документа**, видимое читателю |
-| `…microsoft.com/DataMashup` | закодированный пакет с кодом запросов Power Query | ENVIRONMENT, убрать нечем |
-| что-то своё | данные СЭД, привязка элементов содержимого (`w:dataBinding`) | ENVIRONMENT, убирать вслепую нельзя — сотрёт видимый текст |
+| `…microsoft.com/office/2006/metadata/properties` and its neighbors, `…sharepoint/v3/contenttype/forms` | SharePoint library columns, the content type schema, form templates | ENVIRONMENT: employee names, dates, the site GUID |
+| `…openxmlformats.org/officeDocument/2006/bibliography` | a bibliography | STRUCTURAL: **this is document content**, visible to the reader |
+| `…microsoft.com/DataMashup` | an encoded package with Power Query code | ENVIRONMENT, nothing can remove it |
+| something custom | document management data, content control bindings (`w:dataBinding`) | ENVIRONMENT, can't be removed blindly: it would erase visible text |
 
-Два следствия, которые дёшево не восстанавливаются:
+Two consequences that are expensive to recover from:
 
-**Значения лежат в атрибутах, а не только в тексте.** `contentTypeID` с GUID
-сайта — это атрибут корня. Разбор, который собирает только `itertext()`,
-пропускает самое интересное.
+**The values live in attributes, not only in text.** A `contentTypeID` with
+the site GUID is an attribute of the root. A parse that only collects
+`itertext()` misses the most interesting part.
 
-**Нельзя отдавать сырой XML как значение находки.** Критерий чистоты —
-«исходное чувствительное значение не встречается в результате», и сырой дамп
-содержит имена тегов и URI схем, одинаковые у всех документов такого типа.
-Часть, законно оставленную на месте, оракул тогда объявляет «пережившим
-чисткой значением», и корректно почищенный файл получает вердикт «почищено не
-полностью». По той же причине нельзя подставлять вместо пустого значения
-словесную заглушку: строка «без значений» совпадёт сама с собой.
+**Raw XML must never be used as a finding's value.** The cleanliness criterion
+is "the original sensitive value doesn't occur in the output", and a raw dump
+contains tag names and schema URIs that are the same in every document of that
+type. A part legitimately left in place would then be declared by the oracle a
+"value that survived cleaning", and a correctly cleaned file would get a "not
+fully cleaned" verdict. For the same reason a verbal placeholder must not
+replace an empty value: the string "no values" would match itself.
 
-### Анализ отсутствующих частей ⚠
-Для `.docx`, заявляющего авторство Word, проверять наличие
-`word/theme/theme1.xml`, `word/fontTable.xml`, `word/webSettings.xml`,
-`word/styles.xml`, `word/settings.xml`. Отсутствие обязательных частей и/или
-полное отсутствие rsid = файл сделан библиотекой, а не Word.
+### Analysis of missing parts ⚠
+For a `.docx` claiming Word authorship, check for `word/theme/theme1.xml`,
+`word/fontTable.xml`, `word/webSettings.xml`, `word/styles.xml` and
+`word/settings.xml`. Missing required parts and/or no rsids at all mean the file
+was made by a library, not by Word.
 
 ### `vbaProject.bin`
-Макросы. Сигнал `hazard`.
+Macros. A `hazard` signal.
 
 ---
 
 ## PDF
 
-### Словарь `/Info`
-`/Author`, `/Creator` (приложение-автор), `/Producer` (библиотека, записавшая
-PDF), `/CreationDate`, `/ModDate`, `/Title`, `/Subject`, `/Keywords`, `/Trapped`
-плюс любые нестандартные ключи. Даты в формате `D:YYYYMMDDHHmmSS+TZ`.
+### The `/Info` dictionary
+`/Author`, `/Creator` (the authoring application), `/Producer` (the library
+that wrote the PDF), `/CreationDate`, `/ModDate`, `/Title`, `/Subject`,
+`/Keywords`, `/Trapped`, plus any non-standard keys. Dates in the
+`D:YYYYMMDDHHmmSS+TZ` format.
 
 ### XMP (`/Metadata`) ⚠
-То, что забывают, вычистив `/Info`. Дублирует `/Info` и добавляет:
-- **`xmpMM:DocumentID`, `xmpMM:InstanceID`, `xmpMM:OriginalDocumentID`** —
-  постоянные GUID, связывающие между собой все версии документа
-- **`xmpMM:History`** — фактический журнал правок: `stEvt:action`,
+What people forget after scrubbing `/Info`. It duplicates `/Info` and adds:
+- **`xmpMM:DocumentID`, `xmpMM:InstanceID`, `xmpMM:OriginalDocumentID`**:
+  persistent GUIDs that link all versions of the document together
+- **`xmpMM:History`**: an actual edit log: `stEvt:action`,
   `stEvt:softwareAgent`, `stEvt:when`, `stEvt:changed`
 - `xmpMM:DerivedFrom`, `xmp:CreatorTool`, `xmp:CreateDate`/`ModifyDate`
-- пространства `photoshop:`, `illustrator:`, `pdfaid:`, `xmpRights:`
+- the `photoshop:`, `illustrator:`, `pdfaid:`, `xmpRights:` namespaces
 
-XMP бывает не только в корне: постраничные и XObject-овые потоки `/Metadata`
-тоже встречаются.
+XMP isn't only in the root: per-page and per-XObject `/Metadata` streams
+occur too.
 
-### Трейлер `/ID`
-Два 16-байтовых значения. У многих продюсеров `ID[0]` выведен из пути и имени
-исходного файла — то есть идентификатор, связывающий файлы.
+### The trailer `/ID`
+Two 16-byte values. Many producers derive `ID[0]` from the path and name of
+the source file, which makes it an identifier that links files.
 
-### Инкрементальные апдейты ⚠⚠
-**Самая серьёзная находка, какая бывает в PDF.** Если файл правился
-инкрементально, в нём физически лежат все предыдущие версии: старые xref,
-старый контент страниц и, в частности, **текст под «замазанными» чёрными
-прямоугольниками**. Детекция: число вхождений `%%EOF` и `startxref` в сырых
-байтах, наличие `/Prev` в трейлерах. Лечится пересохранением с линеаризацией
-(`pdf.save(linearize=True)`), которое заодно делает сборку мусора.
+### Incremental updates ⚠⚠
+**The most serious finding a PDF can have.** If the file was edited
+incrementally, all the previous versions physically sit in it: old xrefs, old
+page content and, in particular, **the text under "redacted" black
+rectangles**. Detection: the number of `%%EOF` and `startxref` occurrences in
+the raw bytes, `/Prev` in the trailers. The fix is re-saving with
+linearization (`pdf.save(linearize=True)`), which also garbage-collects.
 
-### Прочее
-| Где | Что |
+### Other
+| Where | What |
 |---|---|
-| `/Annots` | `/T` = **имя автора** аннотации, `/M`, `/CreationDate`, `/Contents`, `/RC` |
-| `/AcroForm` | значения полей, визуально «очищенных», но сохранивших `/V`; `/XFA` с дублем данных |
-| `/Names /EmbeddedFiles`, `/FileAttachment` | вложения; у PDF/A-3 и электронных счетов — исходный XML/xlsx целиком |
-| `/Names /JavaScript`, `/OpenAction`, `/AA`, `/Launch`, `/URI` | активное содержимое, может «звонить домой» |
-| `/Sig`, `/Perms`, `/SigFlags` | сертификат подписанта: ФИО, email, организация, момент подписи, хеш документа |
-| `/OCProperties` | слои optional content; выключенные в `/D /OFF` могут содержать невидимый текст |
-| `/PieceInfo` | приватные данные Acrobat/Distiller/Illustrator, иногда редактируемый исходник |
-| `/PTEX.Fullbanner` | полная строка версии TeX Live с датой сборки |
-| шрифты | префиксы сабсетов `ABCDEF+Calibri`; **набор глифов выдаёт символы из удалённого текста** |
-| `/MediaBox` | формат бумаги → страна: Letter = США/Канада, A4 = остальное |
+| `/Annots` | `/T` = **the annotation author's name**, `/M`, `/CreationDate`, `/Contents`, `/RC` |
+| `/AcroForm` | field values that look "cleared" but kept `/V`; `/XFA` with a copy of the data |
+| `/Names /EmbeddedFiles`, `/FileAttachment` | attachments; PDF/A-3 and e-invoices carry the whole source XML/xlsx |
+| `/Names /JavaScript`, `/OpenAction`, `/AA`, `/Launch`, `/URI` | active content, can "phone home" |
+| `/Sig`, `/Perms`, `/SigFlags` | the signer's certificate: full name, email, organization, signing time, document hash |
+| `/OCProperties` | optional content layers; those turned off in `/D /OFF` may hold invisible text |
+| `/PieceInfo` | private Acrobat/Distiller/Illustrator data, sometimes an editable source |
+| `/PTEX.Fullbanner` | the full TeX Live version string with the build date |
+| fonts | subset prefixes like `ABCDEF+Calibri`; **the glyph set gives away characters from deleted text** |
+| `/MediaBox` | paper size → country: Letter = US/Canada, A4 = elsewhere |
 
-### Структурное — сохранять
-`/StructTreeRoot` и `/MarkInfo` (тегированный PDF, доступность для
-скринридеров), `/Lang`, `/Outlines` (оглавление), `/PageLabels`,
-`/ViewerPreferences`.
+### Structural: keep
+`/StructTreeRoot` and `/MarkInfo` (tagged PDF, screen reader accessibility),
+`/Lang`, `/Outlines` (the outline), `/PageLabels`, `/ViewerPreferences`.
 
-### Цифровая подпись
-**Чистка и подпись взаимоисключающи.** Любое изменение метаданных ломает
-подпись. Помечать `removable=False` и предупреждать явно.
+### Digital signature
+**Cleaning and signing are mutually exclusive.** Any metadata change breaks the
+signature. Mark it `removable=False` and warn explicitly.
 
-> Тонкость, на которой здесь ловили дефект: пустая заготовка поля
-> (`/FT /Sig` **без** `/V`) — это не подпись. Ломать нечего,
-> `removable=False` на ней заблокировало бы чистку без причины.
+> A subtlety that caught a defect here: an empty field stub (`/FT /Sig`
+> **without** `/V`) is not a signature. There's nothing to break, and
+> `removable=False` on it would block cleaning for no reason.
 
-### Датировка по шрифтам
-`Aptos` — шрифт по умолчанию Microsoft 365 с 2023 года: документ создан не
-раньше 2023-го, **чем бы ни были заявленные даты**. `Calibri` — Office
-2007–2023. В панамском деле 2017 года подделку вскрыли именно так: Calibri не
-был коммерчески доступен в феврале 2006-го.
+### Dating by fonts
+`Aptos` has been the Microsoft 365 default font since 2023: the document was
+created no earlier than 2023, **whatever the claimed dates say**. `Calibri`
+means Office 2007–2023. In the 2017 Panama case a forgery was exposed exactly
+this way: Calibri wasn't commercially available in February 2006.
 
 ---
 
-## Легаси OLE2 — `.doc` / `.xls` / `.ppt`
+## Legacy OLE2: `.doc` / `.xls` / `.ppt`
 
-Контейнер CFBF, читается через `olefile` (писать им нельзя).
+A CFBF container, read with `olefile` (it can't write).
 
-`SummaryInformation` и `DocumentSummaryInformation`: `author`, `last_saved_by`,
-`company`, `manager`, `title`, `subject`, `keywords`, `comments`, `create_time`,
-`last_saved_time`, `last_printed`, **`total_edit_time`**, `num_pages`,
-`creating_application`, `security`, `revision_number`, `template`, `codepage`.
-Значения приходят как `bytes` — декодировать с учётом codepage.
+`SummaryInformation` and `DocumentSummaryInformation`: `author`,
+`last_saved_by`, `company`, `manager`, `title`, `subject`, `keywords`,
+`comments`, `create_time`, `last_saved_time`, `last_printed`,
+**`total_edit_time`**, `num_pages`, `creating_application`, `security`,
+`revision_number`, `template`, `codepage`. Values arrive as `bytes`: decode
+them according to the codepage.
 
-### Почему это не чистят, а конвертируют ⚠⚠
-- Поток **`1Table`/`0Table`** хранит историю правок и таблицу авторов
+### Why these are converted rather than cleaned ⚠⚠
+- The **`1Table`/`0Table`** stream keeps the edit history and the author table
   (`SttbfRMark`)
-- При сохранении в режиме быстрого сохранения в файле физически остаётся
-  **удалённый текст предыдущих версий**
-- В неиспользованном пространстве OLE-контейнера лежат фрагменты **других
-  документов с того же диска**
+- When saved in fast-save mode, **the deleted text of earlier versions**
+  physically stays in the file
+- The unused space of the OLE container holds fragments of **other documents
+  from the same disk**
 
-Вывод: такой файл нельзя чистить на месте. Единственный надёжный способ —
-конвертация в современный формат (round-trip через LibreOffice).
+Conclusion: such a file can't be cleaned in place. The only reliable way is
+converting it to a modern format (a round trip through LibreOffice).
 
-Также: `\x01CompObj` (имя приложения-создателя), `ObjectPool` (вложенные
-объекты со своей метадатой), `Macros` / `_VBA_PROJECT_CUR` / `VBA` (сигнал
-`hazard`).
+Also: `\x01CompObj` (the name of the creating application), `ObjectPool`
+(embedded objects with their own metadata), `Macros` / `_VBA_PROJECT_CUR` /
+`VBA` (a `hazard` signal).
 
-### Что ещё нашлось на настоящих контейнерах
+### What else turned up in real containers
 
-| Где | Что |
+| Where | What |
 |---|---|
-| **Пользовательские свойства** ⚠⚠ | `olefile.get_userdefined_properties()` читает имена свойств **только как UTF-8**. Секция Unicode (кодовая страница 1200, именно так пишет настоящий Office) и секция cp1251 из-за этого теряются **молча** — ноль ошибок, ноль находок. Именно там лежат метки Purview с email и такие значения, как название подразделения. Разбирать секции самостоятельно по MS-OLEPS, с терпимостью к выравниванию имён на 4 байта и без него |
-| `Root Entry`, время изменения | `ole.getctime("Root Entry")` бросает `OSError`; при голом `except` находка пропадает у всех файлов. Время изменения корня **не равно** дате последнего сохранения и является отдельной утечкой |
-| `CurrentUserAtom` (`.ppt`) | имя последнего редактора. Кодовая страница cp1251, прочитанная как cp1252, даёт `Ïåòðîâ` вместо `Петров` |
-| Счётчик быстрых сохранений (`.doc`) | сколько раз файл сохранялся в режиме fast-save — прямая мера того, сколько удалённого текста могло остаться |
-| `lid` в FIB (`.doc`) | язык установки Word (`0x0419` = русская), то есть локаль автора |
-| `SUPBOOK` / `EXTERNSHEET` (`.xls`) | внешние связи книги, включая UNC-пути вида `\\SRV\шара\файл.xls` |
-| Векторные свойства property set | Поле с `VT_VECTOR` и счётчиком элементов в 4 млрд — вектор отказа: разбор обязан проверять счётчик против фактического размера потока, а не доверять заголовку |
+| **Custom properties** ⚠⚠ | `olefile.get_userdefined_properties()` reads property names **only as UTF-8**. Because of that, a Unicode section (code page 1200, exactly how real Office writes it) and a cp1251 section are lost **silently**: zero errors, zero findings. That's exactly where Purview labels with an email and values like a department name live. Parse the sections yourself per MS-OLEPS, tolerating name alignment to 4 bytes and its absence |
+| `Root Entry`, modification time | `ole.getctime("Root Entry")` raises `OSError`; with a bare `except` the finding vanishes for every file. The root modification time is **not equal** to the last saved date and is a separate leak |
+| `CurrentUserAtom` (`.ppt`) | the last editor's name. The cp1251 code page read as cp1252 gives `Ïåòðîâ` instead of `Петров` |
+| Fast-save count (`.doc`) | how many times the file was saved in fast-save mode: a direct measure of how much deleted text may remain |
+| `lid` in the FIB (`.doc`) | the language of the Word installation (`0x0419` = Russian), i.e. the author's locale |
+| `SUPBOOK` / `EXTERNSHEET` (`.xls`) | the workbook's external links, including UNC paths like `\\SRV\share\file.xls` |
+| Vector properties of a property set | A field with `VT_VECTOR` and an element count of 4 billion is a denial vector: the parser has to check the count against the actual stream size instead of trusting the header |
 
-> `SttbfRMark` — таблица имён рецензентов в активном потоке таблицы
-> (`0Table` или `1Table`). Пара `fc`/`lcb` — индекс 51 в `FibRgFcLcb`, база
-> считается по `csw`/`cslw` из FIB. Формат — Unicode-STTB (`fExtend=0xFFFF`).
-> Первая запись всегда служебная `Unknown`, как в RTF, и за человека не
-> считается. Имена извлекаются. Удалённый текст прошлых версий в том же потоке
-> по-прежнему не извлекается: это уже пересборка документа, фаза 4.
+> `SttbfRMark` is the table of reviewer names in the active table stream
+> (`0Table` or `1Table`). The `fc`/`lcb` pair is index 51 in `FibRgFcLcb`, the
+> base is computed from `csw`/`cslw` in the FIB. The format is a Unicode STTB
+> (`fExtend=0xFFFF`). The first entry is always the service entry `Unknown`, as
+> in RTF, and doesn't count as a person. The names are extracted. The deleted
+> text of earlier versions in the same stream is still not extracted: that's
+> already a document rebuild, phase 4.
 
 ---
 
-## Картинки
+## Images
 
 ### EXIF
 - **IDENTITY:** `Artist` (0x013B), `Copyright` (0x8298), `CameraOwnerName`
   (0xA430), **`BodySerialNumber`** (0xA431), **`LensSerialNumber`** (0xA435),
   `HostComputer` (0x013C), `ImageDescription` (0x010E), `XPAuthor`/`XPComment`/
-  `XPKeywords` (0x9C9D/0x9C9C/0x9C9E — в **UTF-16LE** ⚠)
-- **GPS** (IFD 0x8825): `GPSLatitude`/`GPSLongitude` с их `Ref` — пересчитывать
-  градусы-минуты-секунды в десятичные; `GPSAltitude`, `GPSDateStamp`
+  `XPKeywords` (0x9C9D/0x9C9C/0x9C9E, in **UTF-16LE** ⚠)
+- **GPS** (IFD 0x8825): `GPSLatitude`/`GPSLongitude` with their `Ref`: convert
+  degrees-minutes-seconds to decimal; `GPSAltitude`, `GPSDateStamp`
 - **PROVENANCE:** `Make`, `Model`, `Software`, `DateTime`, `DateTimeOriginal`,
   `DateTimeDigitized`, `LensModel`
-- **`MakerNote`** (0x927C) ⚠ — проприетарный блок, часто с серийниками и
-  настройками конкретного экземпляра камеры
-- **IFD1 thumbnail** ⚠ — встроенная миниатюра могла быть сделана **до ретуши**
-  и содержать исходное изображение
+- **`MakerNote`** (0x927C) ⚠: a proprietary block, often with serial numbers and
+  the settings of a specific camera unit
+- **IFD1 thumbnail** ⚠: the embedded thumbnail may have been made **before
+  retouching** and hold the original image
 
-Защита: ограничивать число обходимых IFD и тегов, отслеживать посещённые
-смещения — битый EXIF умеет закольцовываться.
+Defenses: limit the number of IFDs and tags walked, track visited offsets:
+broken EXIF can loop.
 
-### JPEG — по сегментам
-`APP0` JFIF · `APP1` Exif или XMP · `APP2` ICC (имя профиля часто названо по
-устройству или монитору) / MPF · **`APP11` JUMBF — контейнер C2PA** ·
-`APP13` Photoshop IRB / IPTC-IIM · `APP14` Adobe · `COM` комментарий ·
-**`DQT` таблицы квантования** — фингерпринтят энкодер и не убираются без
-перекодирования с потерей качества (`removable=False`).
+### JPEG, by segment
+`APP0` JFIF · `APP1` Exif or XMP · `APP2` ICC (the profile name is often named
+after the device or monitor) / MPF · **`APP11` JUMBF, the C2PA container** ·
+`APP13` Photoshop IRB / IPTC-IIM · `APP14` Adobe · `COM` comment ·
+**`DQT` quantization tables**: they fingerprint the encoder and can't be
+removed without lossy re-encoding (`removable=False`).
 
-### PNG — по чанкам
-`tEXt`, `zTXt` (zlib), `iTXt` (часто целый XMP-пакет), `tIME`,
-**`eXIf`** ⚠ (полноценный EXIF в новых PNG), `iCCP`, `pHYs`, `caBX` (C2PA).
+### PNG, by chunk
+`tEXt`, `zTXt` (zlib), `iTXt` (often a whole XMP packet), `tIME`,
+**`eXIf`** ⚠ (full EXIF in newer PNGs), `iCCP`, `pHYs`, `caBX` (C2PA).
 
-> ⚠ `zTXt`/`iTXt` — вектор отказа: килобайт сжатых данных разворачивается в
-> гигабайты. Распаковывать с ограничением, а не через голый `zlib.decompress()`.
-> В тестах есть фикстура `png_ztxt_bomb` на 200 МБ.
+> ⚠ `zTXt`/`iTXt` are a denial vector: a kilobyte of compressed data expands
+> into gigabytes. Decompress with a limit, not with a bare `zlib.decompress()`.
+> The tests have a `png_ztxt_bomb` fixture of 200 MB.
 
 ### C2PA / Content Credentials
-Криптографически подписанный манифест происхождения: JUMBF-бокс в JPEG/PNG/TIFF,
-поток в PDF, часть в OOXML. Технически удаляется, но: удаление подписанного
-манифеста **само детектируемо**, а при наличии soft-binding или водяного знака
-происхождение восстанавливается и без файла.
+A cryptographically signed provenance manifest: a JUMBF box in JPEG/PNG/TIFF,
+a stream in PDF, a part in OOXML. It can technically be removed, but removing a
+signed manifest is **itself detectable**, and with a soft binding or a
+watermark the provenance can be recovered even without the file.
 
 ---
 
-## ODF, RTF, прочее
+## ODF, RTF, other
 
-**ODF** (`.odt`/`.ods`/`.odp`) — ZIP + `meta.xml`: `meta:generator` (точный
-билд LibreOffice — сильный отпечаток), `meta:initial-creator`, `dc:creator`,
-`meta:creation-date`, `meta:editing-cycles` (сколько раз открывали на правку),
-**`meta:editing-duration`**, `meta:printed-by`, `meta:document-statistic`, все
-`meta:user-defined`. Плюс `settings.xml` с локальными путями, `Basic/` и
-`Scripts/` с макросами, отслеженные изменения в `content.xml`.
+**ODF** (`.odt`/`.ods`/`.odp`): ZIP + `meta.xml`: `meta:generator` (the exact
+LibreOffice build, a strong fingerprint), `meta:initial-creator`, `dc:creator`,
+`meta:creation-date`, `meta:editing-cycles` (how many times it was opened for
+editing), **`meta:editing-duration`**, `meta:printed-by`,
+`meta:document-statistic`, every `meta:user-defined`. Plus `settings.xml` with
+local paths, `Basic/` and `Scripts/` with macros, tracked changes in
+`content.xml`.
 
-⚠ **`meta:template` — пустой элемент, путь в атрибуте `xlink:href`**
-(`file:///C:/Users/ИМЯ/.../template/бланк.ott`), название шаблона — в
-`xlink:title`. Читать текст элемента бесполезно: он всегда пуст, и отчёт
-показывал «Шаблон: (пусто)», пропуская имя пользователя. Так же устроен
-`meta:auto-reload` (ссылка, часто на файловый сервер).
+⚠ **`meta:template` is an empty element, the path is in the `xlink:href`
+attribute** (`file:///C:/Users/NAME/.../template/letterhead.ott`), the template
+name is in `xlink:title`. Reading the element text is useless: it's always
+empty, and the report showed "Template: (empty)", missing the user name.
+`meta:auto-reload` works the same way (a link, often to a file server).
 
-⚠ **Таймстемпы ZIP у ODF зависят от производителя, а не от формата.**
-LibreOffice пишет **реальное время**. Word, экспортирующий в `.odt`, пишет
-`1980-01-01` — так же, как в свой OOXML (проверено на файле от Word 16;
-`meta:generator` там `MicrosoftOffice/15.0 MicrosoftWord`). То есть «у ODF
-таймстемпы реальные» — неверное обобщение, и чистильщик обязан решать по
-генератору. Для файла от Word реальное время в записях было бы признаком
-обработки, а для файла от LibreOffice признаком обработки будет эпоха.
+⚠ **ODF ZIP timestamps depend on the producer, not on the format.**
+LibreOffice writes **the real time**. Word exporting to `.odt` writes
+`1980-01-01`, the same as in its own OOXML (verified on a file from Word 16;
+its `meta:generator` is `MicrosoftOffice/15.0 MicrosoftWord`). So "ODF has real
+timestamps" is a wrong generalization, and the cleaner has to decide by the
+generator. For a file from Word, real times in the entries would be a sign of
+processing, while for a file from LibreOffice the epoch would be.
 
-**RTF** — текст с управляющими словами. Группа `\info`: `\author`,
-`\operator` (кто последний сохранял), `\company`, `\creatim`/`\revtim`/`\printim`
-(вида `\yr2024\mo3\dy5`), **`\edmins`** (минуты редактирования), `\nofpages`,
-`\version`. Плюс `\*\userprops`, **`\*\rsidtbl`**, `\*\generator`, `\*\revtbl`,
-`\objdata` (встроенные OLE в hex), `\*\datastore`, `\*\template`.
-Учитывать экранирование: `\\`, `\{`, `\}`, `\'hh`.
+**RTF**: text with control words. The `\info` group: `\author`, `\operator`
+(who saved last), `\company`, `\creatim`/`\revtim`/`\printim` (like
+`\yr2024\mo3\dy5`), **`\edmins`** (editing minutes), `\nofpages`, `\version`.
+Plus `\*\userprops`, **`\*\rsidtbl`**, `\*\generator`, `\*\revtbl`,
+`\objdata` (embedded OLE in hex), `\*\datastore`, `\*\template`.
+Mind the escaping: `\\`, `\{`, `\}`, `\'hh`.
 
-Две ловушки RTF, обе дают ложные находки и обе проверены на файле от Word:
+Two RTF traps, both produce false findings and both were verified on a file
+from Word:
 
-**`\*\revtbl` начинается служебной записью `{Unknown;}`.** Word пишет её всегда,
-даже когда правок в файле нет. Выдавать её за человека нельзя: лишняя находка
-`IDENTITY`, завышенный на единицу счётчик авторов — и, что хуже, слово длиннее
-порога оракула чистки, поэтому оно «переживёт» любую чистку и файл получит
-вердикт «почищено не полностью».
+**`\*\revtbl` starts with the service entry `{Unknown;}`.** Word always writes
+it, even when the file has no tracked changes. It must not be passed off as a
+person: an extra `IDENTITY` finding, an author count inflated by one and, worse,
+a word longer than the cleaning oracle's threshold, so it "survives" any
+cleaning and the file gets a "not fully cleaned" verdict.
 
-**Пути искать надо в декодированном тексте, а не в сыром.** В сыром RTF
-настоящий backslash записан двойным, а между символами могут стоять управляющие
-слова. Совпадение `\\\hich\f37` (литерал backslash в тексте плюс два
-управляющих слова) выглядит как UNC-путь, а после декодирования от него
-остаётся один символ `\`.
+**Search for paths in the decoded text, not in the raw one.** In raw RTF a real
+backslash is written doubled, and control words can sit between characters. A
+match like `\\\hich\f37` (a literal backslash in the text plus two control
+words) looks like a UNC path, but after decoding only a single `\` is left.
 
-**CSV/TXT** — почти чисто: только BOM и стиль переводов строк (CRLF → Windows).
-Самый безопасный формат экспорта.
+**CSV/TXT**: almost clean: only the BOM and the line ending style (CRLF →
+Windows). The safest export format.
 
-**Имя файла** — крупнейшая утечка, и Telegram его сохраняет.
+**The file name** is the biggest leak, and Telegram keeps it.
 
 ---
 
-## Чего метаданные не решают
+## What metadata doesn't solve
 
-Границы, которые надо честно сообщать пользователю:
+Boundaries that have to be communicated to the user honestly:
 
-- **Стиль текста.** Стилометрия и перплексия — вне зоны метаданных.
-- **Токен-уровневые водяные знаки** в самом тексте (по типу SynthID для текста).
-  Статистические, живут в словах; снимаются только переписыванием прозы.
-- **Серверная сторона.** История версий и аудит-лог SharePoint/Drive/M365
-  живут **на сервере**, а не в файле. Чистка локальной копии на них не влияет.
-- **Таблицы квантования JPEG** без перекодирования с потерей качества.
-- **Датировка по фичам и шрифтам** — см. Aptos/Calibri выше.
+- **Writing style.** Stylometry and perplexity are outside metadata.
+- **Token-level watermarks** in the text itself (like SynthID for text).
+  Statistical, they live in the words; only rewriting the prose removes them.
+- **The server side.** The version history and audit log of
+  SharePoint/Drive/M365 live **on the server**, not in the file. Cleaning a
+  local copy doesn't affect them.
+- **JPEG quantization tables** without lossy re-encoding.
+- **Dating by features and fonts**: see Aptos/Calibri above.
