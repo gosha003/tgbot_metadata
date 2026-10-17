@@ -1,112 +1,134 @@
-# Инструкции для ИИ-агентов
+# Guidance for contributors and coding tools
 
-Точка входа для любого ИИ, который будет работать с этим проектом.
-Прочитай этот файл целиком до первой правки — он короткий.
+Entry point for anyone working on this project, human or tool.
+Read this file in full before the first edit; it is short.
 
-## Что это
+## What this is
 
-Телеграм-бот и CLI для инспекции и чистки метаданных документов: OOXML
-(`docx`/`xlsx`/`pptx`), PDF, картинки, легаси OLE2 (`doc`/`xls`/`ppt`), ODF, RTF.
-Локальный, однопользовательский, Windows.
+A Telegram bot and CLI for inspecting and cleaning document metadata: OOXML
+(`docx`/`xlsx`/`pptx`), PDF, images, legacy OLE2 (`doc`/`xls`/`ppt`), ODF, RTF.
+Local, single-user, Windows.
 
-Готовы **фаза 0 — инспекция**, **фаза 1 — чистка PDF и картинок** и
-**фаза 2 — чистка OOXML** (`core/zipfix.py` + `core/clean_ooxml.py`).
-Инспекция файл не изменяет. Чистка пишет в отдельный файл, исходный не
-трогает никогда. Чистка легаси OLE2, ODF и RTF — фаза 4, и для
-этих форматов **нельзя делать вид, что почистили**: диспетчер обязан
-отказать и назвать номер фазы.
+**Phase 0 (inspection)**, **phase 1 (PDF and image cleaning)** and
+**phase 2 (OOXML cleaning)** (`core/zipfix.py` + `core/clean_ooxml.py`) are done.
+RTF and ODF are cleaned in place too (`core/clean_rtf.py`, `core/clean_odf.py`).
+Inspection never modifies the file. Cleaning writes to a separate file and never
+touches the original. Legacy OLE2 can't be cleaned in place; the `Regenerate`
+profile (`core/clean_regen.py`, phase 4) re-creates such a file through
+LibreOffice when it is installed. Without it, **never pretend the file was
+cleaned**: the dispatcher must refuse and name the phase number.
 
-Для OOXML профиль `Stealth` чист, но **не незаметен**: пара пустых
-`dc:creator` и `cp:lastModifiedBy` сама является признаком чистки. Это предел
-формата, а не дефект; диспетчер кладёт такие признаки в
-`DispatchResult.new_signals`, и отчёт обязан сказать об этом пользователю
-прямо. Решение — `Regenerate` (фаза 4).
+For OOXML the `Stealth` profile is clean but **not undetectable**: the pair of
+empty `dc:creator` and `cp:lastModifiedBy` is itself a sign of cleaning. This is
+a limit of the format, not a defect; the dispatcher puts such signs into
+`DispatchResult.new_signals`, and the report must tell the user about it
+plainly. The way out is `Regenerate` (phase 4).
 
-Контракт чистки — `core/cleanmodel.py`. Главное в нём: **инспектор является
-оракулом для чистильщика**. Критерий успеха не «критичных ноль», а «ни одно
-исходное чувствительное значение не встречается в результате» — проверяется
-повторным `inspect_file()` по выходному файлу, а не доверием к своему же
-списку действий.
+The cleaning contract is `core/cleanmodel.py`. The key point: **the inspector is
+the oracle for the cleaner**. The success criterion is not "zero critical
+findings" but "none of the original sensitive values appears in the result". It
+is checked by running `inspect_file()` again on the output file, not by trusting
+the cleaner's own list of actions.
 
-## Порядок чтения
+## Reading order
 
-| Файл | Зачем |
+| File | Why |
 |---|---|
-| [CLAUDE.md](CLAUDE.md) | обязательные правила проекта, включая модель для агентов |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | контракт, точки расширения, ловушки |
-| [docs/METADATA.md](docs/METADATA.md) | **где именно прячутся метаданные по форматам** — главный knowledge asset, дешево не восстанавливается |
-| [core/cleanmodel.py](core/cleanmodel.py) | контракт чистки: профили, `Act`, `CleanResult`, оракул |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | план фаз, три стратегии чистки, известные пробелы |
-| [README.md](README.md) | установка и запуск для человека |
+| [CLAUDE.md](CLAUDE.md) | the mandatory project rules |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the contract, extension points, pitfalls |
+| [docs/METADATA.md](docs/METADATA.md) | **where exactly metadata hides, by format**: the main knowledge asset, expensive to rebuild |
+| [core/cleanmodel.py](core/cleanmodel.py) | the cleaning contract: profiles, `Act`, `CleanResult`, the oracle |
+| [core/i18n.py](core/i18n.py) | translation helpers: `tr`, `N_`, `both`, `plural`, `use_lang` |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | the phase plan, the three cleaning strategies, known gaps |
+| [README.md](README.md) | installation and running |
 
-## Сразу проверь, что всё живо
+## Check that everything is alive
 
 ```bash
 PYTHONIOENCODING=utf-8 python -m tests.test_inspect
 ```
 
-Ожидается «ИТОГО: N проверок, 0 провалено». Если провалено — починить **модуль**,
-а не тест, прежде чем браться за новую работу.
+Expected: `TOTAL: N checks, 0 failed`. If anything fails, fix the **module**, not
+the test, before starting new work.
 
 ```bash
-PYTHONIOENCODING=utf-8 python -m core.inspect путь/к/файлу.docx
+PYTHONIOENCODING=utf-8 python -m tests.test_i18n   # translations; identical verdicts in both languages
+PYTHONIOENCODING=utf-8 python -m tests.run_all     # every suite and module self-test, one process each
 ```
 
-## Правила, нарушение которых ломает продукт
+`tests.run_all` takes suite names as arguments to run a subset, for example
+`python -m tests.run_all tests.test_i18n core.zipfix`. CI runs the full set on
+Ubuntu and Windows.
 
-1. **`PYTHONIOENCODING=utf-8` в каждом запуске Python.** Иначе консоль Windows
-   калечит кириллицу и это выглядит как баг в коде. Не чини несуществующий баг.
-2. **Инспектор никогда не бросает наружу.** Каждая секция разбора в свой
-   `try/except`, проблема — через `Report.err()`. Нам присылают битые и
-   намеренно кривые файлы.
-3. **Фаза инспекции строго read-only.** Вход не модифицируется никогда;
-   проверяется сверкой sha256 до и после.
-4. **Ноль обязательных внешних бинарников.** `exiftool`, LibreOffice,
-   Ghostscript — только необязательное обогащение.
-5. **Не логировать имена файлов, их содержимое и содержимое находок.** Это
-   инструмент приватности; логи здесь — сама утечка.
-6. **Не ослаблять тест под текущее поведение.** Падающий тест — ценная
-   информация, подогнанный под баг — вредная.
-7. **Контракт** (`core/model.py`, `core/sniff.py`) меняется только осознанно:
-   против него написано всё остальное.
-8. **Нетривиальная логика без проверки не считается сделанной.** Оставь хотя бы
-   одну запускаемую проверку — в `tests/test_inspect.py` или самопроверкой в
-   `__main__` своего модуля.
+```bash
+PYTHONIOENCODING=utf-8 python -m core.inspect path/to/file.docx
+```
 
-## Чего в этом проекте не делаем
+## Rules that break the product when violated
 
-Удаление метаданных — нормальная приватная гигиена, и она тут делается в полном
-объёме. Но **подделка провенанса** — вписать дату до дедлайна, подставить чужое
-имя автора, сфабриковать время подписи — это фальсификация документа. Такой
-функции в проекте нет и не будет. Нормализация до вида «свежий файл из стокового
-приложения без имени пользователя» — это другое, и она делается.
+1. **`PYTHONIOENCODING=utf-8` on every Python run.** Otherwise the Windows
+   console mangles Cyrillic and it looks like a bug in the code. Don't fix a bug
+   that doesn't exist.
+2. **An inspector never raises.** Each parsing section gets its own
+   `try/except`, and the problem is reported through `Report.err()`. We receive
+   broken and deliberately malformed files.
+3. **The inspection phase is strictly read-only.** The input is never modified;
+   this is checked by comparing sha256 before and after.
+4. **Zero required external binaries.** `exiftool`, LibreOffice and Ghostscript
+   are optional enrichment only.
+5. **Don't log file names, their contents, or the contents of findings.** This is
+   a privacy tool; logs here are themselves the leak.
+6. **Don't weaken a test to fit the current behavior.** A failing test is
+   valuable information; a test fitted to a bug is harmful.
+7. **The contract** (`core/model.py`, `core/sniff.py`) changes only deliberately:
+   everything else is written against it.
+8. **Non-trivial logic without a check is not done.** Leave at least one
+   runnable check, either in `tests/test_inspect.py` or as a self-test in the
+   module's `__main__`.
+9. **Only presentation changes with the language, never a verdict.** Code,
+   comments, docs, the CLI and tests are in English; the bot's replies are
+   Russian by default and English on request. A user-visible string goes through
+   `tr()` (or `N_()` at module level) and gets its Russian version in
+   `core/i18n_ru.py`. Logic must not compare a translated string with an
+   untranslated one; `tests/test_i18n.py` enforces this.
 
-Честно сообщать границы возможного: метаданные — только один канал. Стиль текста,
-токен-уровневые водяные знаки и серверная история версий вне зоны действия любого
-скраббера. См. конец [docs/METADATA.md](docs/METADATA.md).
+## What this project does not do
 
-## Если работаешь параллельно с другими агентами
+Removing metadata is ordinary privacy hygiene, and it is done here in full. But
+**forging provenance** is falsifying a document: writing in a date before a
+deadline, substituting someone else's author name, fabricating a signing time.
+There is no such function in the project and there never will be. Normalizing a
+file to look like a fresh one from a stock application with no user name set is
+a different thing, and that is done.
 
-Делите файлы **до** начала работы и не трогайте чужие. Этот проект уже получил
-два дефекта от нарушения этого правила. Если нескольким агентам нужен один файл
-(обычно это `tests/test_inspect.py`), пусть его правит кто-то один после всех,
-а остальные возвращают список «что добавить и на каких данных».
+Be honest about the limits: metadata is only one channel. Writing style,
+token-level watermarks and server-side version history are outside the reach of
+any scrubber. See the end of [docs/METADATA.md](docs/METADATA.md).
 
-## Самые дорогие знания проекта
+## Working in parallel
 
-Четыре факта, которые пропускают почти все инструменты — подробности в
+Split the files **before** starting work and don't touch files assigned to
+others. If several people or tools need the same file (usually
+`tests/test_inspect.py`), let one of them edit it, after all the others, and have
+the rest hand back a list of "what to add, and on what data".
+
+## The most expensive knowledge in the project
+
+Four facts that almost every tool misses; details in
 [docs/METADATA.md](docs/METADATA.md):
 
-- **Таймстемпы ZIP.** Word ставит всем записям `1980-01-01`, библиотеки —
-  реальное время сохранения. Файл, заявляющий Microsoft Office и имеющий
-  свежие таймстемпы записей, сделан библиотекой, и время утекло через
-  контейнер даже при идеально вычищенном `core.xml`.
-- **Инкрементальные апдейты PDF.** В файле физически лежат прошлые версии
-  страниц и текст под «замазкой».
-- **Имя принтера в `printerSettings*.bin`.** Структура DEVMODE, `dmDeviceName` —
- 32 WCHAR, то есть **первые 64 байта** UTF-16LE (не 32: прочитать 32 значит
- обрезать имя на 16-м символе). Часто содержит имя хоста или локацию офиса.
- Дальше в той же структуре — формат бумаги (это геолокация: Letter против A4),
- а в приватном хвосте драйвера — UNC-путь к серверу печати.
-- **Пустые метаданные — сами признак обработки.** Поэтому дефолтная стратегия
-  не обнуляет поля, а приводит их к виду стокового приложения.
+- **ZIP timestamps.** Word sets every entry to `1980-01-01`; libraries write the
+  real save time. A file that claims Microsoft Office but has fresh entry
+  timestamps was made by a library, and the time leaked through the container
+  even if `core.xml` was cleaned perfectly.
+- **Incremental updates in PDF.** The file physically contains earlier versions
+  of pages and the text under a redaction box.
+- **The printer name in `printerSettings*.bin`.** A DEVMODE structure whose
+  `dmDeviceName` is 32 WCHAR, which is the **first 64 bytes** of UTF-16LE (not
+  32: reading 32 truncates the name at the 16th character). It often contains a
+  host name or an office location. Further on, the same structure holds the
+  paper size (a geolocation hint: Letter versus A4), and the driver's private
+  tail holds the UNC path to the print server.
+- **Empty metadata is itself a sign of processing.** That is why the default
+  strategy doesn't blank fields but brings them to the state a stock
+  application would write.

@@ -1,233 +1,177 @@
 # tgbot_metadata
 
-Телеграм-бот и CLI для **инспекции и чистки метаданных документов**: docx/xlsx/pptx,
-PDF, картинки, легаси `.doc`/`.xls`/`.ppt`, ODF, RTF.
+[![tests](https://github.com/gosha003/tgbot_metadata/actions/workflows/tests.yml/badge.svg)](https://github.com/gosha003/tgbot_metadata/actions/workflows/tests.yml)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 
-> **Хотите просто установить и пользоваться?** Пошаговая инструкция для
-> Windows, macOS и Linux, без знания программирования:
-> **[docs/GUIDE.md](docs/GUIDE.md)**. Ниже — техническое описание.
+A Telegram bot and command-line tool that **finds and removes hidden metadata** from documents,
+spreadsheets, presentations, PDFs and photos, and then **proves the result** by inspecting the
+cleaned file again.
 
-Готовы все пять фаз: инспекция, чистка на месте (PDF, картинки, docx/xlsx/pptx,
-ODF, RTF), оценка заметности чистки, пересоздание через LibreOffice
-(`Regenerate`, единственный путь для легаси `.doc`/`.xls`/`.ppt`), whitelist
-полей и пакетная чистка ZIP. Там, где чистки нет (нет LibreOffice, неизвестный
-формат), бот честно отвечает отказом, а не выдаёт непочищенный файл за
-почищенный.
+Office files and PDFs quietly carry far more than an author name: the printer's network name, the
+path of the template on someone's disk, e-mail addresses of everyone who edited the file, earlier
+versions of PDF pages with text under "redaction" boxes, GPS coordinates of photos, the real save time
+hidden in ZIP timestamps. This project maps where that data lives in each format, shows it to you,
+and removes it without leaving the file looking tampered with.
 
-Инспекция показывает, что в файле течёт, и
-**не изменяет сам файл** (проверяется сверкой sha256 до и после на каждом тесте).
+> **Just want to use the bot?** Step-by-step setup for Windows, macOS and Linux, no programming
+> required: **[docs/GUIDE.md](docs/GUIDE.md)** ([на русском](docs/GUIDE.ru.md)).
 
-## Установка
+## Highlights
 
-```bash
-pip install -r requirements.txt
-```
+- **The inspector is the cleaner's oracle.** Cleaning is not "the cleaner says it's done". Every
+  cleaned file is re-inspected, and the verdict is *clean* only if **no original sensitive value
+  appears anywhere in the output**, compared by value, with short values matched on word
+  boundaries so a liar cleaner can't slip through.
+- **Invisible cleaning.** Empty metadata is itself a sign of processing, so the default `stealth`
+  profile normalizes fields to what a stock application writes instead of blanking them. A
+  detectability score (`core/lint.py`) tells you whether the result still looks processed, and the
+  report says so plainly when a format makes invisibility impossible.
+- **Byte-exact edits.** `core/zipfix.py` rewrites only the parts of a docx/xlsx/pptx/ODF package that
+  changed and copies everything else as raw compressed bytes: entry order, DOS timestamps,
+  compression levels and Office's local extra fields are preserved, so a Word file still looks like
+  Word wrote it. XML is patched in place rather than re-serialized; JPEGs are cleaned without
+  re-encoding.
+- **Forensics most tools miss.** Printer names, paper size and print-server UNC paths from the
+  `DEVMODE` structure in `printerSettings*.bin`; incremental PDF revisions; ZIP timestamps that
+  betray library-generated files; font-based dating (Aptos means 2023 or later); reviewer names in
+  legacy `.doc` revision tables; contradictions between metadata fields.
+- **Built for hostile input.** Zip bombs, path traversal, PDF name-tree DAG bombs, forged ZIP
+  end-of-central-directory records, truncated and malformed files. Inspectors never raise, inspection
+  is strictly read-only (checked with sha256 before and after), and there are no required external
+  binaries.
+- **Private by design.** The bot serves only its owner, shows found values under spoilers, deletes its
+  reports on a timer, never logs file names or contents, and defuses external links before handing a
+  file to LibreOffice (which would otherwise fetch them and reveal your IP).
+- **Bilingual.** The bot replies in Russian by default and in English on request (`/lang`). A test
+  runs every fixture in both languages and requires identical verdicts: the language can change
+  the wording, never the result.
 
-Нужен Python 3.10+ (проверено на 3.11). На macOS и свежих Linux — в
-виртуальном окружении, см. [docs/GUIDE.md](docs/GUIDE.md#3-установка).
+## Supported formats
 
-Больше ничего не нужно: инспекция и чистка на месте работают на этом наборе.
-`exiftool`, LibreOffice, Ghostscript, Pillow, pytest — **не требуются**.
+| Format | Inspect | Clean | Examples of what is found |
+|---|---|---|---|
+| docx / xlsx / pptx | ✓ | ✓ in place | author, last editor, editing time, Purview labels with e-mail and tenant GUID, template path, printer name and print server, pivot-cache `refreshedBy`, database connection strings, ZIP timestamps |
+| PDF | ✓ | ✓ | `/Info`, XMP incl. document IDs and edit history, XMP of individual pages and images, trailer `/ID`, incremental updates, annotation authors, attachments, JavaScript, signatures, hidden layers, EXIF of embedded JPEGs |
+| JPEG / PNG / WebP / GIF | ✓ | ✓ (no re-encoding) | EXIF with GPS, camera and lens serial numbers, MakerNote, XMP, IPTC, C2PA, edited-out thumbnail |
+| TIFF / HEIF | ✓ | refused on purpose | same as above |
+| ODF (odt / ods / odp) | ✓ | ✓ in place | `meta:generator` build, editing duration, template path, printer, comments, embedded images |
+| RTF | ✓ | ✓ in place | author, company, revision table, absolute paths, `\*\rsidtbl` |
+| Legacy doc / xls / ppt | ✓ | via LibreOffice (`regenerate`) | SummaryInformation, editing time, revision authors, residual text of earlier versions, macros |
+| ZIP of documents | ✓ | ✓ batch mode | every file inside, cleaned and proven individually |
 
-Необязательное обогащение (команда бота `/status` показывает, что найдено):
-
-- **LibreOffice** — включает кнопку «Пересоздать» и чистку `.doc`/`.xls`/`.ppt`.
-  Ищется в `Program Files`, в `PATH`, в `/Applications/LibreOffice.app` на macOS
-  и в `/opt/libreoffice*` на Linux.
-- **exiftool** — положить `exiftool.exe` в `tools/`: инспектор картинок
-  дополнит находки расшифрованными MakerNotes. Нет его — работает без него.
-
-## CLI (работает без токена)
-
-```bash
-PYTHONIOENCODING=utf-8 python -m core.inspect путь/к/файлу.docx
-```
-
-Флаги: `--json` — отчёт в JSON, `--quiet` — только сводная строка,
-`--selftest` — встроенная самопроверка. Можно передать несколько файлов.
-
-`PYTHONIOENCODING=utf-8` на Windows обязателен: иначе консоль (cp866) калечит
-кириллицу, и это выглядит как баг в коде.
-
-## Бот
-
-Нужен токен от [@BotFather](https://t.me/BotFather). Положить одним из двух способов:
-
-```bash
-# переменная окружения
-export TG_BOT_TOKEN=123456:ABC...        # Bash
-$env:TG_BOT_TOKEN = "123456:ABC..."      # PowerShell
-```
-
-либо файл `.env` в корне проекта (он в `.gitignore`). Образец со всеми
-настройками — `.env.example`: `copy .env.example .env` (Windows) или
-`cp .env.example .env`.
-
-```
-TG_BOT_TOKEN=123456:ABC...
-TG_OWNER_ID=123456789
-```
-
-**`TG_OWNER_ID` обязателен.** Без него бот не обслуживает никого, а на любое
-сообщение отвечает вашим `user_id` и строкой, которую нужно добавить в `.env`.
-Пустой список доступа намеренно значит «никому», а не «всем»: иначе любой,
-кто нашёл бота, гонял бы свои файлы через LibreOffice на вашей машине.
-Нескольким людям — `TG_ALLOWED_IDS=id1,id2`.
-
-`REPORT_TTL_MIN=60` (по умолчанию) — через сколько минут бот сам удаляет свои
-отчёты из чата; `0` — не удалять. Почищенные файлы не удаляются никогда.
-
-Запуск: `python bot.py`. Второй экземпляр на той же машине не запустится:
-бот держит файл-замок `.bot.lock`. Без этого два процесса с одним токеном
-отвечают по очереди, и ответ приходит от того, у кого старые настройки.
-Замок снимает ОС при любом завершении процесса, даже аварийном.
-
-Команды: `/start` — справка, `/status` — что доступно на этой машине,
-`/clear` — удалить из чата все отчёты. Под каждым отчётом — кнопка
-«Удалить отчёт из чата».
-
-Отчёт несёт найденные значения: они под спойлером, но текст всё равно лежит
-на серверах Telegram. Поэтому отчёты удаляются кнопкой, командой и по
-таймеру. Бот помнит их в памяти процесса: после перезапуска старые отчёты
-придётся удалить вручную.
-
-**Файлы боту надо отправлять как «Файл», не как «Фото».** Отправленная
-фотографией картинка перекодируется Телеграмом ещё до бота — метаданные уже
-срезаны, инспектировать нечего. Бот на такое отвечает отказом с пояснением.
-
-Лимит 20 МБ — ограничение Bot API на скачивание файла ботом, не бота. Снимается
-только собственным `telegram-bot-api` сервером.
-
-## Тесты
+## Quick start
 
 ```bash
-PYTHONIOENCODING=utf-8 python -m tests.test_inspect
+pip install -r requirements.txt          # Python 3.10+, tested on 3.11
 ```
 
-**5154 проверок**: 429 на инспекцию (`tests.test_inspect`), 1385 на чистку
-(`tests.test_clean`), 1637 в самопроверке `core.zipfix`, 1289 в
-`core.clean_ooxml`, 130 в `core.clean_pdf`, 80 в `core.clean --selftest`,
-56 в `core.clean_batch`, 148 в `bot.py --selftest`.
-Фикстуры синтетические, с заранее известными метаданными.
+Inspect a file (read-only):
 
 ```bash
-PYTHONIOENCODING=utf-8 python -m tests.test_clean
+python -m core.inspect report.docx       # --json for machine-readable output
 ```
-Покрыто: определение формата, поиск каждого заложенного значения, правильность
-категории риска, read-only для всех фикстур, экранирование HTML и лимит 4096
-символов в телеграм-рендере, устойчивость к патологиям (пустой файл, мусор с
-правильным магическим заголовком, обрезанный файл, битый ZIP, zip-бомба,
-PNG с `zTXt`-бомбой на 200 МБ), и метрики сводки.
 
-Код возврата 1 при любом провале. `pytest` не нужен, но функции названы
-`test_*` и совместимы с ним.
-
-### Приёмка на настоящих файлах
-
-Синтетические фикстуры проверяют, что код делает задуманное. Что задумано
-верно — показывают только файлы, которые действительно сохранило настоящее
-приложение. Если на машине есть Microsoft Word, их можно сделать и прогнать
-одной командой:
+Clean it into a new file (the original is never modified):
 
 ```bash
-PYTHONIOENCODING=utf-8 python -m tests.real_office        # .doc/.rtf/.docx/.odt от Word
-PYTHONIOENCODING=utf-8 python -m core.clean_ooxml --real-word
+python -m core.clean report.docx --profile stealth
+python -m core.clean scan.pdf --profile paranoid
+python -m core.clean old.doc --profile regenerate   # needs LibreOffice
 ```
 
-Word необязателен: без него обе команды честно сообщают, что приёмка
-пропущена, и возвращают 0. Созданные файлы кладутся в `%TEMP%` и в репозиторий
-не попадают — они несут настоящее имя пользователя Word этой машины.
-
-Эта приёмка уже дала три ложных срабатывания инспектора и опровергла
-утверждение о таймстемпах ZIP у ODF, на котором собирались строить чистку ODF.
-
-## Чистка
+Run the bot: put your token from [@BotFather](https://t.me/BotFather) and your Telegram user id into
+`.env` (see [.env.example](.env.example)), then
 
 ```bash
-PYTHONIOENCODING=utf-8 python -m core.clean файл.pdf --profile stealth
-PYTHONIOENCODING=utf-8 python -m core.clean файл.docx --profile stealth
-PYTHONIOENCODING=utf-8 python -m core.clean файл.doc --profile regenerate
+python bot.py
 ```
 
-Профили, подробнее в [docs/ROADMAP.md](docs/ROADMAP.md):
+On Windows, prefix commands with `PYTHONIOENCODING=utf-8` (or set it once) so the console doesn't
+mangle non-ASCII output.
 
-- **`stealth`** (по умолчанию) — убирает личность и окружение, но **оставляет
-  приложение и его версию**: это правда, файл действительно им сделан, а пара
-  вида `Creator=Word` + `Producer=qpdf` выдаёт обработку мгновенно.
-- **`paranoid`** — убирает всё, включая приложение и даты. Результат
-  гарантированно чист, но выглядит обработанным.
-- **`regenerate`** — пересохраняет файл через LibreOffice с одноразовым
-  профилем и дочищает результат. Следа чистки нет, потому что файл никто не
-  чистил, но приложением становится LibreOffice и вёрстка может измениться.
-  Для `.doc`/`.xls`/`.ppt` это единственный путь (на выходе docx/xlsx/pptx):
-  удалённый текст прошлых версий вшит в контейнер. Внешние ссылки
-  обезвреживаются до запуска, иначе LibreOffice сам сходил бы по ним в сеть.
+### Cleaning profiles
 
-Для **docx/xlsx/pptx незаметности не даёт даже `stealth`**, и отчёт говорит это
-прямо. Утечки не остаётся, но `dc:creator` и `cp:lastModifiedBy` приходится
-обнулять, а пара пустых полей сама является признаком чистки. Оставить
-настоящее имя значит не почистить, подставить чужое — подделать провенанс.
-Незаметность даёт только пересоздание файла стоковым приложением
-(`regenerate`).
+| Profile | What it does | Trade-off |
+|---|---|---|
+| `stealth` (default) | removes identity and environment, keeps the true application and version, normalizes fields to a stock-application look | for docx/xlsx/pptx two empty identity fields remain a detectable trace; the report says so |
+| `paranoid` | removes everything, including application and dates | guaranteed clean, visibly processed |
+| `regenerate` | re-saves the file through LibreOffice with a throwaway profile, then cleans the result | no cleaning trace, but the application becomes LibreOffice and layout may shift |
 
-После чистки отчёт даёт **оценку заметности**: не видно / заметно / очевидно.
-В неё идут признаки чистки, признаки генерации библиотекой и противоречия
-метаданных с высокой уверенностью (дата изменения раньше даты создания, шрифт
-Aptos в документе, датированном 2019 годом).
+## How it works
 
-Исходный файл **не изменяется никогда**: результат пишется в отдельный файл,
-sha256 входа сверяется до и после.
+```mermaid
+flowchart LR
+    U[Telegram bot / CLI] --> S[sniff: detect format by content]
+    S --> I[inspectors<br/>ooxml · pdf · image · legacy/odf/rtf]
+    I --> R[Report: findings + signals]
+    R --> V[report renderers]
+    U --> C[clean_file dispatcher]
+    C --> K[cleaners<br/>zipfix · ooxml · pdf · image · odf · rtf · regen]
+    K --> O[output file]
+    O --> I2[re-inspect output]
+    I2 --> P{any original value<br/>survived?}
+    P -->|no| OK[CLEAN + detectability score]
+    P -->|yes| NO[NOT CLEAN: what remains and why]
+```
 
-Критерий успеха — **не «метаданных стало ноль»**, а «ни одно исходное
-чувствительное значение не встречается в результате». Разница существенна: в
-`stealth` у PDF остаётся перегенерированный `trailer /ID`, и это не утечка —
-значения случайные и с исходным файлом не связаны (даже при повторной чистке
-того же файла), тогда как исходный `/ID[0]` у
-многих продюсеров выведен из пути и имени файла. Отчёт говорит об этом прямо.
+Findings fall into four risk categories (identity, environment, provenance, structural) and are
+complemented by *signals*: what produced the file, signs of library or AI generation, signs of
+earlier scrubbing, inconsistencies, active content. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for the contract between inspectors and cleaners and [docs/METADATA.md](docs/METADATA.md) for the
+per-format reference of where metadata hides.
 
-Что сохраняется намеренно: `/Lang`, теги доступности (`/StructTreeRoot`),
-оглавление, ICC-профиль, и — у фотографий — **EXIF `Orientation`**. Без
-последнего снимок с телефона начал бы отображаться повёрнутым на бок.
+## Project layout
 
-JPEG чистится **без перекодирования**: энтропийно-кодированные данные
-копируются бит в бит, поэтому качество не теряется и таблицы квантования не
-подменяются (они сами фингерпринтят энкодер).
+```
+bot.py                  Telegram bot (aiogram 3): owner-only access, reports, cleaning buttons, batch mode
+config.py               settings from the environment or .env (any encoding)
+core/
+  model.py, sniff.py    shared contract: Risk / Finding / Signal / Report, format detection
+  inspect.py            inspection dispatcher + CLI, recursion into embedded files
+  insp_ooxml.py         docx / xlsx / pptx inspector
+  insp_pdf.py           PDF inspector
+  insp_image.py         JPEG / PNG / WebP / GIF / TIFF / HEIF inspector
+  insp_legacy.py        legacy OLE2, ODF and RTF inspector
+  clean.py              cleaning dispatcher + CLI: routing, oracle, verdict
+  cleanmodel.py         cleaning contract: profiles, actions, results
+  zipfix.py             byte-exact ZIP repacking
+  clean_ooxml.py, clean_pdf.py, clean_image.py, clean_odf.py, clean_rtf.py, clean_regen.py
+  clean_batch.py        ZIP in, ZIP out, every file proven
+  lint.py               detectability score
+  report.py, cleanreport.py   Telegram HTML and plain-text reports
+  i18n.py, i18n_ru.py   bot languages (English source strings, Russian translations)
+tests/                  fixtures with known metadata, test suites, real-Office acceptance tests
+docs/                   user guide, metadata reference, architecture, roadmap
+```
 
-## Что находит
+## Tests
 
-| Где | Примеры |
-|---|---|
-| OOXML | автор, кто сохранял последним, `TotalTime`, метки Purview с email и GUID тенанта, `rsid`, путь к шаблону, **имя принтера из DEVMODE** вместе с форматом бумаги (это геолокация) и **UNC-путём к серверу печати**, `refreshedBy` в pivotCache, строки подключения к БД, email в `people.xml`, таймстемпы ZIP как признак библиотечной генерации |
-| PDF | `/Info`, XMP включая `xmpMM:DocumentID`/`History`, **XMP у отдельных страниц и вставленных картинок**, trailer `/ID`, **инкрементальные апдейты (прошлые версии и текст под «замазкой»)**, авторы аннотаций, вложения, JS, подписи, скрытые слои, датировка по шрифтам (включая шрифты вложенных форм и штампов) |
-| Картинки | EXIF с **GPS в десятичных градусах**, серийники камеры и объектива, `MakerNote`, XMP, IPTC, ICC, C2PA/Content Credentials, миниатюра до ретуши |
-| Легаси | SummaryInformation, `total_edit_time`, потоки `1Table`/`0Table` (хранят **удалённый текст** предыдущих версий), макросы |
-| ODF/RTF | `meta:generator` с точным билдом, `editing-duration`, `\edmins`, `\*\rsidtbl` |
+```bash
+PYTHONIOENCODING=utf-8 python -m tests.run_all
+```
 
-Находки делятся на четыре категории: 🔴 личность и PII, 🟠 окружение и пути,
-🟡 провенанс и приложение, ⚪ структурное (обычно **сохраняем** — язык, теги
-доступности, ICC, оглавление).
+runs every test suite and module self-test, thousands of checks in total, on synthetic fixtures
+with known planted metadata: inspection finds every planted value, cleaning removes every one of
+them, the input file's sha256 never changes, reports stay within Telegram's limits with correct
+escaping, and pathological inputs (empty, truncated, zip bombs, garbage with valid magic bytes)
+neither crash nor hang. Many fixtures deliberately use Cyrillic metadata to exercise non-ASCII
+handling. CI runs the suite on Ubuntu and Windows.
 
-Поверх сырых находок инспекторы ставят **выводы**: чем сделан файл, признаки
-генерации библиотекой или ИИ, признаки предыдущей чистки, противоречия в
-метаданных, активное содержимое.
+With Microsoft Word installed, `python -m tests.real_office` also generates real Word files through
+COM and runs acceptance checks on them (skipped automatically otherwise).
 
-## Состояние
+## Limits
 
-Все фазы из [docs/ROADMAP.md](docs/ROADMAP.md) готовы. Известные пробелы
-собраны там же в разделе «Отложенные задачи».
+- Metadata is only one channel. Writing style, token-level watermarks and server-side version
+  history (SharePoint, Google Drive, Microsoft 365) are outside the reach of any file scrubber.
+- Cleaning breaks digital signatures, so signed PDFs are refused by default (the CLI can override
+  this with `--force-signed`, and the report then says the signature was destroyed).
+- Provenance is never forged: no fake author names or backdated timestamps. Normalizing to a stock
+  application look is supported; falsifying a document is not.
 
-Приоритет при конфликте: **незаметность чистки важнее точного сохранения
-вёрстки**. Пустые метаданные сами являются признаком обработки, поэтому
-`Stealth` не обнуляет поля, а приводит их к виду, который пишет стоковое
-приложение без заполненного имени пользователя.
+## Documentation
 
-## Чего не умеет и не будет
-
-- Скрыть, что текст написан ИИ. Метаданные — только один канал; стилометрия и
-  токен-уровневые водяные знаки живут в самих словах.
-- Повлиять на серверную историю версий (SharePoint, Google Drive, M365) — она
-  не в файле.
-- Сохранить цифровую подпись: любая чистка метаданных её ломает, это
-  взаимоисключающие операции. Бот об этом предупреждает.
-- Подделать провенанс — вписать чужое имя автора или дату до дедлайна.
-  Нормализация до стокового вида есть, фальсификация документа — нет.
+- [docs/GUIDE.md](docs/GUIDE.md): installing and using the bot ([на русском](docs/GUIDE.ru.md))
+- [docs/METADATA.md](docs/METADATA.md): where metadata hides, format by format
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): contracts, extension points, pitfalls
+- [docs/ROADMAP.md](docs/ROADMAP.md): cleaning strategies and the phase plan
