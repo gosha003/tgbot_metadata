@@ -1,17 +1,17 @@
-"""Пересоздание файла через LibreOffice. Фаза 4, профиль regenerate.
+"""Re-create a file through LibreOffice. Phase 4, regenerate profile.
 
-Необязательный путь: нет soffice -- честный отказ, а не тихая подмена
-чисткой на месте. Пользователь выбрал regenerate ради незаметности.
+An optional path: no soffice means an honest refusal, not a silent fallback
+to in-place cleaning. The user chose regenerate for invisibility.
 
-Конвертация идёт с одноразовым профилем и пустым именем пользователя.
-Иначе LibreOffice впишет в документ имя владельца машины.
+Conversion runs with a throwaway profile and an empty user name.
+Otherwise LibreOffice would stamp the machine owner's name into the document.
 
-Публичный API:
+Public API:
     find_soffice() -> str | None
     clean_regen(src, dst, profile, keep, force_signed=False) -> CleanResult
-        fmt результата -- формат ВЫХОДА (doc становится docx).
+        the result's fmt is the OUTPUT format (doc becomes docx).
 
-Исключений наружу не бросает. Вход не изменяется.
+Never raises. The input is not modified.
 """
 
 from __future__ import annotations
@@ -25,10 +25,11 @@ import subprocess
 import tempfile
 
 from core.cleanmodel import Act, CleanResult, Profile
+from core.i18n import tr
 
 __all__ = ["clean_regen", "find_soffice", "OUTPUT_FMT"]
 
-# Легаси OLE2 на месте не чистится: честный выход -- современный OOXML.
+# Legacy OLE2 can't be cleaned in place: the honest way out is modern OOXML.
 OUTPUT_FMT = {
     "doc": "docx", "xls": "xlsx", "ppt": "pptx",
     "docx": "docx", "xlsx": "xlsx", "pptx": "pptx",
@@ -36,9 +37,9 @@ OUTPUT_FMT = {
 }
 
 
-# Где LibreOffice лежит, если его нет в PATH. Windows и macOS в PATH себя не
-# добавляют; на Linux пакетный soffice обычно в PATH, но snap и ручная
-# установка в /opt -- нет.
+# Where LibreOffice lives when it's not on PATH. Windows and macOS don't add
+# it to PATH; on Linux the packaged soffice is usually on PATH, but snap and
+# manual installs into /opt are not.
 _SOFFICE_PLACES = (
     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
     os.path.expanduser("~/Applications/LibreOffice.app/Contents/MacOS/soffice"),
@@ -49,10 +50,10 @@ _SOFFICE_PLACES = (
 
 
 def find_soffice():
-    """Путь к soffice, если LibreOffice установлен. Иначе None.
+    """Path to soffice if LibreOffice is installed, otherwise None.
 
-    Windows: soffice.com, а не soffice.exe -- exe отцепляется от консоли и
-    ничего не печатает. Сначала стандартные каталоги установки, потом PATH.
+    Windows: soffice.com, not soffice.exe; the exe detaches from the console and
+    prints nothing. Standard install directories first, then PATH.
     """
     for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
         if not base:
@@ -63,7 +64,7 @@ def find_soffice():
     found = shutil.which("soffice.com") or shutil.which("soffice") or shutil.which("libreoffice")
     if found:
         return found
-    # /opt/libreofficeX.Y -- так ставит официальный .deb/.rpm с сайта
+    # /opt/libreofficeX.Y: that's how the official .deb/.rpm from the website installs
     extra = sorted(glob.glob("/opt/libreoffice*/program/soffice"), reverse=True)
     for path in _SOFFICE_PLACES + tuple(extra):
         if os.path.isfile(path) and os.access(path, os.X_OK):
@@ -76,8 +77,8 @@ def _file_url(path) -> str:
 
 
 def _patch_profile(profile_dir):
-    """Дописать снятие личных данных. Готовый xcu LibreOffice при первом
-    запуске перезаписывает, поэтому править надо уже созданный им файл."""
+    """Add personal-data removal. LibreOffice overwrites a prepared xcu on first
+    start, so the file it created has to be edited afterwards."""
     path = os.path.join(profile_dir, "user", "registrymodifications.xcu")
     if not os.path.isfile(path):
         return False
@@ -114,30 +115,31 @@ def _empty_profile(root) -> str:
     return root
 
 
-# Атрибуты, по которым LibreOffice при конвертации сам что-то загружает:
-# Target у .rels, xlink:href у ODF, href/src у VML.
+# Attributes LibreOffice loads something from during conversion:
+# Target in .rels, xlink:href in ODF, href/src in VML.
 _LINK_ATTR_RE = re.compile(
     rb'((?:Target|href|r:link|src)\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE | re.DOTALL)
-# Куда загрузка уводит с машины: любая схема с «//» (http, ftp, smb, dav...),
-# file: и UNC (\\сервер, //сервер) -- на Windows это SMB-подключение, которое
-# отдаёт чужому серверу IP и NTLM-хэш владельца бота, -- и абсолютный путь с
-# диском. Замерено: по file://-ссылке на картинку LibreOffice открывает файл.
-# Внутренние цели пакета («media/x.png», «/word/document.xml») сюда не попадают.
+# Where a load takes us off the machine: any scheme with "//" (http, ftp, smb,
+# dav...), file: and UNC (\\server, //server), which on Windows is an SMB
+# connection that hands a foreign server the bot owner's IP and NTLM hash,
+# and an absolute path with a drive letter. Measured: LibreOffice opens the
+# file behind a file:// image link.
+# Internal package targets ("media/x.png", "/word/document.xml") don't match.
 _REMOTE_RE = re.compile(r"^(?:[a-z][a-z0-9+.\-]*:)?(?://|\\\\)|^file:|^[a-z]:[\\/]",
                         re.IGNORECASE)
 
 
 def _remote(value: bytes) -> bool:
-    """Значение атрибута уводит наружу. Проверяем РАСКОДИРОВАННОЕ значение:
-    «&#104;ttp://» XML-парсер LibreOffice прочтёт как http://, а по сырым байтам
-    такой адрес проходил мимо. Пробелы и управляющие символы внутри адреса
-    URL-парсеры выбрасывают -- выбрасываем и мы."""
+    """Does the attribute value point outside? The DECODED value is checked:
+    LibreOffice's XML parser reads "&#104;ttp://" as http://, while such an
+    address slipped past a check on raw bytes. URL parsers drop whitespace and
+    control characters inside an address, and so do we."""
     text = html.unescape(value.decode("utf-8", "replace"))
     return bool(_REMOTE_RE.match(re.sub(r"[\x00-\x20]", "", text)))
 
 
 def _defang_bytes(raw: bytes):
-    """Ссылки наружу -> пустая строка той же формы. Возврат: (байты, сколько)."""
+    """External links -> an empty string of the same shape. Returns (bytes, count)."""
     hits = 0
 
     def sub(m):
@@ -151,15 +153,15 @@ def _defang_bytes(raw: bytes):
 
 
 def _defang_external(src, work, res):
-    """Копия файла без ссылок наружу; при любой заминке -- None (отказ).
+    """A copy of the file without external links; None (refusal) on any hiccup.
 
-    Работает по сырым байтам XML-частей ZIP-пакета (OOXML и ODF) и по тексту
-    RTF. Разбирать XML ради этого не нужно: цель -- чтобы LibreOffice не нашёл
-    чего загружать, а не чтобы получился образцовый документ. Ссылка
-    заменяется на пустую строку той же формы, поэтому структура не ломается.
+    Works on the raw bytes of the ZIP package's XML parts (OOXML and ODF) and on
+    RTF text. No XML parsing is needed: the goal is that LibreOffice finds
+    nothing to load, not a model document. A link is replaced with an empty
+    string of the same shape, so the structure doesn't break.
 
-    Сам файл результата от этого не страдает: внешние ссылки всё равно
-    вычищаются вторым проходом как ENVIRONMENT.
+    The output file doesn't suffer from this: external links are removed by the
+    second pass as ENVIRONMENT anyway.
     """
     try:
         import zipfile
@@ -185,13 +187,13 @@ def _defang_external(src, work, res):
                 return src
             rep = zipfix.rebuild(src, out, replace=replace)
             if not getattr(rep, "ok", False) or not os.path.isfile(out):
-                res.err("Внешние ссылки обезвредить не удалось, пересоздание "
-                        "отменено: LibreOffice пошёл бы по ним в сеть.")
+                res.err(tr("External links could not be defused, regeneration cancelled: "
+                           "LibreOffice would have followed them over the network."))
                 return None
-            res.act(Act.REMOVED, "внешние ссылки", "Ссылки на сеть до конвертации",
-                    "%d шт." % hits, "",
-                    "LibreOffice при конвертации сам загружает внешние картинки, "
-                    "раскрывая ваш IP владельцу ссылки. Обезврежены до запуска.")
+            res.act(Act.REMOVED, tr("external links"), tr("Network links before conversion"),
+                    tr("%d pcs") % hits, "",
+                    tr("During conversion LibreOffice loads external images by itself, revealing "
+                       "your IP to the link's owner. Defused before launch."))
             return out
 
         if fam == "rtf":
@@ -202,24 +204,24 @@ def _defang_external(src, work, res):
                 return src
             with open(out, "wb") as fh:
                 fh.write(new)
-            res.act(Act.REMOVED, "внешние ссылки", "Ссылки на сеть до конвертации",
-                    "%d шт." % n, "", "Обезврежены до запуска LibreOffice.")
+            res.act(Act.REMOVED, tr("external links"), tr("Network links before conversion"),
+                    tr("%d pcs") % n, "", tr("Defused before launching LibreOffice."))
             return out
     except Exception:  # noqa: BLE001
-        res.err("Проверка внешних ссылок сорвалась, пересоздание отменено: "
-                "LibreOffice мог бы пойти по ним в сеть.")
+        res.err(tr("Checking external links failed, regeneration cancelled: LibreOffice could "
+                   "have followed them over the network."))
         return None
     return src
 
 
 def _scrub_after_convert(path, res) -> None:
-    """Вычистить свойства уже пересозданного файла нашим же чистильщиком.
+    """Clean the properties of the already regenerated file with our own cleaner.
 
-    Профиль STEALTH: после конвертации файл ДЕЙСТВИТЕЛЬНО сделан LibreOffice,
-    поэтому оставить Application=LibreOffice -- правда, а пустые поля личности
-    это рядовое состояние LibreOffice с незаполненным именем пользователя.
-    Для OOXML такая пара обычно сама выдаёт чистку, но здесь пакет собран
-    стоковым приложением целиком, и противоречия не возникает.
+    STEALTH profile: after conversion the file REALLY was made by LibreOffice,
+    so keeping Application=LibreOffice is the truth, and empty identity fields
+    are LibreOffice's ordinary state with no user name set. For OOXML that pair
+    usually gives cleaning away, but here the whole package was built by a stock
+    application, so there's no contradiction.
     """
     try:
         from .sniff import family, sniff
@@ -228,23 +230,22 @@ def _scrub_after_convert(path, res) -> None:
             import functools
 
             from .clean_ooxml import clean_ooxml
-            # Пользовательских свойств у свежего файла LibreOffice нет: всё, что
-            # там есть, приехало из исходника. STEALTH часть таких свойств
-            # оставляет как безобидные, а инспектор .doc считает их личностью --
-            # замерено на «Отдел» из DocumentSummaryInformation.
+            # A fresh LibreOffice file has no custom properties: everything
+            # there came from the source. STEALTH keeps some of them as harmless,
+            # while the .doc inspector counts them as identity; measured on
+            # "Department" from DocumentSummaryInformation.
             _inner = functools.partial(clean_ooxml, drop_custom=True)
         elif fam == "odf":
             from .clean_odf import clean_odf as _inner
         elif fam == "rtf":
-            # RTF -> RTF: LibreOffice переносит \info так же, как свойства OOXML.
+            # RTF -> RTF: LibreOffice carries \info over just like OOXML properties.
             from .clean_rtf import clean_rtf as _inner
         else:
-            res.err("После конвертации формат не поддержан дочисткой: "
-                    "свойства документа могли остаться.")
+            res.err(tr("After conversion the format isn't supported by the second pass: document "
+                       "properties may remain."))
             return
     except Exception:
-        res.err("Дочистка после конвертации недоступна: свойства документа "
-                "могли остаться.")
+        res.err(tr("The post-conversion pass is unavailable: document properties may remain."))
         return
 
     work = tempfile.mkdtemp(prefix="lo_scrub_")
@@ -258,34 +259,33 @@ def _scrub_after_convert(path, res) -> None:
             for e in inner.errors:
                 res.err(e)
         else:
-            res.err("Дочистка после конвертации не прошла: свойства документа "
-                    "могли остаться в файле. %s" % ((inner.errors or [""])[0])[:160])
+            res.err(tr("The post-conversion pass failed: document properties may remain in the "
+                       "file. %s") % ((inner.errors or [""])[0])[:160])
     except Exception:  # noqa: BLE001
-        res.err("Дочистка после конвертации сорвалась: свойства документа "
-                "могли остаться.")
+        res.err(tr("The post-conversion pass crashed: document properties may remain."))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 def clean_regen(src, dst, profile=Profile.REGENERATE, keep=None, force_signed=False) -> CleanResult:
-    """Пересохранить src через LibreOffice в dst. Не бросает.
+    """Re-save src through LibreOffice into dst. Never raises.
 
-    keep и force_signed не используются: профиль один, стоковое приложение
-    само решает, что оставить. Сигнатура совпадает с остальными чистильщиками.
+    keep and force_signed are unused: there's one profile, and the stock
+    application decides what to keep. The signature matches the other cleaners.
     """
     del keep, force_signed, profile
     res = CleanResult(src=str(src), dst=str(dst), fmt="unknown", profile="regenerate")
     ext = os.path.splitext(src)[1].lower().lstrip(".")
-    # sniff ещё не звали: расширение исходника -- подсказка для LO, формат
-    # проверит диспетчер повторной инспекцией.
+    # sniff hasn't been called yet: the source extension is a hint for LO, and
+    # the dispatcher verifies the format by re-inspection.
     target = OUTPUT_FMT.get(ext)
     if target is None:
-        res.err("Regenerate для этого расширения не применяется.")
+        res.err(tr("Regenerate doesn't apply to this extension."))
         return res
     res.fmt = target
     soffice = find_soffice()
     if not soffice:
-        res.err("LibreOffice не найден. Regenerate не подменяется чисткой на месте.")
+        res.err(tr("LibreOffice not found. Regenerate is not replaced with in-place cleaning."))
         return res
     work = tempfile.mkdtemp(prefix="lo_regen_")
     try:
@@ -293,57 +293,57 @@ def clean_regen(src, dst, profile=Profile.REGENERATE, keep=None, force_signed=Fa
         outdir = os.path.join(work, "out")
         os.makedirs(outdir)
 
-        # Внешние ссылки обезвреживаются ДО конвертации. LibreOffice при
-        # --convert-to САМ скачивает внешние картинки документа: замерено, что
-        # docx с a:blip r:link=http://... даёт три HTTP-запроса с машины
-        # владельца. Для инструмента приватности это утечка в чистом виде --
-        # отправитель файла узнаёт IP и может достучаться до внутренней сети.
-        # Поэтому конвертируем не оригинал, а копию без внешних ссылок.
+        # External links are defused BEFORE conversion. With --convert-to,
+        # LibreOffice DOWNLOADS a document's external images by itself: measured,
+        # a docx with a:blip r:link=http://... makes three HTTP requests from the
+        # owner's machine. For a privacy tool that's a plain leak: the file's sender
+        # learns the IP and may reach the internal network.
+        # So we convert a copy without external links, not the original.
         src = _defang_external(src, work, res)
         if src is None:
-            # Обезвредить не вышло -- файл НЕ пересоздаём. Запустить
-            # LibreOffice «на всякий случай» значит сходить в сеть по чужому
-            # адресу: отказ здесь безопаснее успеха.
+            # Defusing failed: the file is NOT regenerated. Starting LibreOffice
+            # "just in case" means hitting a stranger's address over the network:
+            # refusing is safer than succeeding here.
             return res
         try:
-            # Первый запуск только создаёт профиль: заранее положенный xcu
-            # LibreOffice выбрасывает. Настройку дописываем во второй.
+            # The first run only creates the profile: LibreOffice discards an xcu put
+            # there in advance. The setting is added before the second run.
             _run(soffice, profile_dir, ["--terminate_after_init"], 60)
             if not _patch_profile(profile_dir):
-                res.err("Не удалось включить снятие личных данных в профиле LibreOffice.")
+                res.err(tr("Could not enable personal-data removal in the LibreOffice profile."))
                 return res
             proc = _run(soffice, profile_dir,
                         ["--convert-to", target, "--outdir", outdir, src], 120)
         except subprocess.TimeoutExpired:
-            res.err("LibreOffice не ответил за отведённое время. Файл не создан.")
+            res.err(tr("LibreOffice didn't respond in time. File not created."))
             return res
         except OSError:
-            res.err("LibreOffice не запустился. Файл не создан.")
+            res.err(tr("LibreOffice failed to start. File not created."))
             return res
         produced = os.path.join(
             outdir, os.path.splitext(os.path.basename(src))[0] + "." + target)
         if proc.returncode != 0 or not os.path.isfile(produced) or os.path.getsize(produced) == 0:
-            res.err("LibreOffice не сохранил файл (код %s)." % proc.returncode)
+            res.err(tr("LibreOffice didn't save the file (code %s).") % proc.returncode)
             return res
         shutil.copyfile(produced, dst)
-        res.act(Act.REGENERATED, "файл", "пересоздание", "", target,
-                "Файл заново сохранён LibreOffice: пакет собран стоковым "
-                "приложением, поэтому его структура согласована насквозь. "
-                "Заявленное приложение теперь LibreOffice, не исходное. "
-                "Вёрстка могла измениться.")
+        res.act(Act.REGENERATED, tr("file"), tr("regeneration"), "", target,
+                tr("The file was saved again by LibreOffice: the package was built by a stock "
+                   "application, so its structure is consistent throughout. The claimed "
+                   "application is now LibreOffice, not the original. The layout may have "
+                   "changed."))
 
-        # ВТОРОЙ ПРОХОД, без него режим течёт. LibreOffice при --convert-to
-        # ПЕРЕНОСИТ свойства документа: замерено, что автор, кто сохранял,
-        # организация и кастомная метка MSIP с email доезжают в результат
-        # нетронутыми, несмотря на RemovePersonalInfoOnSaving в профиле (эта
-        # опция работает при сохранении из интерфейса, а не при конвертации).
-        # Полагаться на чужую настройку нельзя: regenerate решает задачу
-        # НЕЗАМЕТНОСТИ, а чистоту даёт наш собственный чистильщик.
+        # SECOND PASS; without it this mode leaks. With --convert-to LibreOffice
+        # CARRIES OVER document properties: measured, author, last saved by,
+        # company and a custom MSIP label with an email reach the output
+        # untouched, despite RemovePersonalInfoOnSaving in the profile (that
+        # option works when saving from the UI, not during conversion).
+        # We can't rely on someone else's setting: regenerate solves
+        # INVISIBILITY, and our own cleaner provides cleanliness.
         _scrub_after_convert(dst, res)
         res.ok = True
     except Exception:  # noqa: BLE001
         res.ok = False
-        res.err("Внутренняя ошибка Regenerate.")
+        res.err(tr("Internal Regenerate error."))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return res

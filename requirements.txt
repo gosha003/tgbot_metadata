@@ -1,10 +1,10 @@
-# Обязательные зависимости. Установка: pip install -r requirements.txt
-# Нижние границы -- версии, на которых проект проверен (Python 3.11).
-aiogram>=3.31,<4     # Telegram Bot API; в 4.x ожидаются несовместимые изменения
-pikepdf>=10          # разбор и чистка PDF (тянет за собой Pillow)
+# Required dependencies. Install with: pip install -r requirements.txt
+# Lower bounds are the versions the project is tested with (Python 3.11).
+aiogram>=3.31,<4     # Telegram Bot API; 4.x is expected to bring breaking changes
+pikepdf>=10          # PDF parsing and cleaning (pulls in Pillow)
 lxml>=5              # XML: XMP, OOXML, ODF
-olefile>=0.47        # старые .doc/.xls/.ppt
+olefile>=0.47        # legacy .doc/.xls/.ppt
 
-# Необязательное, ставится НЕ через pip (см. docs/GUIDE.md):
-#   LibreOffice -- кнопка «Пересоздать» и чистка .doc/.xls/.ppt
-#   exiftool    -- расшифровка MakerNotes в фотографиях
+# Optional, NOT installed via pip (see docs/GUIDE.md):
+#   LibreOffice -- the "Regenerate" button and cleaning of .doc/.xls/.ppt
+#   exiftool    -- decoding of MakerNotes in photos

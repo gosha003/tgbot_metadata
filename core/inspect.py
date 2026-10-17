@@ -1,36 +1,36 @@
 # -*- coding: utf-8 -*-
-"""Диспетчер инспекции и CLI.
+"""Inspection dispatcher and CLI.
 
-Фаза 0: только чтение. Файл никогда не модифицируется, ничего не чистится --
-задача диспетчера только собрать полную картину из готовых инспекторов.
+Phase 0: read only. The file is never modified and nothing is cleaned; the
+dispatcher's only job is to assemble the full picture from the inspectors.
 
-Определяет формат через core.sniff и маршрутизирует по core.sniff.family на
-один из готовых инспекторов (core.insp_*). Сам диспетчер использует только
-stdlib; тяжёлые зависимости (pikepdf, lxml, olefile) тянутся транзитивно
-через инспекторы, которые он вызывает.
+Detects the format via core.sniff and routes by core.sniff.family to one of
+the inspectors (core.insp_*). The dispatcher itself uses only the stdlib;
+heavy dependencies (pikepdf, lxml, olefile) come in transitively through
+the inspectors it calls.
 
-Главная функция:
+Main function:
     inspect_file(path, max_size=None) -> Report
 
-Диспетчер НЕ ИМЕЕТ ПРАВА падать: он вызывается из бота на любом файле, какой
-пользователь пришлёт, включая намеренно битые и намеренно опасные. Каждый
-вызов инспектора обёрнут в try/except; если инспектор всё-таки исключение
-бросил (не должен, но мир не идеален) -- это тоже уходит в report.errors,
-а не наружу.
+The dispatcher MUST NOT crash: the bot calls it on any file a user sends,
+including deliberately broken and deliberately dangerous ones. Every
+inspector call is wrapped in try/except; if an inspector does raise (it
+shouldn't, but the world isn't perfect), that also goes to report.errors,
+not out.
 
-Форматы без специализированного инспектора (ZIP общего вида, текст/CSV,
-неопознанный формат) разбираются минимально прямо здесь -- заводить для
-них отдельный модуль было бы избыточно.
+Formats without a dedicated inspector (generic ZIP, text/CSV, unrecognized)
+get minimal parsing right here; a separate module for them would be overkill.
 
-Рекурсия. У OOXML и ODF свои media-каталоги с картинками (Exif/XMP/ICC там
-свои, не в docProps), у OOXML вдобавок вложенные OLE-объекты в */embeddings/,
-у PDF -- вложенные файлы в /Names /EmbeddedFiles. Сами инспекторы про это
-только сообщают ("нужна рекурсивная инспекция") -- достать и рекурсивно
-прогнать эти части должен диспетчер: contract insp_ooxml.py и insp_legacy.py
-явно перекладывает эту работу на него. Рекурсия ограничена по глубине, числу
-вложенных объектов и суммарному извлечённому объёму -- см. константы ниже.
+Recursion. OOXML and ODF have their own media folders with images (their
+Exif/XMP/ICC live there, not in docProps), OOXML additionally has embedded
+OLE objects in */embeddings/, and PDF has embedded files in /Names
+/EmbeddedFiles. The inspectors only report these ("needs recursive
+inspection"); extracting and recursively inspecting them is the
+dispatcher's job: the insp_ooxml.py and insp_legacy.py contract explicitly
+hands this work over. Recursion is bounded by depth, number of embedded
+objects and total extracted size; see the constants below.
 
-CLI: python -m core.inspect <файл> [ещё файлы...] [--json | --quiet] [--selftest]
+CLI: python -m core.inspect <file> [more files...] [--json | --quiet] [--selftest]
 """
 
 from __future__ import annotations
@@ -53,85 +53,86 @@ from .insp_pdf import inspect_pdf
 from .insp_image import inspect_image
 from .insp_legacy import inspect_ole, inspect_odf, inspect_rtf
 from .report import render_plain, summary_line
+from core.i18n import N_, tr
 
-# --- пределы рекурсии: вложенный объект -- такой же недоверенный файл, как
-# и верхний, поэтому бомбы и раздувание числа объектов режем так же жёстко.
-MAX_RECURSE_DEPTH = 2          # media в docx внутри docx внутри docx и т.д. -- не более 2 уровней
-MAX_RECURSE_OBJECTS = 40       # вложенных объектов суммарно за всю инспекцию файла
-MAX_RECURSE_TOTAL = 200 * 1024 * 1024   # суммарный извлечённый объём
-MAX_ITEM_READ = 50 * 1024 * 1024        # один вложенный объект -- не больше этого в память
+# --- recursion limits: an embedded object is just as untrusted as the
+# top-level file, so bombs and object-count inflation are cut just as hard.
+MAX_RECURSE_DEPTH = 2          # media in a docx inside a docx inside a docx, etc.: at most 2 levels
+MAX_RECURSE_OBJECTS = 40       # embedded objects in total for the whole inspection of a file
+MAX_RECURSE_TOTAL = 200 * 1024 * 1024   # total extracted size
+MAX_ITEM_READ = 50 * 1024 * 1024        # one embedded object: never more than this in memory
 
-# --- пределы минимальных инспекторов (zip/text) -----------------------------
-MAX_ZIP_SCAN = 4000             # записей архива, которые вообще разбираем
-MAX_ZIP_LISTED = 40             # сколько таймстемпов печатаем поимённо
-MAX_ZIP_UNPACKED = 512 * 1024 * 1024   # порог бомбы: суммарный несжатый размер
-MIN_ZIP_BOMB = 64 * 1024 * 1024        # ниже этого объёма высокий коэффициент не тревожит
-MAX_ZIP_RATIO = 120                    # несжатый/сжатый -- порог подозрения на бомбу
-MAX_TEXT_PEEK = 1024 * 1024      # для BOM и стиля переводов строк целый файл не нужен
+# --- limits of the minimal inspectors (zip/text) -----------------------------
+MAX_ZIP_SCAN = 4000             # archive entries we parse at all
+MAX_ZIP_LISTED = 40             # how many timestamps we print by name
+MAX_ZIP_UNPACKED = 512 * 1024 * 1024   # bomb threshold: total uncompressed size
+MIN_ZIP_BOMB = 64 * 1024 * 1024        # below this size a high ratio is not alarming
+MAX_ZIP_RATIO = 120                    # uncompressed/compressed: bomb suspicion threshold
+MAX_TEXT_PEEK = 1024 * 1024      # the whole file isn't needed for the BOM and line-ending style
 
 _OOXML_MEDIA_RE = re.compile(r"^(word|xl|ppt)/media/")
 
 
 # ============================================================================
-#  Минимальные инспекторы: форматы без отдельного модуля
+#  Minimal inspectors: formats without a dedicated module
 # ============================================================================
 
 
 def _inspect_zip_min(path, fmt="zip") -> Report:
-    """ZIP общего вида (не OOXML и не ODF -- те определяет sniff раньше).
+    """Generic ZIP (not OOXML or ODF; sniff detects those earlier).
 
-    Содержимое записей не распаковываем вообще -- только перечень и заявленные
-    в заголовке размеры и таймстемпы. Поэтому коэффициент сжатия здесь не
-    защита от настоящей бомбы (распаковки нет), а просто предупреждение
-    пользователю, что архив выглядит подозрительно.
+    Entry contents are never unpacked, only the listing and the sizes and
+    timestamps declared in the headers. So the compression ratio here isn't
+    protection against a real bomb (there's no unpacking), just a warning to
+    the user that the archive looks suspicious.
     """
     rep = Report(path=str(path), fmt=fmt)
     try:
         rep.size = os.path.getsize(path)
     except OSError as exc:
-        rep.err("не удалось узнать размер файла: %s" % exc)
+        rep.err(tr("could not get the file size: %s") % exc)
     try:
         with zipfile.ZipFile(path) as zf:
             infos = zf.infolist()
             total = len(infos)
             if total > MAX_ZIP_SCAN:
-                rep.err("в архиве %d записей, разобраны первые %d" % (total, MAX_ZIP_SCAN))
+                rep.err(tr("the archive has %d entries, the first %d were parsed") % (total, MAX_ZIP_SCAN))
                 infos = infos[:MAX_ZIP_SCAN]
             total_unc = sum(i.file_size for i in infos)
             total_comp = sum(i.compress_size for i in infos)
             ratio = (total_unc / total_comp) if total_comp else 0
             if total_unc > MAX_ZIP_UNPACKED or (total_unc > MIN_ZIP_BOMB and ratio > MAX_ZIP_RATIO):
-                rep.err("архив похож на zip-бомбу: заявлено %d байт при коэффициенте "
-                        "сжатия %.0f -- содержимое записей не распаковываем" % (total_unc, ratio))
+                rep.err(tr("the archive looks like a zip bomb: %d bytes declared at a "
+                           "compression ratio of %.0f; entry contents are not unpacked") % (total_unc, ratio))
                 rep.signal("hazard",
-                           "ZIP-архив с подозрительно высоким коэффициентом сжатия (%.0f)." % ratio,
+                           tr("ZIP archive with a suspiciously high compression ratio (%.0f).") % ratio,
                            "high")
-            rep.add(Risk.PROVENANCE, "ZIP", "Записей в архиве", str(total))
+            rep.add(Risk.PROVENANCE, "ZIP", tr("Entries in the archive"), str(total))
             for info in infos[:MAX_ZIP_LISTED]:
                 dt = "%04d-%02d-%02d %02d:%02d:%02d" % info.date_time
-                rep.add(Risk.PROVENANCE, info.filename, "Таймстемп записи ZIP", dt,
-                        "Время модификации файла внутри архива -- метка сборки, "
-                        "привязывает архив к моменту создания.")
+                rep.add(Risk.PROVENANCE, info.filename, tr("ZIP entry timestamp"), dt,
+                        tr("Modification time of a file inside the archive: a build stamp that "
+                           "ties the archive to when it was created."))
             if total > MAX_ZIP_LISTED:
-                rep.err("таймстемпы показаны для первых %d записей из %d" % (MAX_ZIP_LISTED, total))
+                rep.err(tr("timestamps shown for the first %d of %d entries") % (MAX_ZIP_LISTED, total))
     except (zipfile.BadZipFile, OSError) as exc:
-        rep.err("ZIP-архив не открывается: %s: %s" % (type(exc).__name__, exc))
+        rep.err(tr("ZIP archive won't open: %s: %s") % (type(exc).__name__, exc))
     return rep
 
 
 def _inspect_text_min(path, fmt="text") -> Report:
-    """Текст/CSV: BOM и стиль переводов строк -- дальше в текст не лезем,
-    произвольный текстовый контент к метаданным документа не относится."""
+    """Text/CSV: BOM and line-ending style only. We don't go into the text:
+    arbitrary text content isn't document metadata."""
     rep = Report(path=str(path), fmt=fmt)
     try:
         rep.size = os.path.getsize(path)
     except OSError as exc:
-        rep.err("не удалось узнать размер файла: %s" % exc)
+        rep.err(tr("could not get the file size: %s") % exc)
     try:
         with open(path, "rb") as fh:
             head = fh.read(MAX_TEXT_PEEK)
     except OSError as exc:
-        rep.err("файл не читается: %s" % exc)
+        rep.err(tr("the file can't be read: %s") % exc)
         return rep
 
     bom = None
@@ -141,89 +142,87 @@ def _inspect_text_min(path, fmt="text") -> Report:
         if head.startswith(sig):
             bom = label
             break
-    rep.add(Risk.PROVENANCE, "BOM", "Метка порядка байт", bom or "нет",
-            "BOM выдаёт редактор или платформу, которой сохраняли файл." if bom else "")
+    rep.add(Risk.PROVENANCE, "BOM", tr("Byte order mark"), bom or tr("none"),
+            tr("A BOM reveals the editor or platform the file was saved with.") if bom else "")
 
     crlf = head.count(b"\r\n")
     lf_only = head.count(b"\n") - crlf
     if crlf and not lf_only:
-        style = "CRLF (типично для Windows)"
+        style = tr("CRLF (typical of Windows)")
     elif lf_only and not crlf:
-        style = "LF (типично для Unix/Mac)"
+        style = tr("LF (typical of Unix/Mac)")
     elif crlf and lf_only:
-        style = "смешанный CRLF и LF"
+        style = tr("mixed CRLF and LF")
     else:
-        style = "переводов строк нет"
-    rep.add(Risk.ENVIRONMENT, "line-endings", "Стиль переводов строк", style,
-            "CRLF почти всегда означает, что файл правили или собирали на Windows.")
+        style = tr("no line breaks")
+    rep.add(Risk.ENVIRONMENT, "line-endings", tr("Line-ending style"), style,
+            tr("CRLF almost always means the file was edited or built on Windows."))
 
     if rep.size and rep.size > len(head):
-        rep.err("файл больше %d МБ, BOM и переводы строк определены по первым %d МБ"
+        rep.err(tr("the file is larger than %d MB; BOM and line endings were determined from the "
+                   "first %d MB")
                 % (MAX_TEXT_PEEK // 1048576, MAX_TEXT_PEEK // 1048576))
     return rep
 
 
 def _inspect_unknown_min(path, fmt="unknown") -> Report:
-    """Формат не опознан сигнатурой. Глубже сигнатуры и размера лезть смысла
-    нет -- неизвестно, как это парсить."""
+    """Format not recognized by signature. There's no point digging deeper than
+    the signature and size: there's no way to know how to parse it."""
     rep = Report(path=str(path), fmt=fmt)
     size_known = False
     try:
         rep.size = os.path.getsize(path)
         size_known = True
     except OSError as exc:
-        rep.err("не удалось узнать размер файла: %s" % exc)
+        rep.err(tr("could not get the file size: %s") % exc)
     if size_known and rep.size == 0:
-        # Пустой файл -- не "формат не опознан": опознавать нечего.
-        rep.err("файл пустой (0 байт): в нём нет ни данных, ни метаданных. "
-                "Возможно, он не докачался или не сохранился -- проверьте источник.")
+        # An empty file isn't "unrecognized format": there's nothing to recognize.
+        rep.err(tr("the file is empty (0 bytes): it holds neither data nor metadata. It may not "
+                   "have finished downloading or saving; check the source."))
         return rep
-    rep.err("формат не опознан по сигнатуре -- глубокая инспекция невозможна, "
-            "известны только размер и факт нераспознавания.")
+    rep.err(tr("format not recognized by signature: deep inspection is impossible, only the size "
+               "and the fact that it wasn't recognized are known."))
     return rep
 
 
-# Что сказать пользователю, когда файл не открылся. Правда и действие, без
-# путей: текст исключения OSError содержит полный путь, поэтому его не берём.
+# What to tell the user when a file didn't open. The truth and an action, no
+# paths: the OSError exception text contains the full path, so it isn't used.
 _UNREADABLE_MSG = {
     "cloud": (
-        "файл -- плейсхолдер облачного провайдера (OneDrive и аналоги, режим "
-        "Files On-Demand): на диске лежат только метаданные, содержимого нет, "
-        "поэтому проверить его нельзя. Это не значит, что файл повреждён. "
-        "Откройте файл в проводнике или выберите «Always keep on this device» "
-        "(«Всегда хранить на этом устройстве»), дождитесь скачивания и "
-        "повторите проверку."),
+        N_("the file is a cloud provider placeholder (OneDrive and the like, Files On-Demand "
+           "mode): only metadata is on disk, there's no content, so it can't be checked. This "
+           "doesn't mean the file is damaged. Open the file in Explorer or choose \"Always keep "
+           "on this device\", wait for the download and check again.")),
     "denied": (
-        "нет доступа на чтение (errno 13): либо нет прав на файл, либо он занят "
-        "другим процессом (чаще всего открыт в Word или Excel). Закройте "
-        "файл, проверьте права доступа и повторите проверку."),
-    "missing": "файл не найден (удалён или переименован до начала проверки).",
-    "dir": "это каталог, а не файл.",
+        N_("no read access (errno 13): either there's no permission for the file or it's locked "
+           "by another process (most often open in Word or Excel). Close the file, check "
+           "permissions and try again.")),
+    "missing": N_("file not found (deleted or renamed before the check started)."),
+    "dir": N_("this is a directory, not a file."),
     "reparse": (
-        "файл -- ссылка или точка повторной обработки (reparse point), её "
-        "содержимое не читается. Если файл из облака, откройте его в "
-        "проводнике, дождитесь скачивания и повторите проверку."),
+        N_("the file is a link or reparse point; its content can't be read. If the file comes "
+           "from the cloud, open it in Explorer, wait for the download and check again.")),
 }
 
 
 def _inspect_unreadable(path, fmt="unreadable") -> Report:
-    """Файл существует, но не открылся. Не 'не опознан' (это ложный диагноз,
-    после которого пользователь ищет несуществующую поломку), а честная
-    причина и что делать."""
+    """The file exists but didn't open. Not 'unrecognized' (a false diagnosis
+    that sends the user hunting for a nonexistent defect) but the honest
+    reason and what to do."""
     rep = Report(path=str(path), fmt=fmt)
     try:
-        rep.size = os.path.getsize(path)   # у плейсхолдера размер настоящий
+        rep.size = os.path.getsize(path)   # a placeholder reports its real size
     except OSError:
         pass
     reason, code = sniff.unreadable_reason(path)
-    msg = _UNREADABLE_MSG.get(reason)
+    msg = tr(_UNREADABLE_MSG[reason]) if reason in _UNREADABLE_MSG else None
     if msg is None:
         try:
             text = os.strerror(code) if code is not None else ""
         except (ValueError, OverflowError):
             text = ""
-        what = ("errno %s%s" % (code, ": " + text if text else "")) if code is not None             else "код ошибки ОС не получен"
-        msg = "файл не удалось прочитать (%s) -- содержимое недоступно, проверка невозможна." % what
+        what = ("errno %s%s" % (code, ": " + text if text else "")) if code is not None             else tr("OS error code not available")
+        msg = tr("the file could not be read (%s): content unavailable, the check is impossible.") % what
     rep.err(msg)
     return rep
 
@@ -243,31 +242,31 @@ _HANDLERS = {
 
 
 def _run_inspector(path, fam, fmt) -> Report:
-    """Вызвать нужный инспектор, поймав абсолютно всё. Контракт инспекторов
-    говорит, что они сами не бросают -- но диспетчер не имеет права поверить
-    на слово и упасть, если контракт где-то нарушен."""
+    """Call the right inspector, catching absolutely everything. The inspector
+    contract says they never raise themselves, but the dispatcher has no right
+    to take that on faith and crash if the contract is broken somewhere."""
     handler = _HANDLERS.get(fam, _inspect_unknown_min)
     try:
         return handler(path, fmt)
-    except Exception as exc:  # noqa: BLE001 -- последний рубеж диспетчера
+    except Exception as exc:  # noqa: BLE001 -- the dispatcher's last line of defense
         rep = Report(path=str(path), fmt=fmt)
         try:
             rep.size = os.path.getsize(path)
         except OSError:
             pass
-        rep.err("инспектор упал целиком: %s: %s" % (type(exc).__name__, exc))
+        rep.err(tr("the inspector crashed entirely: %s: %s") % (type(exc).__name__, exc))
         return rep
 
 
 # ============================================================================
-#  Рекурсия во вложенные объекты
+#  Recursion into embedded objects
 # ============================================================================
 
 
 def _zip_entry_bytes(zf, info, cap):
-    """Прочитать запись ZIP потоково, не больше cap байт. None, если запись
-    больше -- заявленный в заголовке размер недоверенный (в т.ч. может лгать
-    в обе стороны), поэтому ограничиваем сам поток чтения, а не заголовок."""
+    """Read a ZIP entry as a stream, at most cap bytes. None if the entry is
+    larger: the size declared in the header is untrusted (it can lie either
+    way), so the read stream itself is bounded, not the header."""
     try:
         with zf.open(info) as fh:
             data = fh.read(cap + 1)
@@ -284,9 +283,8 @@ def _write_tmp(tmpdir, index, name):
 
 
 def _reserve(budget):
-    """Сколько байт можно прочитать для следующего вложенного объекта, или
-    None, если общий бюджет рекурсии (число объектов или суммарный объём)
-    исчерпан."""
+    """How many bytes may be read for the next embedded object, or None if the
+    overall recursion budget (object count or total size) is exhausted."""
     if budget["objects"] >= MAX_RECURSE_OBJECTS:
         return None
     remaining = MAX_RECURSE_TOTAL - budget["bytes"]
@@ -296,14 +294,13 @@ def _reserve(budget):
 
 
 def _extract_zip_children(rep, path, tmpdir, budget, match, kind_label):
-    """Общая часть для OOXML (media/, */embeddings/) и ODF (Pictures/):
-    оба контейнера -- обычный ZIP, различается только то, какие имена в нём
-    интересны."""
+    """Shared part for OOXML (media/, */embeddings/) and ODF (Pictures/):
+    both containers are plain ZIP; only the interesting names differ."""
     out = []
     try:
         zf = zipfile.ZipFile(path)
     except (zipfile.BadZipFile, OSError) as exc:
-        rep.err("рекурсия: %s-контейнер повторно не открылся: %s" % (kind_label, exc))
+        rep.err(tr("recursion: %s container failed to reopen: %s") % (kind_label, exc))
         return out
     with zf:
         idx = 0
@@ -311,18 +308,18 @@ def _extract_zip_children(rep, path, tmpdir, budget, match, kind_label):
             if scanned >= MAX_ZIP_SCAN:
                 break
             name = info.filename
-            # Запись-каталог («word/media/») -- не вложенный объект: её пустое
-            # тело давало ошибку «файл пустой», и чистота файла не доказывалась никогда.
+            # A directory entry ("word/media/") is not an embedded object: its empty
+            # body produced a "file is empty" error, and the file could never be proven clean.
             if name.endswith("/") or not match(name):
                 continue
             cap = _reserve(budget)
             if cap is None:
-                rep.err("рекурсия: бюджет вложенных объектов исчерпан в %s, "
-                        "часть вложений не инспектирована" % kind_label)
+                rep.err(tr("recursion: embedded-object budget exhausted in %s; some embedded "
+                           "items were not inspected") % kind_label)
                 break
             data = _zip_entry_bytes(zf, info, cap)
             if data is None:
-                rep.err("рекурсия: %s больше лимита %d МБ, пропущен" % (name, cap // 1048576))
+                rep.err(tr("recursion: %s exceeds the %d MB limit, skipped") % (name, cap // 1048576))
                 continue
             idx += 1
             budget["objects"] += 1
@@ -335,9 +332,9 @@ def _extract_zip_children(rep, path, tmpdir, budget, match, kind_label):
 
 
 def _pdf_walk_names(node, out, depth, seen, calls):
-    """Обход /Names-дерева /EmbeddedFiles. Глубина и посещённые objgen
-    ограничены так же, как в insp_pdf._walk_name_tree -- /Kids может по кругу
-    ссылаться на один и тот же узел (DAG-бомба), не только вглубь."""
+    """Walk the /EmbeddedFiles /Names tree. Depth and visited objgens are
+    bounded as in insp_pdf._walk_name_tree: /Kids can point back to the same
+    node in a loop (a DAG bomb), not just deeper."""
     if depth > 8 or calls[0] <= 0 or len(out) >= MAX_RECURSE_OBJECTS:
         return
     calls[0] -= 1
@@ -364,17 +361,17 @@ def _pdf_walk_names(node, out, depth, seen, calls):
 
 
 def _extract_pdf_children(rep, path, tmpdir, budget):
-    """Вложенные файлы PDF: /Names /EmbeddedFiles. insp_pdf уже перечисляет
-    их имена и метаданные, но не сами байты -- байты нужны диспетчеру, чтобы
-    прогнать вложение соответствующим инспектором, поэтому дерево имён
-    приходится обходить второй раз, здесь."""
+    """PDF embedded files: /Names /EmbeddedFiles. insp_pdf already lists their
+    names and metadata, but not the bytes; the dispatcher needs the bytes to
+    run the attachment through the matching inspector, so the name tree has
+    to be walked a second time, here."""
     out = []
-    import pikepdf  # уже обязательная зависимость инспектора PDF
+    import pikepdf  # already a required dependency of the PDF inspector
 
     try:
         pdf = pikepdf.open(path)
     except Exception as exc:
-        rep.err("рекурсия: PDF повторно не открылся: %s" % exc)
+        rep.err(tr("recursion: the PDF failed to reopen: %s") % exc)
         return out
     idx = 0
     try:
@@ -391,27 +388,27 @@ def _extract_pdf_children(rep, path, tmpdir, budget):
             for label, spec in found:
                 cap = _reserve(budget)
                 if cap is None:
-                    rep.err("рекурсия: бюджет вложенных объектов исчерпан в PDF, "
-                            "часть вложений не инспектирована")
+                    rep.err(tr("recursion: embedded-object budget exhausted in the PDF; some "
+                               "attachments were not inspected"))
                     break
                 try:
                     ef = spec.get("/EF")
                     stream = (ef.get("/F") or ef.get("/UF")) if ef is not None else None
                     if stream is None:
                         continue
-                    # сначала сырой (сжатый) размер -- та же защита от бомбы,
-                    # что и в insp_pdf._stream_text, до полной распаковки.
+                    # check the raw (compressed) size first: the same bomb protection
+                    # as in insp_pdf._stream_text, before full decompression.
                     if len(stream.read_raw_bytes()) > cap:
-                        rep.err("рекурсия: вложение PDF %r больше лимита %d МБ, пропущено"
+                        rep.err(tr("recursion: PDF attachment %r exceeds the %d MB limit, skipped")
                                 % (label, cap // 1048576))
                         continue
                     data = stream.read_bytes()
                     if len(data) > cap:
-                        rep.err("рекурсия: вложение PDF %r распаковалось больше лимита "
-                                "%d МБ, пропущено" % (label, cap // 1048576))
+                        rep.err(tr("recursion: PDF attachment %r decompressed beyond the %d MB "
+                                   "limit, skipped") % (label, cap // 1048576))
                         continue
                 except Exception as exc:
-                    rep.err("рекурсия: вложение PDF %r не читается: %s" % (label, exc))
+                    rep.err(tr("recursion: PDF attachment %r can't be read: %s") % (label, exc))
                     continue
                 idx += 1
                 budget["objects"] += 1
@@ -419,15 +416,15 @@ def _extract_pdf_children(rep, path, tmpdir, budget):
                 dest = _write_tmp(tmpdir, idx, label or ("attach%d" % idx))
                 with open(dest, "wb") as fh:
                     fh.write(data)
-                out.append((label or "вложение %d" % idx, dest))
+                out.append((label or tr("attachment %d") % idx, dest))
     except Exception as exc:
-        rep.err("рекурсия: обход вложений PDF прерван: %s" % exc)
+        rep.err(tr("recursion: walking PDF attachments was interrupted: %s") % exc)
     return out
 
 
 def _merge(rep, child_rep, label):
-    """Влить находки вложенного отчёта в основной, добавив к location
-    префикс с именем части: "word/media/image1.jpeg > APP1:Exif"."""
+    """Merge the findings of an embedded report into the main one, prefixing
+    the location with the part name: "word/media/image1.jpeg > APP1:Exif"."""
     for f in child_rep.findings:
         loc = "%s > %s" % (label, f.location) if f.location else label
         rep.add(f.risk, loc, f.label, f.value, f.note, f.removable)
@@ -465,24 +462,24 @@ def _recurse_into(rep, path, fam, fmt, prefix, depth, budget, tmpdir):
             _merge(rep, child_rep, label)
             if depth < MAX_RECURSE_DEPTH:
                 _recurse_into(rep, child_path, child_fam, child_fmt, label, depth + 1, budget, tmpdir)
-        except Exception as exc:  # noqa: BLE001 -- один вложенный объект не должен ронять остальные
-            rep.err("%s: рекурсивная инспекция вложения упала: %s: %s" % (label, type(exc).__name__, exc))
+        except Exception as exc:  # noqa: BLE001 -- one embedded object must not take down the rest
+            rep.err(tr("%s: recursive inspection of the attachment crashed: %s: %s") % (label, type(exc).__name__, exc))
 
 
 # ============================================================================
-#  Публичная точка входа
+#  Public entry point
 # ============================================================================
 
 
 def inspect_file(path, max_size=None) -> Report:
-    """Полная read-only инспекция одного файла. Никогда не бросает исключение
-    -- это единственная функция, которую дёргает бот, и падать ей нельзя
-    ни на каком входе.
+    """Full read-only inspection of one file. Never raises: this is the only
+    function the bot calls, and it must not crash on any input.
 
-    max_size -- если задан и файл больше, инспекция не запускается вовсе
-    (даже сигнатура не разбирается вложенных объектов): отчёт получает только
-    размер и запись в errors. Это защита бота от разбора гигантских вложений,
-    а не бомб внутри маленького файла -- от тех защищает рекурсия ниже.
+    max_size: if set and the file is larger, inspection doesn't run at all
+    (not even the signature or embedded objects are parsed): the report gets
+    only the size and an entry in errors. This protects the bot from parsing
+    huge uploads, not from bombs inside a small file; recursion below guards
+    against those.
     """
     path = str(path)
     try:
@@ -496,8 +493,8 @@ def inspect_file(path, max_size=None) -> Report:
 
     if max_size is not None and size > max_size:
         rep = Report(path=path, fmt=fmt, size=size)
-        rep.err("файл больше лимита %d байт (фактический размер %d байт), "
-                "инспекция не выполнена" % (max_size, size))
+        rep.err(tr("the file exceeds the %d-byte limit (actual size %d bytes); inspection was "
+                   "not run") % (max_size, size))
         return rep
 
     fam = sniff.family(fmt)
@@ -505,12 +502,12 @@ def inspect_file(path, max_size=None) -> Report:
 
     tmpdir = None
     try:
-        # mkdtemp тоже внутри try: нет места или прав на %TEMP% -- это запись в
-        # errors, а не исключение из функции, которая не имеет права бросать.
+        # mkdtemp is inside the try too: no space or permissions in %TEMP% is an
+        # entry in errors, not an exception from a function that must never raise.
         tmpdir = tempfile.mkdtemp(prefix="inspect_")
         _recurse_into(rep, path, fam, fmt, "", 1, {"objects": 0, "bytes": 0}, tmpdir)
-    except Exception as exc:  # noqa: BLE001 -- рекурсия не должна ронять основной отчёт
-        rep.err("рекурсивная инспекция вложений упала целиком: %s: %s" % (type(exc).__name__, exc))
+    except Exception as exc:  # noqa: BLE001 -- recursion must not take down the main report
+        rep.err(tr("recursive inspection of embedded items crashed entirely: %s: %s") % (type(exc).__name__, exc))
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -523,8 +520,8 @@ def inspect_file(path, max_size=None) -> Report:
 
 
 def _json_default(obj):
-    """Risk -- str-Enum, json уже умеет его как строку; это на случай, если
-    когда-нибудь в отчёт попадёт что-то ещё, чего json нативно не понимает."""
+    """Risk is a str Enum, json already handles it as a string; this is in case
+    something else json doesn't understand natively ever ends up in a report."""
     if isinstance(obj, Enum):
         return obj.value
     return str(obj)
@@ -536,12 +533,12 @@ def _to_json(report) -> str:
 
 
 def _selftest():
-    """Самопроверка диспетчера: маршрутизация по формату, минимальные
-    инспекторы, рекурсия и то, что диспетчер не падает на битом входе.
-    Не заменяет прогон на реальном файле из задания -- дополняет его."""
+    """Dispatcher self-test: routing by format, the minimal inspectors,
+    recursion, and that the dispatcher doesn't crash on broken input.
+    Doesn't replace a run on a real file; it complements one."""
     tmp = tempfile.mkdtemp(prefix="inspect_selftest_")
     try:
-        # 1. Неопознанный формат: не падает, размер известен, есть errors.
+        # 1. Unrecognized format: no crash, size known, errors present.
         junk_data = b"\x01\x02\x03garbage\x00\xff" * 10
         junk = os.path.join(tmp, "junk.bin")
         with open(junk, "wb") as fh:
@@ -551,17 +548,17 @@ def _selftest():
         assert rep.size == len(junk_data), rep.size
         assert rep.errors
 
-        # 2. Текст: BOM + CRLF.
+        # 2. Text: BOM + CRLF.
         txt = os.path.join(tmp, "notes.txt")
         with open(txt, "wb") as fh:
             fh.write(b"\xef\xbb\xbfline1\r\nline2\r\n")
         rep = inspect_file(txt)
         assert rep.fmt == "text", rep.fmt
         values = {f.label: f.value for f in rep.findings}
-        assert values.get("Метка порядка байт") == "UTF-8 BOM", values
-        assert "CRLF" in values.get("Стиль переводов строк", ""), values
+        assert values.get("Byte order mark") == "UTF-8 BOM", values
+        assert "CRLF" in values.get("Line-ending style", ""), values
 
-        # 3. ZIP общего вида: запись и её таймстемп попадают в отчёт.
+        # 3. Generic ZIP: the entry and its timestamp make it into the report.
         zpath = os.path.join(tmp, "arch.zip")
         with zipfile.ZipFile(zpath, "w") as zf:
             zf.writestr("readme.txt", b"hello")
@@ -569,12 +566,12 @@ def _selftest():
         assert rep.fmt == "zip", rep.fmt
         assert any(f.location == "readme.txt" for f in rep.findings), rep.findings
 
-        # 4. max_size обрывает инспекцию до разбора содержимого.
+        # 4. max_size stops inspection before the content is parsed.
         rep = inspect_file(zpath, max_size=1)
         assert rep.errors and not rep.findings, rep
 
-        # 5. Рекурсия: картинка в word/media/ вливается в отчёт docx
-        #    отдельным вложенным объектом (part).
+        # 5. Recursion: an image in word/media/ is merged into the docx report
+        #    as a separate embedded object (part).
         docx = os.path.join(tmp, "sample.docx")
         with zipfile.ZipFile(docx, "w") as zf:
             zf.writestr("[Content_Types].xml", "<Types xmlns='x'/>")
@@ -584,23 +581,23 @@ def _selftest():
         assert rep.fmt == "docx", rep.fmt
         assert any(p["name"] == "word/media/image1.png" for p in rep.parts), rep.parts
 
-        # 6. Файл с ZIP-сигнатурой, но битым содержимым -- диспетчер не падает.
+        # 6. A file with a ZIP signature but broken content: the dispatcher doesn't crash.
         broken = os.path.join(tmp, "broken.docx")
         with open(broken, "wb") as fh:
             fh.write(b"PK\x03\x04" + os.urandom(64))
         rep = inspect_file(broken)
         assert isinstance(rep, Report)
 
-        # 7. Пустой файл: не "формат не опознан", а "пустой".
+        # 7. Empty file: not "unrecognized format" but "empty".
         empty = os.path.join(tmp, "empty.docx")
         open(empty, "wb").close()
         rep = inspect_file(empty)
         assert rep.fmt == "unknown" and rep.size == 0, (rep.fmt, rep.size)
-        assert any("пустой" in e for e in rep.errors), rep.errors
+        assert any("empty" in e for e in rep.errors), rep.errors
 
-        # 8. Файл не открывается: каждая причина -- своё сообщение, без пути
-        #    и без ложного "формат не опознан". Настоящих плейсхолдеров в CI нет,
-        #    поэтому подменяем швы sniff: чтение головы и атрибуты Windows.
+        # 8. The file won't open: each reason gets its own message, with no path
+        #    and no false "unrecognized format". CI has no real placeholders,
+        #    so the sniff seams are patched: head reading and Windows attributes.
         real = os.path.join(tmp, "doc.bin")
         with open(real, "wb") as fh:
             fh.write(b"x" * 321)
@@ -618,39 +615,39 @@ def _selftest():
             assert rep.fmt == "unreadable", rep.fmt
             text = " | ".join(rep.errors)
             assert want in text, (want, text)
-            assert "не опознан" not in text, text
-            assert tmp not in text and "doc.bin" not in text, text   # путь не утёк
+            assert "not recognized" not in text, text
+            assert tmp not in text and "doc.bin" not in text, text   # the path didn't leak
             return rep
 
-        rep = _case(OSError(22, "Invalid argument"), 0x00400020, "плейсхолдер")
+        rep = _case(OSError(22, "Invalid argument"), 0x00400020, "placeholder")
         assert rep.size == 321, rep.size
         assert "Always keep on this device" in rep.errors[0]
-        _case(OSError(22, "x"), 0x00040000, "плейсхолдер")       # RECALL_ON_OPEN
-        _case(OSError(22, "x"), 0x00001020, "плейсхолдер")       # OFFLINE
-        _case(OSError(22, "x"), 0x00000420, "reparse point")     # одна ссылка -- не облако
-        _case(OSError(22, "x"), 0x20, "errno 22")                # атрибуты есть, облака нет
-        _case(OSError(22, "x"), None, "errno 22")                # не Windows / вызов не удался
-        _case(PermissionError(13, "x"), 0x20, "нет доступа на чтение")
-        _case(FileNotFoundError(2, "x"), None, "не найден")
-        rep = inspect_file(os.path.join(tmp, "нет_такого.docx"))   # по-настоящему
-        assert rep.fmt == "unreadable" and any("не найден" in e for e in rep.errors), rep.errors
-        rep = inspect_file(tmp)                                      # каталог
-        assert rep.fmt == "unreadable" and any("каталог" in e for e in rep.errors), rep.errors
+        _case(OSError(22, "x"), 0x00040000, "placeholder")       # RECALL_ON_OPEN
+        _case(OSError(22, "x"), 0x00001020, "placeholder")       # OFFLINE
+        _case(OSError(22, "x"), 0x00000420, "reparse point")     # a lone link isn't the cloud
+        _case(OSError(22, "x"), 0x20, "errno 22")                # attributes present, no cloud
+        _case(OSError(22, "x"), None, "errno 22")                # not Windows / the call failed
+        _case(PermissionError(13, "x"), 0x20, "no read access")
+        _case(FileNotFoundError(2, "x"), None, "not found")
+        rep = inspect_file(os.path.join(tmp, "no_such_file.docx"))   # for real
+        assert rep.fmt == "unreadable" and any("not found" in e for e in rep.errors), rep.errors
+        rep = inspect_file(tmp)                                      # directory
+        assert rep.fmt == "unreadable" and any("directory" in e for e in rep.errors), rep.errors
 
-        # 9. sniff на нечитаемом не бросает и не путает с 'unknown'.
-        assert sniff.sniff(os.path.join(tmp, "нет_такого.docx")) == "unreadable"
+        # 9. sniff on an unreadable file doesn't raise and isn't confused with 'unknown'.
+        assert sniff.sniff(os.path.join(tmp, "no_such_file.docx")) == "unreadable"
         assert sniff.sniff("bad" + chr(0) + "path") == "unreadable"
         assert sniff.unreadable_reason("bad" + chr(0) + "path") == ("other", None)
 
-        print("OK: самопроверка диспетчера пройдена")
+        print("OK: dispatcher self-test passed")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main(argv=None) -> int:
-    # Консоль Windows по умолчанию cp866/cp1251 -- кириллический отчёт на ней
-    # падает с UnicodeEncodeError. Перекодируем поток вывода прямо тут, до
-    # первой печати.
+    # The Windows console defaults to cp866/cp1251, and a report with non-ASCII
+    # text crashes on it with UnicodeEncodeError. Re-encode the output stream
+    # right here, before the first print.
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -659,26 +656,26 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="python -m core.inspect",
-        description="Инспекция метаданных документа (read-only, фаза 0).")
-    parser.add_argument("files", nargs="*", help="путь(и) к файлу(ам)")
-    parser.add_argument("--json", action="store_true", help="вывести отчёт в JSON")
-    parser.add_argument("--quiet", action="store_true", help="вывести только сводную строку")
+        description="Document metadata inspection (read-only, phase 0).")
+    parser.add_argument("files", nargs="*", help="path(s) to file(s)")
+    parser.add_argument("--json", action="store_true", help="print the report as JSON")
+    parser.add_argument("--quiet", action="store_true", help="print only the summary line")
     parser.add_argument("--selftest", action="store_true",
-                        help="самопроверка диспетчера без входных файлов")
+                        help="dispatcher self-test without input files")
     args = parser.parse_args(argv)
 
     if args.selftest:
         _selftest()
         return 0
     if not args.files:
-        parser.error("нужен хотя бы один файл (или --selftest)")
+        parser.error("at least one file is required (or --selftest)")
 
     exit_code = 0
     for path in args.files:
         try:
             report = inspect_file(path)
-        except Exception as exc:  # noqa: BLE001 -- CLI не должен падать даже если контракт нарушен
-            print("Не удалось инспектировать %r: %s: %s" % (path, type(exc).__name__, exc))
+        except Exception as exc:  # noqa: BLE001 -- the CLI must not crash even if the contract is broken
+            print("Could not inspect %r: %s: %s" % (path, type(exc).__name__, exc))
             exit_code = 1
             continue
         if args.json:

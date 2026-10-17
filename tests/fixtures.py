@@ -1,33 +1,33 @@
 # -*- coding: utf-8 -*-
-"""Синтетические файлы с ЗАРАНЕЕ ИЗВЕСТНЫМИ метаданными для self-теста инспекторов.
+"""Synthetic files with metadata KNOWN IN ADVANCE for the inspector self-test.
 
-Каждая функция make_*(dir) кладёт файл в каталог dir и возвращает
-(путь, expected) -- словарь expected описывает, что должен найти инспектор,
-чтобы test_inspect.py мог сверить факт разбора с тем, что на самом деле лежит
-в файле, а не поверить на слово самому инспектору.
+Each make_*(dir) function puts a file into dir and returns (path, expected):
+the expected dict describes what the inspector must find, so test_inspect.py
+can compare what was actually parsed with what really sits in the file,
+instead of taking the inspector's word for it.
 
-Формат словаря expected (поля опциональны, кладём только то, что относится
-к конкретной фикстуре):
-    values       -- подстроки, которые обязаны встретиться хоть в одной
-                    Finding.value отчёта (сам факт, что значение извлечено).
-    identity     -- подстроки, которые обязаны встретиться в значении
-                    находки именно с риском IDENTITY.
-    environment  -- то же для риска ENVIRONMENT.
-    signals      -- kind-ы Signal, которые обязаны появиться хоть раз.
-    not_signals  -- kind-ы, которых быть НЕ должно (защита от ложных срабатываний).
-    gps          -- (широта, долгота) десятичные, если в файле заложены GPS.
+The expected dict format (fields are optional, we only put in what applies
+to a given fixture):
+    values       -- substrings that must occur in at least one
+                    Finding.value of the report (the fact that the value was extracted).
+    identity     -- substrings that must occur in the value of a finding
+                    with the IDENTITY risk specifically.
+    environment  -- the same for the ENVIRONMENT risk.
+    signals      -- Signal kinds that must show up at least once.
+    not_signals  -- kinds that must NOT be present (false positive guard).
+    gps          -- (latitude, longitude) in decimal, if the file has GPS planted.
 
-Только у OLE2-фикстур (make_doc / make_doc_active / make_xls / make_ppt):
-    ole_meta           -- что обязан вернуть olefile.get_metadata(): строки
-                          bytes в cp1251, даты datetime, total_edit_time в секундах.
-    streams            -- имена потоков верхнего уровня.
-    userdef            -- пользовательские свойства {имя: значение}, все IDENTITY.
-    unremovable_labels -- label находок, которые обязаны быть removable=False.
-    root_mtime         -- значение находки "Время изменения контейнера".
+Only for the OLE2 fixtures (make_doc / make_doc_active / make_xls / make_ppt):
+    ole_meta           -- what olefile.get_metadata() must return: strings as
+                          bytes in cp1251, dates as datetime, total_edit_time in seconds.
+    streams            -- names of the top-level streams.
+    userdef            -- custom properties {name: value}, all IDENTITY.
+    unremovable_labels -- labels of findings that must be removable=False.
+    root_mtime         -- the value of the "Container modification time" finding.
 
-Только stdlib + pikepdf (тот же набор зависимостей, что у самих инспекторов).
-Все строки-находки -- по-русски, чтобы фикстуры естественно проверяли и
-кириллицу, и экранирование HTML при рендере.
+Only stdlib + pikepdf (the same dependency set as the inspectors themselves).
+All planted values are in Russian, so the fixtures naturally exercise both
+Cyrillic and HTML escaping in rendering.
 """
 
 from __future__ import annotations
@@ -45,12 +45,12 @@ import pikepdf
 
 
 # ===========================================================================
-# мелкие помощники
+# small helpers
 # ===========================================================================
 
 
 def _write_zip(path, parts, date_time):
-    """parts -- список (имя, содержимое). Содержимое str кодируется в utf-8."""
+    """parts is a list of (name, content). A str content is encoded as utf-8."""
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, body in parts:
             if isinstance(body, str):
@@ -66,10 +66,10 @@ def _png_chunk(ctype, body):
 
 
 def _tiff_ifd(tags, base, next_off=0):
-    """Собрать один IFD. tags -- [(tag, type, count, raw_bytes), ...].
+    """Build one IFD. tags is [(tag, type, count, raw_bytes), ...].
 
-    Значения длиннее 4 байт уезжают в область данных сразу за самим IFD;
-    base -- абсолютное смещение начала этого IFD в TIFF-потоке.
+    Values longer than 4 bytes go to the data area right after the IFD itself;
+    base is the absolute offset of this IFD's start in the TIFF stream.
     """
     ifd_len = 2 + 12 * len(tags) + 4
     body, blob = struct.pack("<H", len(tags)), b""
@@ -92,9 +92,9 @@ def _pad(blob):
 
 
 def _pdf_text_literal(text):
-    """Строка PDF: ASCII -- как "(...)" литерал, иначе -- hex-строка
-    "<FEFF...>" в UTF-16BE с BOM (это и пишет pikepdf для не-latin1 текста,
-    см. docinfo round-trip в make_pdf)."""
+    """A PDF string: ASCII as a "(...)" literal, otherwise a "<FEFF...>" hex string
+    in UTF-16BE with a BOM (that's what pikepdf writes for non-latin1 text, see
+    the docinfo round-trip in make_pdf)."""
     try:
         raw = text.encode("ascii")
         esc = raw.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)")
@@ -141,10 +141,10 @@ _RELS_ROOT_DOCX = (
 
 
 def make_docx(dir):
-    """.docx с реальными (не 1980-01-01) таймстемпами ZIP -- должен триггерить
-    сигнал о библиотечной генерации ("ai"/"inconsistent"), и набором классических
-    утечек: email в MSIP_Label, ФИО в Company/core.xml, абсолютный путь к
-    шаблону, email в w15:presenceInfo, XSS-подобное значение в dc:title.
+    """A .docx with real (not 1980-01-01) ZIP timestamps: it must trigger the
+    library-generation signal ("ai"/"inconsistent"), plus a set of classic
+    leaks: an email in MSIP_Label, a full name in Company/core.xml, an absolute
+    template path, an email in w15:presenceInfo, an XSS-like value in dc:title.
     """
     path = os.path.join(dir, "leaky.docx")
 
@@ -224,7 +224,7 @@ def make_docx(dir):
         ("word/_rels/settings.xml.rels", settings_rels),
         ("word/people.xml", people_xml),
     ]
-    # Реальное время (не 1980-01-01) -- именно это выдаёт пересборку библиотекой.
+    # Real time (not 1980-01-01) is exactly what gives away a library rebuild.
     now = datetime.datetime.now().timetuple()[:6]
     _write_zip(path, parts, now)
 
@@ -242,8 +242,8 @@ def make_docx(dir):
 
 
 def make_docx_wordlike(dir):
-    """.docx с таймстемпами 1980-01-01 и ПОЛНЫМ набором частей Word (+ rsid) --
-    контроль того, что сигнал "ai" НЕ срабатывает ложно на обычном файле.
+    """A .docx with 1980-01-01 timestamps and the FULL set of Word parts (+ rsid):
+    a control that the "ai" signal does NOT fire falsely on an ordinary file.
     """
     path = os.path.join(dir, "wordlike.docx")
 
@@ -320,8 +320,8 @@ XLSX_CONN_STR = "SERVER=sql01.corp.local;DATABASE=erp;UID=ivanov"
 
 
 def make_xlsx(dir):
-    """.xlsx: fileVersion с rupBuild, скрытый лист, pivotCache.refreshedBy и
-    строка подключения в connections.xml."""
+    """.xlsx: fileVersion with rupBuild, a hidden sheet, pivotCache.refreshedBy and
+    a connection string in connections.xml."""
     path = os.path.join(dir, "book.xlsx")
 
     content_types = (
@@ -387,33 +387,35 @@ PPTX_CREATOR = "\u0421\u0432\u0435\u0442\u043b\u0430\u043d\u0430 \u041e\u0440\u0
 PPTX_LASTBY = "s.orlova@vector-ao.ru"
 PPTX_COMPANY = "\u0410\u041e \u0412\u0435\u043a\u0442\u043e\u0440"
 PPTX_CM_AUTHOR = "\u0413\u0440\u043e\u043c\u043e\u0432 \u0414.\u0410."
-# Имя принтера из DEVMODE: 32 WCHAR в UTF-16LE в начале структуры. Здесь оно
-# несёт номер кабинета -- то, из-за чего это поле и попало в METADATA.md.
+# The printer name from DEVMODE: 32 WCHARs in UTF-16LE at the start of the
+# structure. Here it carries an office room number, which is why this field
+# made it into METADATA.md.
 PPTX_PRINTER = "Xerox WC7845 (KAB-312)"
 PPTX_FORM = "A4"
 PPTX_PAPER_CODE = 9                      # dmPaperSize: DMPAPER_A4
 PPTX_PRINT_UNC = "\\\\PRINTSRV01\\WC7845-BUH"
 
-# Смещения в DEVMODEW -- структура фиксированная, см. core/insp_ooxml.py.
+# Offsets in DEVMODEW: the structure is fixed, see core/insp_ooxml.py.
 _DM_SIZE = 220
 
 
 def _wchar32(text):
-    """Поле WCHAR[32]: UTF-16LE с добивкой нулями до 64 байт."""
+    """A WCHAR[32] field: UTF-16LE padded with zeros to 64 bytes."""
     blob = text.encode("utf-16le")
     if len(blob) > 64:
-        raise ValueError("%r длиннее 32 WCHAR" % text)
+        raise ValueError("%r is longer than 32 WCHARs" % text)
     return blob + b"\x00" * (64 - len(blob))
 
 
 def _devmode(device_name, form_name=PPTX_FORM, paper=PPTX_PAPER_CODE,
              tail_unc=PPTX_PRINT_UNC):
-    """Правдоподобный DEVMODEW плюс приватный хвост драйвера.
+    """A plausible DEVMODEW plus the driver's private tail.
 
-    Заполнены именно те поля, которые разбирает инспектор: dmDeviceName (0),
-    dmSize (68), dmDriverExtra (70), dmPaperSize (78), dmFormName (102).
-    Хвост после структуры несёт UNC-путь к серверу печати в UTF-16LE -- так его
-    и пишут драйверы, и именно поэтому хвост нельзя считать безобидным мусором.
+    Exactly the fields the inspector parses are filled in: dmDeviceName (0),
+    dmSize (68), dmDriverExtra (70), dmPaperSize (78), dmFormName (102). The
+    tail after the structure carries the UNC path to the print server in
+    UTF-16LE: that's how drivers write it, and that's exactly why the tail can't
+    be treated as harmless garbage.
     """
     tail = b"\x00\x00" + tail_unc.encode("utf-16le") + b"\x00\x00"
     dm = bytearray(_DM_SIZE)
@@ -431,13 +433,14 @@ def _devmode(device_name, form_name=PPTX_FORM, paper=PPTX_PAPER_CODE,
 
 
 def make_pptx(dir):
-    """.pptx: автор и email в core.xml, Company и TitlesOfParts в app.xml,
-    автор комментария в ppt/commentAuthors.xml, ИМЯ ПРИНТЕРА в DEVMODE и превью.
+    """.pptx: author and email in core.xml, Company and TitlesOfParts in app.xml,
+    a comment author in ppt/commentAuthors.xml, the PRINTER NAME in DEVMODE and a
+    thumbnail.
 
-    Единственная фикстура с printerSettings*.bin. До её появления проверки вида
-    «имя принтера не осталось» проходили ВАКУУМНО: ни в одном docx/xlsx этой
-    части не было. Таймстемпы 1980-01-01 и Application=PowerPoint согласованы
-    между собой -- это пакет, похожий на настоящий, а не на библиотечный.
+    The only fixture with printerSettings*.bin. Before it existed, checks like
+    "no printer name is left" passed VACUOUSLY: no docx/xlsx had this part. The
+    1980-01-01 timestamps and Application=PowerPoint agree with each other: this
+    is a package that looks real, not library-made.
     """
     path = os.path.join(dir, "deck.pptx")
 
@@ -489,8 +492,8 @@ def make_pptx(dir):
         '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
         '<p:cSld><p:spTree/></p:cSld></p:sld>'
     )
-    # ppt/commentAuthors.xml -- площадка IDENTITY, специфичная для PowerPoint:
-    # у Word авторы комментариев лежат совсем в других частях.
+    # ppt/commentAuthors.xml is an IDENTITY spot specific to PowerPoint: in Word,
+    # comment authors live in entirely different parts.
     comment_authors = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
@@ -516,11 +519,12 @@ def make_pptx(dir):
                    PPTX_PRINTER, PPTX_PRINT_UNC],
         "identity": [PPTX_CREATOR, PPTX_LASTBY, PPTX_CM_AUTHOR],
         "environment": [PPTX_PRINTER, PPTX_PRINT_UNC],
-        # dating -- регион по формату бумаги (A4 => не Северная Америка).
+        # dating: the region from the paper format (A4 => not North America).
         "signals": ["producer", "dating"],
-        # Пакет согласован сам с собой: таймстемпы 1980-01-01 при
-        # Application=PowerPoint, автор заполнен. Ни «собрано библиотекой», ни
-        # «уже чистили», ни «метаданные противоречат» здесь взяться не может.
+        # The package agrees with itself: 1980-01-01 timestamps with
+        # Application=PowerPoint, the author is filled in. Neither "built by a
+        # library", nor "already cleaned", nor "the metadata contradicts itself" can
+        # come up here.
         "not_signals": ["ai", "scrubbed", "inconsistent"],
     }
     return path, expected
@@ -539,13 +543,13 @@ PDF_MOD_DATE = "D:20230102000000Z"
 
 
 def make_pdf(dir):
-    """PDF через pikepdf.new(): /Info (Author/Creator/Producer/даты) + XMP
-    с постоянным xmpMM:DocumentID."""
+    """A PDF via pikepdf.new(): /Info (Author/Creator/Producer/dates) + XMP with a
+    persistent xmpMM:DocumentID."""
     path = os.path.join(dir, "probe.pdf")
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(200, 200))
-    # set_pikepdf_as_editor=False -- иначе выход из контекста переписывает
-    # /Producer и pdf:Producer сигнатурой самого pikepdf, затирая наш.
+    # set_pikepdf_as_editor=False: otherwise leaving the context rewrites
+    # /Producer and pdf:Producer with pikepdf's own signature, overwriting ours.
     with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
         meta["xmpMM:DocumentID"] = PDF_DOCUMENT_ID
         meta["dc:creator"] = [PDF_AUTHOR]
@@ -571,19 +575,19 @@ PDF_INCR_NEW_AUTHOR = "\u0421\u043a\u0440\u044b\u0442\u044b\u0439 \u0410\u0432\u
 
 
 def make_pdf_incremental(dir):
-    """PDF с инкрементальным апдейтом.
+    """A PDF with an incremental update.
 
-    pikepdf.save() всегда делает полный рерайт (единый свежий xref), поэтому
-    настоящий инкрементальный апдейт через него не получить -- библиотека
-    просто не умеет дописывать ревизию, только пересохранять целиком.
-    Способ: взять валидный PDF, сделанный pikepdf (ревизия 1), и склеить
-    вручную байт-в-байт вторую ревизию -- новое тело объекта /Info (с другим
-    /Author и /ModDate) + новая xref-секция с /Prev, указывающим на offset
-    startxref первой ревизии, + второй startxref/%%EOF. Это ровно то, как
-    инкрементальные апдейты устроены в самом PDF (так их пишут Acrobat и
-    цифровая подпись), поэтому pikepdf/QPDF успешно открывает результат и
-    видит актуальную (вторую) ревизию, а сырой байтовый скан инспектора
-    видит обе.
+    pikepdf.save() always does a full rewrite (one fresh xref), so a real
+    incremental update can't be produced through it: the library simply can't
+    append a revision, only re-save everything.
+    The method: take a valid PDF made by pikepdf (revision 1) and glue on a
+    second revision by hand, byte for byte: a new body of the /Info object (with
+    a different /Author and /ModDate) + a new xref section with /Prev pointing
+    to the startxref offset of the first revision, + a second startxref/%%EOF.
+    That's exactly how incremental updates are laid out in PDF itself (Acrobat
+    and digital signatures write them this way), so pikepdf/QPDF opens the
+    result fine and sees the current (second) revision, while the inspector's
+    raw byte scan sees both.
     """
     base_path = os.path.join(dir, "incr_base.pdf")
     pdf = pikepdf.new()
@@ -598,9 +602,9 @@ def make_pdf_incremental(dir):
     m = re.search(rb"startxref\s+(\d+)\s*\r?\n%%EOF", data)
     prev_offset = int(m.group(1))
 
-    # /Info лежит в объекте 2 0 obj у pikepdf.new() + add_blank_page() без
-    # XMP -- проверено эмпирически на этой версии pikepdf; если раскладка
-    # вдруг другая, достанем номер из самого трейлера, не угадывая.
+    # /Info sits in object 2 0 obj with pikepdf.new() + add_blank_page() without
+    # XMP: verified empirically on this pikepdf version; if the layout ever
+    # differs, we take the number from the trailer itself instead of guessing.
     tm = re.search(rb"/Info\s+(\d+)\s+0\s+R", data)
     info_num = int(tm.group(1))
 
@@ -649,7 +653,7 @@ JPEG_LON = JPEG_LON_DEG + JPEG_LON_MIN / 60 + JPEG_LON_SEC / 3600
 
 def make_jpeg(dir):
     """JPEG: FFD8 + APP1/EXIF (Artist/Make/Model/Software/GPS/BodySerialNumber)
-    + минимальные DQT/SOS + FFD9."""
+    + minimal DQT/SOS + FFD9."""
     path = os.path.join(dir, "probe.jpg")
 
     artist = JPEG_ARTIST.encode("utf-8") + b"\x00"
@@ -714,7 +718,7 @@ PNG_TIME = (2024, 6, 15, 10, 30, 0)
 
 
 def make_png(dir):
-    """PNG: IHDR + tEXt(Software) + iTXt(сжатый XMP) + tIME + IDAT + IEND."""
+    """PNG: IHDR + tEXt(Software) + iTXt(compressed XMP) + tIME + IDAT + IEND."""
     path = os.path.join(dir, "probe.png")
 
     xmp_packet = (
@@ -759,15 +763,15 @@ RTF_LINK_PATH = "file:///C:/fixtures/secret_plan.xlsx"
 
 
 def _rtf_cp1251_escape(text):
-    """Кириллица как \\'XX-экранирование cp1251 -- так реально пишет RTF
-    редактор с \\ansicpg1251, а не UTF-8."""
+    """Cyrillic as \\'XX cp1251 escapes: that's how an RTF editor with
+    \\ansicpg1251 really writes it, not UTF-8."""
     raw = text.encode("cp1251")
     return "".join("\\'%02x" % b for b in raw)
 
 
 def make_rtf(dir):
-    """RTF с известными значениями в группе \\info + \\generator + \\template
-    + абсолютные пути в теле."""
+    """RTF with known values in the \\info group + \\generator + \\template
+    + absolute paths in the body."""
     path = os.path.join(dir, "probe.rtf")
 
     author_esc = _rtf_cp1251_escape(RTF_AUTHOR)
@@ -813,7 +817,7 @@ ODT_EDITING_DURATION = "PT1H30M0S"
 
 
 def make_odt(dir):
-    """ODT (ZIP с mimetype + meta.xml) с известными значениями в meta.xml."""
+    """ODT (a ZIP with mimetype + meta.xml) with known values in meta.xml."""
     path = os.path.join(dir, "probe.odt")
 
     meta_xml = (
@@ -865,15 +869,15 @@ def make_odt(dir):
 
 
 # ===========================================================================
-# OLE2 / CFBF: легаси .doc и .xls
+# OLE2 / CFBF: legacy .doc and .xls
 # ===========================================================================
 #
-# Контейнер собирается побайтово по MS-CFB (версия 3: сектор 512 байт,
-# мини-сектор 64, порог мини-потока 4096), свойства -- по MS-OLEPS. Писателя
-# CFBF в окружении нет (olefile умеет только читать), поэтому формат весь
-# здесь, руками. Смысл именно в том, чтобы olefile и inspect_ole() прошли
-# НАСТОЯЩИЙ путь разбора -- FAT, мини-FAT, дерево директории, property set --
-# а не заглушку, "достаточно похожую" на контейнер.
+# The container is assembled byte by byte per MS-CFB (version 3: 512-byte
+# sectors, 64-byte mini sectors, a 4096 mini stream cutoff), the properties
+# per MS-OLEPS. There's no CFBF writer in the environment (olefile can only
+# read), so the whole format is here, by hand. The point is that olefile and
+# inspect_ole() go through the REAL parsing path (FAT, mini FAT, directory
+# tree, property set), not a stub "close enough" to a container.
 
 _CFB_SIG = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _CFB_ENDOFCHAIN = 0xFFFFFFFE
@@ -891,7 +895,7 @@ _CLSID_EXCEL8 = "00020820-0000-0000-C000-000000000046"
 
 def _cfb_entry(name, kind, color, left, right, child, clsid=b"\x00" * 16,
                start=0, size=0, mtime=0):
-    """Одна 128-байтная запись директории. name -- str, кодируется UTF-16LE."""
+    """One 128-byte directory entry. name is a str, encoded as UTF-16LE."""
     raw = name.encode("utf-16-le")
     assert len(raw) <= 62, name
     return (raw.ljust(64, b"\x00")
@@ -902,13 +906,13 @@ def _cfb_entry(name, kind, color, left, right, child, clsid=b"\x00" * 16,
 
 
 def _cfb_tree(items):
-    """Сбалансированное дерево детей одного хранилища по порядку CFBF: сначала
-    длина имени, затем имя в верхнем регистре. items -- [(номер записи,
-    имя)]. Возвращает (номер корня поддерева, {номер: (left, right, color)}).
+    """A balanced tree of one storage's children in CFBF order: name length
+    first, then the upper-cased name. items is [(entry number, name)]. Returns
+    (subtree root number, {number: (left, right, color)}).
 
-    Цвет: всё чёрное, кроме неполного нижнего уровня -- он красный. Так
-    красно-чёрные инварианты (нет двух красных подряд, равная чёрная высота)
-    держатся без настоящей балансировки.
+    Color: everything is black except an incomplete bottom level, which is red.
+    That way the red-black invariants (no two reds in a row, equal black
+    height) hold without real balancing.
     """
     order = sorted(items, key=lambda it: (len(it[1]), it[1].upper()))
     links, depth = {}, {}
@@ -932,13 +936,14 @@ def _cfb_tree(items):
 
 
 def _cfb_build(streams, root_clsid=b"\x00" * 16, root_mtime=0):
-    """Собрать CFBF v3 из списка потоков [(путь, bytes)]. Путь -- имя потока в
-    корне (str) либо кортеж ("Хранилище", ..., "поток"); хранилища создаются
-    по префиксам путей.
+    """Build a CFBF v3 from a list of streams [(path, bytes)]. A path is a stream
+    name in the root (str) or a tuple ("Storage", ..., "stream"); storages are
+    created from the path prefixes.
 
-    Потоки короче 4096 байт уезжают в мини-поток (мини-FAT + контейнер в
-    обычных секторах), остальные -- в обычные сектора со своей цепочкой FAT.
-    Раскладка секторов: FAT, директория, мини-FAT, мини-поток, большие потоки.
+    Streams shorter than 4096 bytes go to the mini stream (mini FAT + a
+    container in regular sectors), the rest to regular sectors with their own
+    FAT chain. Sector layout: FAT, directory, mini FAT, mini stream, big
+    streams.
     """
     def sectors(n):
         return -(-n // 512)
@@ -950,7 +955,7 @@ def _cfb_build(streams, root_clsid=b"\x00" * 16, root_mtime=0):
         for k in range(1, len(path)):
             if path[:k] not in storages:
                 storages.append(path[:k])
-    nodes = storages + [p for p, _d in streams]        # запись номер i+1 -> nodes[i]
+    nodes = storages + [p for p, _d in streams]        # entry number i+1 -> nodes[i]
     sid_of = {path: i + 1 for i, path in enumerate(nodes)}
 
     mini_blob, mini_fat, start = b"", [], {}
@@ -971,7 +976,7 @@ def _cfb_build(streams, root_clsid=b"\x00" * 16, root_mtime=0):
     n_fat = 1
     while n_fat * 128 < rest + n_fat:
         n_fat += 1
-    assert n_fat <= 109            # DIFAT хватает заголовка, внешние секторы не нужны
+    assert n_fat <= 109            # the header is enough for DIFAT, no external sectors needed
 
     fat = [_CFB_FREESECT] * (n_fat * 128)
     fat[:n_fat] = [_CFB_FATSECT] * n_fat
@@ -1009,7 +1014,7 @@ def _cfb_build(streams, root_clsid=b"\x00" * 16, root_mtime=0):
             entries.append(_cfb_entry(path[-1], 2, color, left, right,
                                       _CFB_NOSTREAM, start=start[path],
                                       size=len(data_of[path])))
-        else:                                           # хранилище
+        else:                                           # storage
             entries.append(_cfb_entry(path[-1], 1, color, left, right,
                                       trees[path][0]))
     unalloc = _cfb_entry("", 0, 0, _CFB_NOSTREAM, _CFB_NOSTREAM, _CFB_NOSTREAM)
@@ -1030,7 +1035,7 @@ def _cfb_build(streams, root_clsid=b"\x00" * 16, root_mtime=0):
 
 
 def _filetime(dt):
-    """datetime (наивный, UTC) -> FILETIME: сотни наносекунд с 1601-01-01."""
+    """datetime (naive, UTC) -> FILETIME: hundreds of nanoseconds since 1601-01-01."""
     delta = dt - datetime.datetime(1601, 1, 1)
     return (delta.days * 86400 + delta.seconds) * 10_000_000 + delta.microseconds * 10
 
@@ -1057,8 +1062,8 @@ def _vt_filetime(ticks):
 
 
 def _ole_section(props):
-    """Секция property set: Size, NumProperties, таблица (PID, смещение от
-    начала секции), затем значения. props -- [(pid, готовое значение)]."""
+    """A property set section: Size, NumProperties, a table (PID, offset from the
+    start of the section), then the values. props is [(pid, ready value)]."""
     table_len = 8 + 8 * len(props)
     table, body = b"", b""
     for pid, raw in props:
@@ -1068,7 +1073,7 @@ def _ole_section(props):
 
 
 def _ole_propstream(*sections):
-    """Поток свойств: заголовок + таблица (FMTID, смещение) + секции."""
+    """A property stream: header + table (FMTID, offset) + sections."""
     head_len = 28 + 20 * len(sections)
     head = (struct.pack("<HHI", 0xFFFE, 0, 0x00020006) + b"\x00" * 16
             + struct.pack("<I", len(sections)))
@@ -1085,13 +1090,13 @@ def _vt_lpwstr(text):
 
 
 def _ole_userdef_section(items, codepage):
-    """Пользовательские свойства: PID 0 -- словарь (PID -> имя), PID 1 --
-    кодовая страница секции, значения с PID 2 и выше. Именно в таком порядке
-    строк таблицы: так их читает и olefile.
+    """Custom properties: PID 0 is the dictionary (PID -> name), PID 1 is the
+    section's code page, values from PID 2 up. Exactly in this table row order:
+    that's how olefile reads them too.
 
-    codepage == 1200 -- как пишет сам Office: имена UTF-16LE (длина в
-    СИМВОЛАХ, выравнивание на 4) и значения VT_LPWSTR. Любая другая -- имена и
-    значения однобайтовой кодировкой cp<N> (длина в байтах, без выравнивания).
+    codepage == 1200 is how Office itself writes it: UTF-16LE names (length in
+    CHARACTERS, aligned to 4) and VT_LPWSTR values. Any other one: names and
+    values in the single-byte cp<N> encoding (length in bytes, no alignment).
     """
     wide = codepage == 1200
     codec = "utf-16-le" if wide else "cp%d" % codepage
@@ -1107,7 +1112,7 @@ def _ole_userdef_section(items, codepage):
 
 
 def _ole_compobj(usertype, clipfmt, progid, clsid):
-    """Поток \\x01CompObj: заголовок 28 байт + три строки с префиксом длины."""
+    """The \\x01CompObj stream: a 28-byte header + three length-prefixed strings."""
     def lp(text):
         raw = text.encode("cp1252") + b"\x00"
         return struct.pack("<I", len(raw)) + raw
@@ -1130,7 +1135,8 @@ DOC_EDIT_SECONDS = DOC_EDIT_MINUTES * 60
 DOC_CREATE = datetime.datetime(2023, 3, 5, 14, 7, 0)
 DOC_LASTPRINTED = datetime.datetime(2024, 3, 6, 9, 30, 0)
 DOC_SAVED = datetime.datetime(2024, 3, 6, 9, 42, 11)
-# Время изменения корневой записи контейнера -- отдельное от дат в свойствах.
+# The modification time of the container's root entry, separate from the dates
+# in the properties.
 DOC_ROOT_MTIME = datetime.datetime(2024, 3, 6, 9, 43, 7)
 DOC_APPNAME = "Microsoft Office Word"
 DOC_CATEGORY = "Внутреннее"
@@ -1144,10 +1150,10 @@ DOC_LID = 0x0419
 
 
 def _ole_props_streams(user_items=(), user_codepage=1200):
-    """Потоки SummaryInformation и DocumentSummaryInformation с заложенными
-    значениями. Строки -- VT_LPSTR в cp1251, даты -- FILETIME, время правки --
-    FILETIME-длительность в сотнях наносекунд. user_items -- пользовательские
-    свойства второй секции DocumentSummaryInformation [(имя, значение)]."""
+    """SummaryInformation and DocumentSummaryInformation streams with planted
+    values. Strings are VT_LPSTR in cp1251, dates are FILETIME, the editing time
+    is a FILETIME duration in hundreds of nanoseconds. user_items are the custom
+    properties of the second DocumentSummaryInformation section [(name, value)]."""
     codec = "cp%d" % DOC_CODEPAGE
     summary = _ole_section([
         (1, _vt_i2(DOC_CODEPAGE)),
@@ -1181,8 +1187,8 @@ def _ole_props_streams(user_items=(), user_codepage=1200):
 
 
 def _doc_ole_meta():
-    """Что olefile.get_metadata() обязан отдать для make_doc (строки -- bytes
-    в cp1251, как их и возвращает olefile)."""
+    """What olefile.get_metadata() must return for make_doc (strings as bytes in
+    cp1251, the way olefile returns them)."""
     enc = lambda s: s.encode("cp%d" % DOC_CODEPAGE)
     return {
         "codepage": DOC_CODEPAGE,
@@ -1198,9 +1204,9 @@ def _doc_ole_meta():
 
 
 def _doc_sttb(names):
-    """Unicode-STTB, как его пишет Word 97+ в SttbfRMark: fExtend=0xFFFF,
-    число строк, cbExtra=0, затем длина и текст каждой в UTF-16LE.
-    Первой идёт служебная "Unknown" -- инспектор обязан её отбросить."""
+    """A Unicode STTB the way Word 97+ writes it in SttbfRMark: fExtend=0xFFFF,
+    the string count, cbExtra=0, then the length and text of each in UTF-16LE.
+    The service entry "Unknown" comes first: the inspector has to drop it."""
     blob = struct.pack("<HHH", 0xFFFF, len(names), 0)
     for name in names:
         blob += struct.pack("<H", len(name)) + name.encode("utf-16le")
@@ -1208,22 +1214,23 @@ def _doc_sttb(names):
 
 
 def _word_streams(user_items):
-    """Потоки обычного .doc: свойства (+ пользовательская секция user_items в
-    кодовой странице 1200, как пишет Office), CompObj, WordDocument и 1Table.
+    """The streams of an ordinary .doc: properties (+ the custom section user_items
+    in code page 1200, as Office writes it), CompObj, WordDocument and 1Table.
 
-    FIB: FibBase 32 байта -- wIdent, nFib, lid, flags (fComplex, cQuickSaves,
-    fWhichTblStm), затем csw/cslw/cbRgFcLcb и пара fcSttbfRMark (индекс 51),
-    указывающая на таблицу авторов в начале 1Table. WordDocument и 1Table лежат
-    в обычных секторах (4608 и ровно 4096 байт -- на самой границе мини-потока),
-    остальное -- в мини-потоке: так проходят обе ветки чтения.
+    FIB: a 32-byte FibBase (wIdent, nFib, lid, flags: fComplex, cQuickSaves,
+    fWhichTblStm), then csw/cslw/cbRgFcLcb and the fcSttbfRMark pair (index 51)
+    pointing to the author table at the start of 1Table. WordDocument and 1Table
+    sit in regular sectors (4608 and exactly 4096 bytes, right at the mini
+    stream cutoff), the rest in the mini stream: that way both read paths are
+    exercised.
     """
     flags = 0x0004 | (DOC_QUICK_SAVES << 4) | 0x0200
     fib = bytearray(struct.pack("<HHHHHHHIBBHHII", 0xA5EC, 0x00C1, 0, DOC_LID, 0, flags,
                                 0x00BF, 0, 0, 0, 0, 0, 0, 0).ljust(0x800, b"\x00"))
     sttb = _doc_sttb(("Unknown",) + tuple(DOC_RMARK))
-    fib[32:34] = struct.pack("<H", 14)          # csw, как у Word 97+
+    fib[32:34] = struct.pack("<H", 14)          # csw, as in Word 97+
     fib[62:64] = struct.pack("<H", 22)          # cslw
-    fib[152:154] = struct.pack("<H", 93)        # cbRgFcLcb: пар хватает до индекса 51
+    fib[152:154] = struct.pack("<H", 93)        # cbRgFcLcb: enough pairs to reach index 51
     fib[154 + 51 * 8:154 + 51 * 8 + 8] = struct.pack("<II", 0, len(sttb))
     body = "Текст документа.".encode("cp1251")
     word_document = (bytes(fib) + body).ljust(4608, b"\x00")
@@ -1238,11 +1245,11 @@ def _word_streams(user_items):
 
 
 def make_doc(dir):
-    """Настоящий OLE2/CFBF .doc: SummaryInformation, DocumentSummaryInformation
-    (+ пользовательская секция в UTF-16: метка MSIP с email и русское имя
-    свойства), CompObj, WordDocument (FIB с fComplex, двумя быстрыми
-    сохранениями и активной таблицей 1Table) и сама 1Table. Строки свойств --
-    cp1251, не UTF-8.
+    """A real OLE2/CFBF .doc: SummaryInformation, DocumentSummaryInformation
+    (+ a UTF-16 custom section: an MSIP label with an email and a Russian
+    property name), CompObj, WordDocument (a FIB with fComplex, two fast saves
+    and the active table 1Table) and 1Table itself. Property strings are cp1251,
+    not UTF-8.
     """
     path = os.path.join(dir, "leaky.doc")
     data = _cfb_build(
@@ -1265,20 +1272,20 @@ def make_doc(dir):
         "environment": [DOC_TEMPLATE],
         "signals": ["producer", "hazard", "inconsistent"],
         "not_signals": ["ai", "scrubbed"],
-        # olefile.get_metadata(): строки bytes в cp1251, даты datetime, время
-        # правки целое число секунд.
+        # olefile.get_metadata(): strings as bytes in cp1251, dates as datetime, the
+        # editing time as a whole number of seconds.
         "ole_meta": _doc_ole_meta(),
         "streams": ["\x05SummaryInformation", "\x05DocumentSummaryInformation",
                     "\x01CompObj", "WordDocument", "1Table"],
-        # Находка про таблицу авторов правок и остаточный текст: поднимается
-        # потоком 1Table, убрать её нельзя (removable=False).
-        "unremovable_labels": ["Остаточный текст и таблица авторов правок"],
-        # Находка "Время изменения контейнера" (корневая запись CFBF).
+        # The finding about the revision author table and residual text: raised by
+        # the 1Table stream, it can't be removed (removable=False).
+        "unremovable_labels": ["Residual text and revision author table"],
+        # The "Container modification time" finding (the CFBF root entry).
         "root_mtime": "2024-03-06 09:43:07",
         "quick_saves": DOC_QUICK_SAVES,
         "lid": DOC_LID,
-        # Пользовательские свойства (DocumentSummaryInformation, UTF-16):
-        # метка -> значение. Все -- IDENTITY.
+        # Custom properties (DocumentSummaryInformation, UTF-16): label -> value.
+        # All are IDENTITY.
         "userdef": {"MSIP_Label_a1b2_SetBy": DOC_MSIP_EMAIL,
                     DOC_CUSTOM_KEY: DOC_CUSTOM_DEPT},
     }
@@ -1290,9 +1297,10 @@ DOC_OBJECT_TYPE = "Microsoft Excel Worksheet"
 
 
 def make_doc_active(dir):
-    """.doc с активным содержимым: проект VBA в хранилище Macros и встроенный
-    OLE-объект в ObjectPool/<id>. Поток CompObj лежит и на верхнем уровне, и
-    внутри объекта -- проверка, что инспектор не путает вложенное с корневым."""
+    """A .doc with active content: a VBA project in the Macros storage and an
+    embedded OLE object in ObjectPool/<id>. A CompObj stream sits both at the
+    top level and inside the object: a check that the inspector doesn't confuse
+    the nested one with the root one."""
     path = os.path.join(dir, "active.doc")
     embedded = _ole_compobj(DOC_OBJECT_TYPE, "Biff8", "Excel.Sheet.8", _CLSID_EXCEL8)
     data = _cfb_build(
@@ -1310,9 +1318,9 @@ def make_doc_active(dir):
 
     expected = {
         "signals": ["hazard"],
-        # Находки с removable=False: проект VBA, вложенные объекты, таблица правок.
-        "unremovable_labels": ["Поток макросов", "Вложенные OLE-объекты",
-                               "Остаточный текст и таблица авторов правок"],
+        # Findings with removable=False: the VBA project, nested objects, the revision table.
+        "unremovable_labels": ["Macro stream", "Nested OLE objects",
+                               "Residual text and revision author table"],
         "values": [DOC_OBJECT_ID, "_VBA_PROJECT"],
         "macro_stream": "_VBA_PROJECT",
         "object_id": DOC_OBJECT_ID,
@@ -1335,16 +1343,16 @@ def _biff(rec, body=b""):
 
 
 def _biff_str(text, len_bytes=2):
-    """XLUnicodeString / ShortXLUnicodeString в UTF-16LE (флаг 1)."""
+    """XLUnicodeString / ShortXLUnicodeString in UTF-16LE (flag 1)."""
     return (len(text).to_bytes(len_bytes, "little") + b"\x01"
             + text.encode("utf-16-le"))
 
 
 def make_xls(dir):
-    """Настоящий OLE2/CFBF .xls: свойства + поток Workbook с BOF, CODEPAGE,
-    WRITEACCESS (имя пользователя Excel), двумя BOUNDSHEET (один скрытый),
-    SUPBOOK/EXTERNSHEET (внешняя книга), HLINK и EOF. Поток Workbook короче
-    4096 байт -- лежит в мини-потоке."""
+    """A real OLE2/CFBF .xls: properties + a Workbook stream with BOF, CODEPAGE,
+    WRITEACCESS (the Excel user name), two BOUNDSHEETs (one hidden),
+    SUPBOOK/EXTERNSHEET (an external workbook), HLINK and EOF. The Workbook
+    stream is shorter than 4096 bytes, so it sits in the mini stream."""
     path = os.path.join(dir, "book.xls")
 
     bof_globals = _biff(0x0809, struct.pack("<HHHHII", 0x0600, 0x0005, 0x2AE5,
@@ -1354,7 +1362,7 @@ def make_xls(dir):
     eof = _biff(0x000A)
     sheet = (bof_sheet
              + _biff(0x0200, struct.pack("<IIHHH", 0, 1, 0, 1, 0))      # DIMENSIONS
-             # HLINK: ссылка на ячейку + GUID hyperlink-объекта; тело минимальное.
+             # HLINK: a link to a cell + the GUID of the hyperlink object; a minimal body.
              + _biff(0x01B8, struct.pack("<HHHH", 0, 0, 0, 0)
                      + uuid.UUID("79EAC9D0-BAF9-11CE-8C82-00AA004BA90B").bytes_le
                      + struct.pack("<II", 2, 0))
@@ -1368,7 +1376,7 @@ def make_xls(dir):
         for (name, state), off in zip(sheets_raw, offsets):
             out += _biff(0x0085, struct.pack("<IBB", off, state, 0)
                          + _biff_str(name, 1))
-        out += _biff(0x01AE, struct.pack("<HH", 2, 0x0401))          # внутренняя
+        out += _biff(0x01AE, struct.pack("<HH", 2, 0x0401))          # internal
         out += _biff(0x01AE, struct.pack("<H", 1) + _biff_str("\x01" + XLS_EXTERNAL_BOOK))
         out += _biff(0x0017, struct.pack("<HHHH", 1, 1, 0, 0))       # EXTERNSHEET
         return out + eof
@@ -1376,8 +1384,8 @@ def make_xls(dir):
     first = len(globals_stream([0, 0]))
     workbook = globals_stream([first, first + len(sheet)]) + sheet + sheet
 
-    # Пользовательские свойства в однобайтовой cp1251 (не UTF-16, не UTF-8):
-    # русское имя свойства -- именно оно ломает разбор по UTF-8.
+    # Custom properties in single-byte cp1251 (not UTF-16, not UTF-8): a Russian
+    # property name is exactly what breaks UTF-8 parsing.
     summary, docsum = _ole_props_streams(
         [(XLS_CUSTOM_KEY, XLS_CUSTOM_VALUE), ("Owner", XLS_OWNER_EMAIL)], 1251)
     data = _cfb_build(
@@ -1401,9 +1409,9 @@ def make_xls(dir):
         "ole_meta": _doc_ole_meta(),
         "streams": ["\x05SummaryInformation", "\x05DocumentSummaryInformation",
                     "Workbook"],
-        # Внешние связи: SUPBOOK x2, EXTERNSHEET x1, EXTERNNAME x0, HLINK x2.
+        # External links: SUPBOOK x2, EXTERNSHEET x1, EXTERNNAME x0, HLINK x2.
         "supbook": 2, "externsheet": 1, "hlinks": 2, "root_mtime": "2024-03-06 09:43:07",
-        # Пользовательские свойства (cp1251): метка -> значение. Все -- IDENTITY.
+        # Custom properties (cp1251): label -> value. All are IDENTITY.
         "userdef": {XLS_CUSTOM_KEY: XLS_CUSTOM_VALUE, "Owner": XLS_OWNER_EMAIL},
     }
     return path, expected
@@ -1414,11 +1422,11 @@ _CLSID_PPT8 = "64818D10-4F9B-11CF-86EA-00AA00B929E8"
 
 
 def make_ppt(dir, unicode_name=True):
-    """Настоящий OLE2/CFBF .ppt: свойства, поток "PowerPoint Document" и
-    "Current User" (CurrentUserAtom, MS-PPT 2.3.2) с именем последнего
-    редактора. ansiUserName -- в cp1251, как пишет русский PowerPoint;
-    unicode_name=True добавляет и unicodeUserName (UTF-16), как делают
-    PowerPoint 2000+."""
+    """A real OLE2/CFBF .ppt: properties, the "PowerPoint Document" stream and
+    "Current User" (CurrentUserAtom, MS-PPT 2.3.2) with the last editor's name.
+    ansiUserName is in cp1251, as Russian PowerPoint writes it;
+    unicode_name=True also adds unicodeUserName (UTF-16), as PowerPoint 2000+
+    does."""
     path = os.path.join(dir, "deck.ppt")
     ansi = PPT_USER.encode("cp1251")
     atom = (struct.pack("<IIIHHBBH", 0x14, 0xE391C05F, 0, len(PPT_USER), 0x03F4, 3, 0, 0)
@@ -1449,13 +1457,14 @@ def make_ppt(dir, unicode_name=True):
 
 
 # ===========================================================================
-# Патологии
+# Pathologies
 # ===========================================================================
 
 
 def make_broken(dir):
-    """Набор файлов-патологий. Возвращает {имя: путь} -- тут нет "заложенных
-    значений", тест только проверяет, что инспекция не падает и не ест память.
+    """A set of pathological files. Returns {name: path}: there are no "planted
+    values" here, the test only checks that inspection doesn't crash or eat
+    memory.
     """
     out = {}
 
@@ -1476,10 +1485,10 @@ def make_broken(dir):
         zf.writestr("second.txt", "second entry " * 50)
     with open(good, "rb") as fh:
         full = fh.read()
-    # Обрезаем хвост -- вторая запись и вся центральная директория/EOCD
-    # пропадают. zipfile.ZipFile() не находит EOCD и падает BadZipFile,
-    # это и есть "битая запись": сигнатура PK в начале на месте, но
-    # архив как целое не открывается.
+    # Cut off the tail: the second entry and the whole central directory/EOCD
+    # are gone. zipfile.ZipFile() can't find the EOCD and fails with BadZipFile,
+    # which is the "broken entry": the PK signature at the start is in place, but
+    # the archive as a whole doesn't open.
     with open(p, "wb") as fh:
         fh.write(full[: int(len(full) * 0.6)])
     os.remove(good)
@@ -1487,8 +1496,8 @@ def make_broken(dir):
 
     p = os.path.join(dir, "zip_bomb.zip")
     with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Один байт, повторённый в 200 МБ -- deflate сжимает это в доли
-        # процента исходного размера, коэффициент сжатия огромный.
+        # One byte repeated over 200 MB: deflate compresses it to a fraction of a
+        # percent of the original size, a huge compression ratio.
         zf.writestr("bomb.bin", b"\x00" * (200 * 1024 * 1024))
     out["zip_bomb"] = p
 
@@ -1498,12 +1507,12 @@ def make_broken(dir):
         fh.write(full[: len(full) // 2])
     out["jpeg_truncated"] = p
 
-    # PNG с zTXt-бомбой: около килобайта сжатых данных разворачиваются в
-    # 200 МБ. Отдельный от zip-бомбы вектор отказа -- здесь распаковку
-    # запускает разбор ТЕКСТОВОГО чанка PNG, и сделать это через голый
-    # zlib.decompress() означает съесть память на файле, который по размеру
-    # выглядит безобидно. Бот принимает произвольные файлы и работает без
-    # сандбокса, так что защита обязана быть в самом разборе.
+    # A PNG with a zTXt bomb: about a kilobyte of compressed data expands into
+    # 200 MB. A denial vector separate from the zip bomb: here decompression is
+    # triggered by parsing a TEXT chunk of the PNG, and doing that with a bare
+    # zlib.decompress() means eating memory on a file that looks harmless by
+    # size. The bot accepts arbitrary files and runs without a sandbox, so the
+    # guard has to be in the parser itself.
     p = os.path.join(dir, "ztxt_bomb.png")
     payload = zlib.compress(b"\x00" * (200 * 1024 * 1024), 9)
     with open(p, "wb") as fh:

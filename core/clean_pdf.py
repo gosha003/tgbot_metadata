@@ -1,36 +1,37 @@
 # -*- coding: utf-8 -*-
-"""Чистка PDF (фаза 1). Инструмент -- pikepdf (QPDF) и lxml, внешних бинарников нет.
+"""PDF cleaning (phase 1). The tools are pikepdf (QPDF) and lxml, no external binaries.
 
     clean_pdf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) -> CleanResult
 
-Инспектор -- оракул: после чистки прогоняется inspect_file(dst), и именно он
-решает, чисто ли. Наши собственные списки действий доказательством не служат.
+The inspector is the oracle: after cleaning, inspect_file(dst) is run and it alone
+decides whether the file is clean. Our own lists of actions are not proof.
 
-Что выяснено ОПЫТОМ на pikepdf 10.15 / libqpdf 12.4 (не по документации):
+What was established BY EXPERIMENT on pikepdf 10.15 / libqpdf 12.4 (not from the
+documentation):
 
-* Обычное save() НЕ подставляет свой /Producer. Подставляет его
-  pdf.open_metadata() с параметрами по умолчанию: пишет /Producer = "pikepdf X",
-  pdf:Producer и xmp:MetadataDate=сейчас. Поэтому XMP правится сырым потоком
-  через lxml, а open_metadata не вызывается вовсе. После save() всё равно
-  сверяем Creator/Producer с тем, что сами оставили: файл, чья чистка стала
-  отпечатком, отдавать нельзя.
-* Полная перезапись -- это и есть сборка мусора: QPDF пишет только объекты,
-  достижимые из трейлера, так что прошлые ревизии (и текст под «замазкой»)
-  уходят и БЕЗ linearize. А linearize=True вредит: в первой xref-секции
-  появляется /Prev (инспектор считает это «инкрементальным апдейтом»),
-  добавляются hint-таблицы и признак «Линеаризован» -- сама чистка стала бы
-  отпечатком. Поэтому сохраняем без линеаризации.
-* Сырой подсчёт подстроки /Prev (инспектор и наша же сверка) врёт на файлах с
-  закладками: звенья /Outlines (/Prev-/Next) -- тоже /Prev. Настоящий критерий
-  -- /Prev в ТРЕЙЛЕРЕ, его и проверяем (pdf.trailer).
-* QPDF сохраняет /ID[0] исходника и перегенерирует только /ID[1]; ID[0] у
-  многих продюсеров выведен из пути файла, значит связывает файлы.
-* QPDF пишет в заголовок бинарный маркер %\xbf\xf7\xa2\xfe -- общеизвестная
-  подпись qpdf; заменяем равной длины маркером исходного файла.
+* A plain save() does NOT insert its own /Producer. pdf.open_metadata() with
+  default arguments does: it writes /Producer = "pikepdf X", pdf:Producer and
+  xmp:MetadataDate=now. So the XMP is edited as a raw stream through lxml and
+  open_metadata is never called. After save() we still compare Creator/Producer
+  with what we left ourselves: a file whose cleaning has become a fingerprint
+  must not be handed over.
+* A full rewrite IS garbage collection: QPDF writes only the objects reachable
+  from the trailer, so earlier revisions (and the text under a "cover-up")
+  are gone even WITHOUT linearize. And linearize=True is harmful: a /Prev
+  appears in the first xref section (the inspector reads it as an "incremental
+  update"), hint tables are added, and so is the "Linearized" sign -- the
+  cleaning itself would become a fingerprint. So we save without linearization.
+* A raw count of the /Prev substring (the inspector's and our own check) lies on
+  files with bookmarks: the /Outlines links (/Prev-/Next) are /Prev too. The
+  real criterion is /Prev in the TRAILER, and that is what we check (pdf.trailer).
+* QPDF keeps the source's /ID[0] and regenerates only /ID[1]; in many producers
+  ID[0] is derived from the file path, so it links files.
+* QPDF writes the binary marker %\xbf\xf7\xa2\xfe into the header -- a well-known
+  qpdf signature; we replace it with the source file's marker of equal length.
 
-Только чтение входа: pikepdf.open(src) без allow_overwriting_input, вывод
-пишется в dst + ".part" и переименовывается только после проверки.
-Приватность: ни имён файлов, ни значений находок в логи не пишем (логов нет).
+The input is read only: pikepdf.open(src) without allow_overwriting_input, the
+output is written to dst + ".part" and renamed only after verification.
+Privacy: neither file names nor finding values are written to logs (there are no logs).
 """
 
 from __future__ import annotations
@@ -50,22 +51,24 @@ from .insp_pdf import (RDF, _INFO_MAP, _XMP_IDENTITY, _flatten,
                        _looks_like_path, _qname, _s, _walk_name_tree, _xmp_fromstring,
                        is_jpeg_image)
 from .model import Risk
+from core.i18n import N_, tr
 
-# --- лимиты: чистка обязана обработать ВСЁ, иначе отказ (частично чистый файл
-# хуже отказа), поэтому лимиты щедрее инспекторских и превышение = ok=False ----
+# --- limits: cleaning must process EVERYTHING or refuse (a partly clean file is
+# worse than a refusal), so the limits are more generous than the inspector's
+# and exceeding one means ok=False ----
 MAX_INPUT = 512 * 1024 * 1024
 MAX_PAGES = 20000
 MAX_ANNOTS = 200000
 MAX_FIELDS = 20000
-MAX_XMP = 4 * 1024 * 1024            # распакованный XMP больше -- не разбираем
+MAX_XMP = 4 * 1024 * 1024            # decompressed XMP larger than this is not parsed
 MAX_IMAGES = 20000
 
-_ID_WORDS = ("author", "user", "owner", "company", "operator", "signer")  # как в инспекторе
+_ID_WORDS = ("author", "user", "owner", "company", "operator", "signer")  # as in the inspector
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _FILENAME_TITLE = re.compile(r"\.(docx?|xlsx?|pptx?|rtf|odt|ods|odp|txt|indd|psd|ai)\s*$", re.I)
 _WEB = re.compile(r"(?i)^(https?|mailto|tel):")
 _ACTIVE = {"/Launch", "/JavaScript", "/SubmitForm", "/ImportData", "/GoToR", "/GoToE"}
-_DROP_NS = {"xmpMM", "photoshop", "illustrator", "xmpRights", "xmpBJ"}   # целиком, в любом профиле
+_DROP_NS = {"xmpMM", "photoshop", "illustrator", "xmpRights", "xmpBJ"}   # entirely, in any profile
 _QPDF_MARK = b"\xbf\xf7\xa2\xfe"
 _ADOBE_MARK = b"\xe2\xe3\xcf\xd3"
 _XPACKET = b'<?xpacket begin="\xef\xbb\xbf" id="W5M0MpCehiHzreSzNTczkc9d"?>\n%s\n<?xpacket end="w"?>'
@@ -73,29 +76,30 @@ _EMPTY_XMP = _XPACKET % (
     b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
     b'<rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>')
 
-_NOTE_APP = ("STEALTH: оставлено как было. Файл действительно сделан этим приложением, а пара "
-             "вида Creator=Word + Producer=qpdf сразу выдаёт, что файл обрабатывали.")
-_NOTE_DATE = ("STEALTH: даты не трогаем. CreationDate == ModDate (обнуление в одну секунду) -- "
-              "признак чистки, а подмена даты -- фальсификация провенанса.")
+_NOTE_APP = (N_("STEALTH: left as it was. The file really was made by this application, and a "
+                "Creator=Word + Producer=qpdf pair immediately shows that the file was processed."))
+_NOTE_DATE = (N_("STEALTH: dates are left alone. CreationDate == ModDate (zeroing to the same "
+                 "second) is a sign of scrubbing, and faking a date falsifies provenance."))
 
-# Структурное: не убирается ни в одном профиле.
+# Structural: not removed in any profile.
 _STRUCT = (
-    ("/StructTreeRoot", "Теги доступности (тегированный PDF): без них скринридер не читает документ."),
-    ("/MarkInfo", "Пометка о тегировании, идёт вместе с /StructTreeRoot."),
-    ("/Lang", "Язык документа: нужен скринридерам и переносам."),
-    ("/Outlines", "Оглавление (закладки): навигация по документу."),
-    ("/PageLabels", "Пользовательская нумерация страниц."),
-    ("/ViewerPreferences", "Как открывать документ; безобидно."),
-    ("/OutputIntents", "Цветовой профиль печати (ICC): без него ломается цветопередача."),
+    ("/StructTreeRoot", N_("Accessibility tags (tagged PDF): without them a screen reader cannot "
+                           "read the document.")),
+    ("/MarkInfo", N_("Tagging marker; goes together with /StructTreeRoot.")),
+    ("/Lang", N_("Document language: needed by screen readers and for hyphenation.")),
+    ("/Outlines", N_("Table of contents (bookmarks): navigation through the document.")),
+    ("/PageLabels", N_("Custom page numbering.")),
+    ("/ViewerPreferences", N_("How to open the document; harmless.")),
+    ("/OutputIntents", N_("Print color profile (ICC): without it color reproduction breaks.")),
 )
 
 
 class _Refuse(Exception):
-    """Чистка невозможна или небезопасна: ok=False, текст уходит в errors."""
+    """Cleaning is impossible or unsafe: ok=False, the text goes to errors."""
 
 
 class _C:
-    """Контекст чистки: результат, профиль, whitelist пользователя."""
+    """Cleaning context: the result, the profile, the user's whitelist."""
 
     def __init__(self, res, profile, keep):
         self.res = res
@@ -105,18 +109,19 @@ class _C:
         if isinstance(keep, str):
             keep = [keep]
         self.keep = {str(k).strip().casefold() for k in (keep or ())}
-        self.ua = False          # в XMP заявлен PDF/UA: заголовок обязателен
+        self.ua = False          # XMP declares PDF/UA: the title is mandatory
 
     def held(self, location, label, before=""):
-        """Пользователь велел оставить это поле: пишем KEPT и просим не трогать."""
+        """The user said to keep this field: record KEPT and leave it alone."""
         if self.keep and (label.casefold() in self.keep or location.casefold() in self.keep):
-            self.res.act(Act.KEPT, location, label, before, note="оставлено по whitelist пользователя (keep)")
+            self.res.act(Act.KEPT, location, label, before, note=tr("kept per the user's "
+                                                                    "whitelist (keep)"))
             return True
         return False
 
 
 def _pop(c, holder, key, where, before=None, note="", label=None):
-    """Убрать holder[key], если пользователь не велел оставить. True -- убрали."""
+    """Remove holder[key] unless the user said to keep it. True means removed."""
     if key not in holder:
         return False
     label = label or key
@@ -135,23 +140,23 @@ def _del(d, key):
 
 
 def _step(c, name, fn, *args):
-    """Одна секция чистки: сбой пишется в errors и FAILED, остальные идут дальше."""
+    """One cleaning section: a failure is recorded in errors and FAILED, the others carry on."""
     try:
         fn(*args)
     except _Refuse:
         raise
-    except Exception as exc:  # noqa: BLE001 -- битые файлы нам присылают специально
-        c.res.act(Act.FAILED, name, name, note="сбой секции (%s), подробности в errors" % type(exc).__name__)
-        c.res.err("Секция «%s»: %s: %s" % (name, type(exc).__name__, exc))
+    except Exception as exc:  # noqa: BLE001 -- we are sent broken files on purpose
+        c.res.act(Act.FAILED, name, name, note=tr("section failed (%s), details in errors") % type(exc).__name__)
+        c.res.err(tr("Section \"%s\": %s: %s") % (name, type(exc).__name__, exc))
 
 
 # ============================================================================
-#  Обход структур (с защитой от циклов и DAG-бомб)
+#  Walking the structures (guarded against cycles and DAG bombs)
 # ============================================================================
 
 
 def _iter_fields(form):
-    """Поля AcroForm: (полное имя, поле, унаследованный /FT). Итеративно, без рекурсии."""
+    """AcroForm fields: (full name, field, inherited /FT). Iterative, no recursion."""
     fields = form.get("/Fields")
     if not isinstance(fields, pikepdf.Array):
         return
@@ -177,8 +182,8 @@ def _iter_fields(form):
 
 
 def _filled_signatures(pdf):
-    """Заполненные подписи: [(поле, подписант, поле-объект)] и признак /Perms /DocMDP.
-    Пустая заготовка поля (/FT /Sig без /V) подписью НЕ считается."""
+    """Filled signatures: [(field, signer, field object)] and the /Perms /DocMDP flag.
+    An empty field placeholder (/FT /Sig without /V) does NOT count as a signature."""
     out = []
     form = pdf.Root.get("/AcroForm")
     if isinstance(form, pikepdf.Dictionary):
@@ -193,7 +198,7 @@ def _filled_signatures(pdf):
 
 
 def _file_label(spec, fallback=""):
-    """Имя и размер вложения из filespec."""
+    """Name and size of an attachment from a filespec."""
     if not isinstance(spec, pikepdf.Dictionary):
         return fallback or "?"
     name = _s(spec.get("/UF")) or _s(spec.get("/F")) or fallback or "?"
@@ -203,58 +208,61 @@ def _file_label(spec, fallback=""):
         if st is None:
             st = ef.get("/UF")
         size = _s(st.get("/Params").get("/Size")) or str(len(st.read_raw_bytes()))
-        return "%s (%s байт)" % (name, size)
+        return tr("%s (%s bytes)") % (name, size)
     except Exception:
         return name
 
 
 # ============================================================================
-#  А. /Info
+#  A. /Info
 # ============================================================================
 
 
 def _info_risk(key, raw):
-    """Категория поля /Info -- по тем же правилам, что у инспектора (оракул)."""
+    """Category of an /Info field, by the same rules as the inspector's (the oracle)."""
     _, risk = _INFO_MAP.get(key, (None, None))
     if risk is None:
         low = key.lower()
         risk = Risk.IDENTITY if any(w in low for w in _ID_WORDS) else Risk.PROVENANCE
     if risk is not Risk.IDENTITY and (_looks_like_path(raw) or (key == "/Title" and _FILENAME_TITLE.search(raw))):
-        return Risk.ENVIRONMENT      # путь или имя файла вместо названия
+        return Risk.ENVIRONMENT      # a path or file name instead of a title
     if risk is Risk.PROVENANCE and _EMAIL.search(raw):
         return Risk.IDENTITY
     return risk
 
 
 def _sec_info(pdf, c):
-    info = pdf.trailer.get("/Info")      # НЕ pdf.docinfo: тот создаёт пустой /Info
+    info = pdf.trailer.get("/Info")      # NOT pdf.docinfo: it creates an empty /Info
     if not isinstance(info, pikepdf.Dictionary):
         return
     for key in list(info.keys()):
-        # info[key], а не info.get(key): имя ключа не в UTF-8 (/Auth#9Dor) pikepdf
-        # отдаёт строкой с суррогатом, и get() на ней бросает TypeError -- секция
-        # обрывалась, а ключи после такого оставались в файле. [] и del работают.
+        # info[key], not info.get(key): a key name that is not UTF-8 (/Auth#9Dor) is
+        # returned by pikepdf as a string with a surrogate, and get() on it raises
+        # TypeError -- the section aborted and the keys after it stayed in the file.
+        # [] and del work.
         raw = _s(info[key])
         risk = _info_risk(key, raw)
         ua_title = key == "/Title" and c.ua
         if (risk in c.removes or key.startswith("/PTEX")) and not ua_title:
             if key.startswith("/PTEX"):
-                note = "Строка версии TeX Live с датой сборки выдаёт ОС и дистрибутив автора."
+                note = tr("The TeX Live version string with its build date gives away the "
+                          "author's OS and distribution.")
             elif c.paranoid:
-                note = ("PARANOID убирает всё: файл читается как обработанный (Word-PDF без "
-                        "Creator/Producer) -- этого профиль не скрывает.")
+                note = (tr("PARANOID removes everything: the file reads as processed (a Word PDF "
+                           "without Creator/Producer) -- the profile does not hide that."))
             else:
-                note = "Личность или окружение: убирается в любом профиле."
+                note = tr("Identity or environment: removed in every profile.")
             _pop(c, info, key, "/Info", raw, note)
         else:
             if key in ("/Creator", "/Producer"):
-                note = _NOTE_APP
+                note = tr(_NOTE_APP)
             elif key in ("/CreationDate", "/ModDate"):
-                note = _NOTE_DATE
+                note = tr(_NOTE_DATE)
             elif ua_title:
-                note = "Заголовок нужен PDF/UA (в XMP заявлен pdfuaid) -- структурное, сохраняем."
+                note = tr("The title is needed by PDF/UA (XMP declares pdfuaid) -- structural, "
+                          "kept.")
             else:
-                note = "Провенанс: STEALTH оставляет, PARANOID убирает."
+                note = tr("Provenance: STEALTH keeps it, PARANOID removes it.")
             if not c.held("/Info", key, raw):
                 c.res.act(Act.KEPT, "/Info", key, raw, note=note)
     if len(info) == 0:
@@ -262,13 +270,14 @@ def _sec_info(pdf, c):
 
 
 # ============================================================================
-#  Б. XMP: сырой поток через lxml
+#  B. XMP: raw stream through lxml
 # ============================================================================
 
 
 def _read_xmp(stream):
-    """Распакованные байты XMP или None, если читать небезопасно. Flate распаковываем
-    с потолком (бомба: килобайты разворачиваются в гигабайты); экзотику не трогаем."""
+    """Decompressed XMP bytes, or None if reading is unsafe. Flate is decompressed
+    with a ceiling (a bomb: kilobytes expand into gigabytes); exotic filters are
+    left alone."""
     raw = stream.read_raw_bytes()
     flt = stream.get("/Filter")
     if stream.get("/DecodeParms") is not None:
@@ -289,7 +298,7 @@ def _read_xmp(stream):
 def _xmp_drop(key, value, c):
     prefix = key.split(":", 1)[0]
     if prefix in ("pdfaid", "pdfuaid"):
-        return False                                   # декларация PDF/A, PDF/UA -- структурное
+        return False                                   # PDF/A, PDF/UA declaration -- structural
     if c.paranoid:
         return not (c.ua and key == "dc:title")
     if prefix in _DROP_NS or key in _XMP_IDENTITY:
@@ -300,7 +309,8 @@ def _xmp_drop(key, value, c):
 
 
 def _xmp_clean(raw, c, where):
-    """-> (новые байты | None, если менять нечего; есть ли что-то, кроме пустой оболочки)."""
+    """-> (new bytes | None if there is nothing to change; whether anything besides
+    an empty shell remains)."""
     root = _xmp_fromstring(raw)
     if root is None:
         return _EMPTY_XMP, False
@@ -308,11 +318,13 @@ def _xmp_clean(raw, c, where):
     changed, kept, payload = False, [], False
     for desc in list(root.iter(RDF + "Description")):
         about = desc.get(RDF + "about")
-        if about:                                      # uuid: в rdf:about дублирует DocumentID
+        if about:                                      # uuid: in rdf:about it duplicates DocumentID
             desc.set(RDF + "about", "")
-            c.res.act(Act.NORMALIZED, where, "rdf:about", about, "", "Идентификатор в rdf:about дублирует xmpMM:DocumentID.")
+            c.res.act(Act.NORMALIZED, where, "rdf:about", about, "", tr("The identifier in "
+                                                                        "rdf:about duplicates "
+                                                                        "xmpMM:DocumentID."))
             changed = True
-        for attr in list(desc.attrib):                 # компактная форма: свойства атрибутами
+        for attr in list(desc.attrib):                 # compact form: properties as attributes
             key = _qname(attr)
             if key.startswith("rdf:"):
                 continue
@@ -323,7 +335,7 @@ def _xmp_clean(raw, c, where):
                 changed = True
             else:
                 kept.append(key)
-        for child in list(desc):                       # развёрнутая форма: дочерние элементы
+        for child in list(desc):                       # expanded form: child elements
             if not isinstance(child.tag, str):
                 continue
             key = _qname(child.tag)
@@ -336,9 +348,10 @@ def _xmp_clean(raw, c, where):
                 kept.append(key)
         payload = payload or bool(kept)
     if kept:
-        c.res.act(Act.KEPT, where, "прочие поля XMP", ", ".join(sorted(set(kept))),
-                  note="Структурные декларации (PDF/A, PDF/UA)." if c.paranoid else
-                       "Приложение, даты, заголовок и структурные декларации: согласованы с /Info.")
+        c.res.act(Act.KEPT, where, tr("other XMP fields"), ", ".join(sorted(set(kept))),
+                  note=tr("Structural declarations (PDF/A, PDF/UA).") if c.paranoid else
+                       tr("Application, dates, title and structural declarations: consistent "
+                          "with /Info."))
     if not changed:
         return None, payload
     etree.cleanup_namespaces(root, keep_ns_prefixes=["rdf", "x"])
@@ -347,21 +360,21 @@ def _xmp_clean(raw, c, where):
 
 def _xmp_note(key, c):
     if c.paranoid and not (key.startswith("xmpMM:") or key in _XMP_IDENTITY or key.startswith("photoshop:")):
-        return "PARANOID убирает всё, кроме структурных деклараций."
+        return tr("PARANOID removes everything except structural declarations.")
     if key.startswith("xmpMM:History"):
-        return "Журнал правок: softwareAgent и when каждой правки."
+        return tr("Edit history: the softwareAgent and when of every edit.")
     if key.startswith("xmpMM:"):
-        return "Постоянный GUID связывает все версии и все файлы одного шаблона."
-    return "Идентичность или окружение в XMP: переживает чистку /Info."
+        return tr("A persistent GUID links all versions and all files made from one template.")
+    return tr("Identity or environment in XMP: survives the cleaning of /Info.")
 
 
 def _xmp_holder(holder, where, c):
-    """Один поток /Metadata у holder (корень каталога, страница, XObject)."""
+    """A single /Metadata stream of a holder (catalog root, page, XObject)."""
     meta = holder.get("/Metadata")
     if meta is None:
         return
     if not isinstance(meta, pikepdf.Stream):
-        _pop(c, holder, "/Metadata", where, "не поток", "Битая ссылка на XMP.")
+        _pop(c, holder, "/Metadata", where, tr("not a stream"), tr("Broken reference to XMP."))
         return
     if c.held(where, "/Metadata"):
         return
@@ -371,39 +384,47 @@ def _xmp_holder(holder, where, c):
         try:
             cleaned = _xmp_clean(raw, c, where)
         except etree.XMLSyntaxError:
-            # Не разбирается даже после починки байтов. Оставить как есть нельзя:
-            # секция падала, и вся личность в XMP переживала чистку.
+            # Does not parse even after the byte repair. Leaving it as it is is not an option:
+            # the section used to crash, and all the identity in the XMP survived cleaning.
             cleaned = None
-    if cleaned is None:              # слишком большой, экзотический фильтр или не XML: не читаем
+    if cleaned is None:              # too large, an exotic filter or not XML: we do not read it
         if c.paranoid:
-            _pop(c, holder, "/Metadata", where, "нечитаемый XMP", "Поток слишком велик или в нестандартном кодировании.")
+            _pop(c, holder, "/Metadata", where, tr("unreadable XMP"), tr("The stream is too large or "
+                                                                     "uses a non-standard "
+                                                                     "encoding."))
         else:
             meta.write(_EMPTY_XMP)
-            c.res.act(Act.NORMALIZED, where, "/Metadata", "нечитаемый XMP", "пустая оболочка",
-                      "Поток не разбирается безопасно: заменён пустым пакетом, чтобы XMP остался на месте.")
+            c.res.act(Act.NORMALIZED, where, "/Metadata", tr("unreadable XMP"), tr("empty shell"),
+                      tr("The stream cannot be parsed safely: replaced with an empty packet so "
+                         "that the XMP stays in place."))
         return
     new, payload = cleaned
-    if c.paranoid and not payload:   # от XMP ничего не осталось
+    if c.paranoid and not payload:   # nothing is left of the XMP
         del holder["/Metadata"]
-        c.res.act(Act.REMOVED, where, "/Metadata", "XMP-пакет", note="PARANOID: пакет пуст, поток убран целиком.")
+        c.res.act(Act.REMOVED, where, "/Metadata", tr("XMP packet"), note=tr("PARANOID: the packet is "
+                                                                        "empty, the stream is "
+                                                                        "removed entirely."))
         return
     if new is not None:
         meta.write(new)
 
 
 def _sec_xmp(pdf, c):
-    _xmp_holder(pdf.Root, "XMP", c)      # корень первым: он выставляет c.ua для /Info
+    _xmp_holder(pdf.Root, "XMP", c)      # root first: it sets c.ua for /Info
 
 
 # ============================================================================
-#  Сквозной обход объектов: /PieceInfo, /AF, /Thumb, баннер TeX, XMP не в корне
+#  Whole-file object sweep: /PieceInfo, /AF, /Thumb, TeX banner, XMP outside the root
 # ============================================================================
 
 _SWEEP = (
-    ("/PieceInfo", "Приватные данные приложения (Acrobat/Distiller/Illustrator), иногда с редактируемым исходником."),
-    ("/AF", "Связанные файлы (PDF/A-3, счета): внутри может лежать исходный xlsx/XML целиком."),
-    ("/Thumb", "Миниатюра страницы устаревает при правке и показывает прошлую версию страницы."),
-    ("/PTEX.Fullbanner", "Строка версии TeX Live с датой сборки выдаёт ОС и дистрибутив автора."),
+    ("/PieceInfo", N_("Private application data (Acrobat/Distiller/Illustrator), sometimes with "
+                      "an editable source.")),
+    ("/AF", N_("Associated files (PDF/A-3, invoices): a whole source xlsx/XML may be inside.")),
+    ("/Thumb", N_("A page thumbnail goes stale after an edit and shows a previous version of the "
+                  "page.")),
+    ("/PTEX.Fullbanner", N_("The TeX Live version string with its build date gives away the "
+                            "author's OS and distribution.")),
 )
 
 
@@ -414,7 +435,7 @@ def _sweep_objects(pdf, c):
             if not isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)):
                 continue
             gen = obj.objgen
-            where = "/Root" if gen == root_gen else "объект %d" % gen[0]
+            where = "/Root" if gen == root_gen else tr("object %d") % gen[0]
             for key, note in _SWEEP:
                 if key not in obj:
                     continue
@@ -423,38 +444,40 @@ def _sweep_objects(pdf, c):
                 elif key == "/AF":
                     before = "; ".join(_file_label(s) for s in list(obj.get(key))[:20])
                 else:
-                    before = "есть" if key == "/Thumb" else _s(obj.get(key))
-                _pop(c, obj, key, where, before, note)
+                    before = tr("present") if key == "/Thumb" else _s(obj.get(key))
+                _pop(c, obj, key, where, before, tr(note))
             if gen != root_gen and "/Metadata" in obj:
                 _xmp_holder(obj, where + " XMP", c)
         except Exception as exc:  # noqa: BLE001
-            c.res.err("Обход объектов: %s: %s" % (type(exc).__name__, exc))
+            c.res.err(tr("Object sweep: %s: %s") % (type(exc).__name__, exc))
 
 
 # ============================================================================
-#  Картинки-JPEG: EXIF внутри потока /DCTDecode
+#  JPEG images: EXIF inside a /DCTDecode stream
 # ============================================================================
 
 
 def _sec_images(pdf, c):
-    """Поток /DCTDecode -- JPEG-файл целиком, с EXIF камеры (GPS, серийник, дата съёмки).
-    Чистим тем же кодом, что и отдельные картинки: сегменты метаданных вырезаются,
-    сжатые данные копируются байт в байт, без перекодирования. В отчёт идут только
-    удаления: строки «JFIF сохранён» по сотне сканов утопили бы суть."""
+    """A /DCTDecode stream is a whole JPEG file, with camera EXIF (GPS, serial number,
+    capture date). It is cleaned by the same code as standalone images: metadata
+    segments are cut out, the compressed data is copied byte for byte, with no
+    re-encoding. Only removals go into the report: "JFIF kept" lines for a hundred
+    scans would drown the point."""
     n = 0
     for obj in pdf.objects:
         if not is_jpeg_image(obj):
             continue
         n += 1
         if n > MAX_IMAGES:
-            raise _Refuse("Картинок больше %d: чистка не выполнена, чтобы не оставить часть необработанной." % MAX_IMAGES)
-        where = "картинка (объект %d)" % obj.objgen[0]
+            raise _Refuse(tr("More than %d images: cleaning not performed, so as not to leave "
+                             "some of them unprocessed.") % MAX_IMAGES)
+        where = tr("image (object %d)") % obj.objgen[0]
         data = obj.read_raw_bytes()
         sub = CleanResult(src="", dst="", fmt="jpeg", profile=c.profile.value)
         new = _clean_jpeg(data, sub, keep_icc=not c.paranoid)
         if new is None:
-            c.res.act(Act.FAILED, where, "JPEG", "%d байт" % len(data),
-                      note="Поток не разобран как JPEG: %s" % "; ".join(sub.errors))
+            c.res.act(Act.FAILED, where, "JPEG", tr("%d bytes") % len(data),
+                      note=tr("The stream did not parse as JPEG: %s") % "; ".join(sub.errors))
             continue
         if new == data:
             continue
@@ -465,7 +488,7 @@ def _sec_images(pdf, c):
 
 
 # ============================================================================
-#  Е, Ж. Активное содержимое и вложения (документ)
+#  F, G. Active content and attachments (document)
 # ============================================================================
 
 
@@ -474,34 +497,36 @@ def _sec_doc(pdf, c):
     names = root.get("/Names")
     if isinstance(names, pikepdf.Dictionary):
         for key, what, note in (
-            ("/JavaScript", "Скрипт уровня документа",
-             "JavaScript выполняется при открытии файла и может «звонить домой»."),
-            ("/EmbeddedFiles", "Вложенный файл",
-             "ВЛОЖЕНИЯ УДАЛЕНЫ: внутри мог лежать исходный документ целиком."),
+            ("/JavaScript", tr("Document-level script"),
+             tr("JavaScript runs when the file is opened and can \"phone home\".")),
+            ("/EmbeddedFiles", tr("Embedded file"),
+             tr("ATTACHMENTS REMOVED: a whole source document may have been inside.")),
         ):
             tree = names.get(key)
             if tree is None:
                 continue
             items = []
             _walk_name_tree(tree, items, c.res, 0)
-            if c.held("/Names", key, "%d шт." % len(items)):
+            if c.held("/Names", key, tr("%d pcs") % len(items)):
                 continue
             del names[key]
-            if not items or len(items) >= 100:      # 100 -- потолок обхода дерева имён
-                c.res.act(Act.REMOVED, "/Names", key, "пусто" if not items else "перечислены первые 100, дерево удалено целиком",
+            if not items or len(items) >= 100:      # 100 is the ceiling of the name-tree walk
+                c.res.act(Act.REMOVED, "/Names", key, tr("empty") if not items else tr("first 100 listed, the whole tree removed"),
                           note=note)
             for label, spec in items:
                 before = _file_label(spec, label) if key == "/EmbeddedFiles" else label
                 c.res.act(Act.REMOVED, "/Names " + key, what, before, note=note)
-    _pop(c, root, "/OpenAction", "/Root", note="Что файл делает сам при открытии.")
-    _pop(c, root, "/AA", "/Root", note="Обработчики событий документа: печать, сохранение, закрытие.")
-    _pop(c, root, "/Collection", "/Root", "портфолио", "Схема портфолио без вложений теряет смысл.")
+    _pop(c, root, "/OpenAction", "/Root", note=tr("What the file does on its own when opened."))
+    _pop(c, root, "/AA", "/Root", note=tr("Document event handlers: print, save, close."))
+    _pop(c, root, "/Collection", "/Root", tr("portfolio"), tr("A portfolio schema is meaningless "
+                                                          "without the attachments."))
     if c.paranoid:
-        _pop(c, root, "/DSS", "/Root", note="Данные долгосрочной валидации подписи: цепочки сертификатов.")
+        _pop(c, root, "/DSS", "/Root", note=tr("Long-term signature validation data: certificate "
+                                               "chains."))
 
 
 def _action_bad(act, c, depth=0):
-    """Действие (или любое звено цепочки /Next), которое надо убрать."""
+    """An action (or any link of a /Next chain) that must be removed."""
     if not isinstance(act, pikepdf.Dictionary):
         return False
     if depth > 6:
@@ -525,18 +550,18 @@ def _scrub_actions(a, where, c):
         s = _s(act.get("/S"))
         what = _s(act.get("/URI")) or _s(act.get("/F")) or ""
         _pop(c, a, "/A", where, ("%s %s" % (s, what)).strip(),
-             "Активное или внешнее действие: запуск программы, скрипт, отправка данных или "
-             "ссылка на локальный путь.")
-    _pop(c, a, "/AA", where, note="Скрипты-обработчики событий аннотации или поля.")
+             tr("Active or external action: launching a program, a script, sending data or a "
+                "link to a local path."))
+    _pop(c, a, "/AA", where, note=tr("Event-handler scripts of an annotation or field."))
 
 
 # ============================================================================
-#  Д, Ж. Страницы и аннотации
+#  E, G. Pages and annotations
 # ============================================================================
 
 
 def _paranoid_keeps(a, sub, c):
-    """Что PARANOID оставляет из аннотаций: поля формы и внутреннюю навигацию."""
+    """What PARANOID keeps of the annotations: form fields and internal navigation."""
     if sub == "/Widget":
         return True
     if sub == "/Link":
@@ -553,11 +578,12 @@ def _annots(p, where_pg, c, st):
     items = list(annots)
     st["annots"] += len(items)
     if st["annots"] > MAX_ANNOTS:
-        raise _Refuse("Аннотаций больше %d: чистка не выполнена, чтобы не оставить часть необработанной." % MAX_ANNOTS)
+        raise _Refuse(tr("More than %d annotations: cleaning not performed, so as not to leave "
+                         "some of them unprocessed.") % MAX_ANNOTS)
     where = where_pg + " /Annots"
     dicts = [a for a in items if isinstance(a, pikepdf.Dictionary)]
-    dropped = set()          # id() удалённых аннотаций (у прямых словарей objgen не различает)
-    gone = set()             # objgen удалённых непрямых: по ним ищем popup-и
+    dropped = set()          # id() of removed annotations (for direct dictionaries objgen does not tell them apart)
+    gone = set()             # objgen of removed indirect ones: used to find their popups
 
     def drop(a, label, before, note):
         if c.held(where, label, before):
@@ -571,13 +597,13 @@ def _annots(p, where_pg, c, st):
         sub = _s(a.get("/Subtype"))
         if sub == "/FileAttachment":
             drop(a, "/FileAttachment", _file_label(a.get("/FS")),
-                 "ВЛОЖЕНИЕ УДАЛЕНО: внутри мог лежать исходный документ целиком.")
+                 tr("ATTACHMENT REMOVED: a whole source document may have been inside."))
         elif c.paranoid and not _paranoid_keeps(a, sub, c):
-            drop(a, "Аннотация " + sub, _s(a.get("/Contents")),
-                 "PARANOID: аннотации удаляются целиком (авторство, текст, даты, popup). "
-                 "В обычном профиле остаются, убирается только авторство.")
-    for a in dicts:          # popup удалённого родителя уходит с ним: иначе через /Parent
-        par = a.get("/Parent")   # вложение остаётся достижимым и переживает чистку
+            drop(a, tr("Annotation ") + sub, _s(a.get("/Contents")),
+                 tr("PARANOID: annotations are removed entirely (author, text, dates, popup). In "
+                    "the regular profile they stay and only the author is removed."))
+    for a in dicts:          # a removed parent's popup goes with it: otherwise, through /Parent,
+        par = a.get("/Parent")   # the attachment stays reachable and survives cleaning
         if _s(a.get("/Subtype")) == "/Popup" and isinstance(par, pikepdf.Dictionary) and par.objgen in gone:
             dropped.add(id(a))
             gone.add(a.objgen)
@@ -586,13 +612,14 @@ def _annots(p, where_pg, c, st):
         if not isinstance(a, pikepdf.Dictionary):
             continue
         sub = _s(a.get("/Subtype"))
-        keys = [("/T", "Имя автора аннотации (имя учётки в Acrobat/Reader)."),
-                ("/M", "Время правки комментария."), ("/CreationDate", "Время создания комментария."),
-                ("/RC", "Форматированный дубль текста комментария.")]
+        keys = [("/T", tr("Name of the annotation's author (the account name in Acrobat/Reader).")),
+                ("/M", tr("Time the comment was edited.")), ("/CreationDate", tr("Time the comment was "
+                                                                          "created.")),
+                ("/RC", tr("Formatted duplicate of the comment text."))]
         if sub == "/Popup" or c.paranoid:
-            keys.append(("/Contents", "Дубль текста комментария."))
+            keys.append(("/Contents", tr("Duplicate of the comment text.")))
         if c.paranoid:
-            keys.append(("/Subj", "Тема комментария."))
+            keys.append(("/Subj", tr("Comment subject.")))
         for key, note in keys:
             _pop(c, a, key, where, note=note)
         pop = a.get("/Popup")
@@ -610,25 +637,28 @@ def _annots(p, where_pg, c, st):
 
 def _sec_pages(pdf, c):
     if len(pdf.pages) > MAX_PAGES:
-        raise _Refuse("Страниц больше %d: чистка не выполнена, чтобы не оставить часть необработанной." % MAX_PAGES)
+        raise _Refuse(tr("More than %d pages: cleaning not performed, so as not to leave some of "
+                         "them unprocessed.") % MAX_PAGES)
     st = {"annots": 0, "comments": 0}
     for idx, page in enumerate(pdf.pages):
         try:
-            where = "стр. %d" % (idx + 1)
-            _pop(c, page.obj, "/AA", where, note="Скрипты, срабатывающие при открытии/закрытии страницы.")
+            where = tr("p. %d") % (idx + 1)
+            _pop(c, page.obj, "/AA", where, note=tr("Scripts that fire when a page is "
+                                                    "opened/closed."))
             _annots(page.obj, where, c, st)
         except _Refuse:
             raise
         except Exception as exc:  # noqa: BLE001
-            c.res.err("Стр. %d: %s: %s" % (idx + 1, type(exc).__name__, exc))
+            c.res.err(tr("Page %d: %s: %s") % (idx + 1, type(exc).__name__, exc))
     if st["comments"]:
-        c.res.act(Act.KEPT, "/Annots", "/Contents", "%d шт." % st["comments"],
-                  note="Текст комментариев -- содержимое документа, пользователь мог оставить его осознанно; "
-                       "авторство и даты убраны. Чтобы убрать и текст -- профиль PARANOID.")
+        c.res.act(Act.KEPT, "/Annots", "/Contents", tr("%d pcs") % st["comments"],
+                  note=tr("The comment text is document content, the user may have left it "
+                          "deliberately; authorship and dates are removed. To remove the text as "
+                          "well, use the PARANOID profile."))
 
 
 # ============================================================================
-#  Форма, подпись, слои, структурное
+#  Form, signature, layers, structural
 # ============================================================================
 
 
@@ -645,67 +675,77 @@ def _sec_form(pdf, c):
             filled += 1
             continue
         if _pop(c, f, "/V", "/AcroForm /Fields", _s(f.get("/V")),
-                "PARANOID: значение поля формы. Внешний вид поля перерисует просмотрщик.", "Поле «%s»" % name):
+                tr("PARANOID: the form field value. The viewer will redraw the field's "
+                   "appearance."), tr("Field \"%s\"") % name):
             _del(f, "/DV")
             if f.get("/AS") is not None:
                 f["/AS"] = pikepdf.Name("/Off")
             _del(f, "/AP")
             cleared = True
     if filled:
-        c.res.act(Act.KEPT, "/AcroForm /Fields", "значения полей", "%d шт." % filled,
-                  note="Значения -- содержимое формы, пользователь заполнил их осознанно. PARANOID очищает.")
+        c.res.act(Act.KEPT, "/AcroForm /Fields", tr("field values"), tr("%d pcs") % filled,
+                  note=tr("The values are form content, the user filled them in deliberately. "
+                          "PARANOID clears them."))
     if cleared:
         form["/NeedAppearances"] = True
     if c.paranoid:
-        _pop(c, form, "/XFA", "/AcroForm", "XML-копия формы",
-             "XFA дублирует введённые данные параллельно обычным полям.")
+        _pop(c, form, "/XFA", "/AcroForm", tr("XML copy of the form"),
+             tr("XFA duplicates the entered data in parallel with the regular fields."))
 
 
 def _sec_signature(pdf, c, sigs, docmdp):
-    """Чистка подписанного файла (только force_signed): подпись уничтожается."""
+    """Cleaning a signed file (force_signed only): the signature is destroyed."""
     for name, signer, field in sigs:
         _del(field, "/V")
-        c.res.act(Act.REMOVED, "/AcroForm /Sig", "Цифровая подпись «%s»" % name, signer,
-                  note="ПОДПИСЬ УНИЧТОЖЕНА: любая чистка метаданных ломает подпись, force_signed=True "
-                       "это разрешил. Поле осталось пустой заготовкой.")
+        c.res.act(Act.REMOVED, "/AcroForm /Sig", tr("Digital signature \"%s\"") % name, signer,
+                  note=tr("SIGNATURE DESTROYED: any metadata cleaning breaks the signature, and "
+                          "force_signed=True allowed it. The field is left as an empty "
+                          "placeholder."))
     form = pdf.Root.get("/AcroForm")
     if isinstance(form, pikepdf.Dictionary):
-        _pop(c, form, "/SigFlags", "/AcroForm", note="Флаг наличия подписей: подписей больше нет.")
+        _pop(c, form, "/SigFlags", "/AcroForm", note=tr("Flag that signatures are present: there "
+                                                        "are no signatures any more."))
     if docmdp:
-        _pop(c, pdf.Root, "/Perms", "/Root", "сертифицирующая подпись", "Сертифицирующая подпись снята вместе с остальными.")
-    _pop(c, pdf.Root, "/DSS", "/Root", note="Данные валидации подписи: цепочки сертификатов подписантов.")
+        _pop(c, pdf.Root, "/Perms", "/Root", tr("certifying signature"), tr("The certifying "
+                                                                           "signature was "
+                                                                           "removed together "
+                                                                           "with the others."))
+    _pop(c, pdf.Root, "/DSS", "/Root", note=tr("Signature validation data: the signers' "
+                                               "certificate chains."))
 
 
 def _sec_perms(pdf, c):
-    """/Perms без /DocMDP -- это Reader Extensions (UR3): после любой правки он невалиден."""
+    """/Perms without /DocMDP is Reader Extensions (UR3): invalid after any edit."""
     perms = pdf.Root.get("/Perms")
     if isinstance(perms, pikepdf.Dictionary) and perms.get("/DocMDP") is None:
-        _pop(c, pdf.Root, "/Perms", "/Root", "права Reader Extensions",
-             "Подпись прав использования (UR3) недействительна после любой правки; Reader лишь отключит расширенные функции.")
+        _pop(c, pdf.Root, "/Perms", "/Root", tr("Reader Extensions rights"),
+             tr("The usage-rights signature (UR3) is invalid after any edit; Reader will merely "
+                "disable the extended features."))
 
 
 def _sec_structural(pdf, c):
     root = pdf.Root
     for key, note in _STRUCT:
         if key in root:
-            before = _s(root.get(key)) if key == "/Lang" else "есть"
+            before = _s(root.get(key)) if key == "/Lang" else tr("present")
             if not c.held("/Root", key, before):
-                c.res.act(Act.KEPT, "/Root", key, before, note=note)
+                c.res.act(Act.KEPT, "/Root", key, before, note=tr(note))
     ocp = root.get("/OCProperties")
     if isinstance(ocp, pikepdf.Dictionary):
         d = ocp.get("/D")
         off = d.get("/OFF") if isinstance(d, pikepdf.Dictionary) else None
         off = list(off) if isinstance(off, pikepdf.Array) else []
         if off:
-            c.res.act(Act.UNREMOVABLE, "/OCProperties /D /OFF", "выключенные слои", "%d шт." % len(off),
-                      note="Содержимое выключенных слоёв ЛЕЖИТ в файле и включается одним кликом. Убрать его "
-                           "можно только переписыванием потоков содержимого страниц -- чистка этого не делает.")
+            c.res.act(Act.UNREMOVABLE, "/OCProperties /D /OFF", tr("layers switched off"), tr("%d pcs") % len(off),
+                      note=tr("The content of switched-off layers IS in the file and turns on "
+                              "with one click. It can only be removed by rewriting the page "
+                              "content streams -- cleaning does not do that."))
         else:
-            c.res.act(Act.KEPT, "/OCProperties", "слои", "все видимы", note="Слои видимы, содержимое не скрыто.")
+            c.res.act(Act.KEPT, "/OCProperties", tr("layers"), tr("all visible"), note=tr("The layers are visible, no content is hidden."))
 
 
 # ============================================================================
-#  Г, В. Ревизии, /ID, заголовок, проверка
+#  D, C. Revisions, /ID, header, verification
 # ============================================================================
 
 
@@ -718,7 +758,7 @@ def _sha256(path):
 
 
 def _count_eof(path):
-    """Число %%EOF в сырых байтах (чанками, с нахлёстом на стыках)."""
+    """Number of %%EOF in the raw bytes (in chunks, with overlap at the joins)."""
     pos, off, prev = set(), 0, b""
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(4 << 20), b""):
@@ -731,11 +771,13 @@ def _count_eof(path):
 
 
 def _prepare_id(pdf, c):
-    """Вернуть описание /ID до чистки. QPDF сохраняет ID[0] и меняет только ID[1], поэтому
-    ID[0] меняем сами. Форму пары сохраняем: у Word, Chrome, LibreOffice ID[0]==ID[1], и
-    разошедшаяся пара -- след пересохранения. Равна -- удаляем /ID, QPDF пишет обе равными;
-    различна -- ставим случайный ID[0], ID[1] QPDF выведет из содержимого результата
-    (deterministic_id: не время и не имя файла). static_id нельзя: константа на все файлы."""
+    """Return the description of /ID from before cleaning. QPDF keeps ID[0] and changes
+    only ID[1], so we change ID[0] ourselves. The shape of the pair is preserved: in
+    Word, Chrome, LibreOffice ID[0]==ID[1], and a diverged pair is a trace of a
+    re-save. Equal -- delete /ID, QPDF writes both equal; different -- set a random
+    ID[0], and QPDF derives ID[1] from the content of the result (deterministic_id:
+    not the time and not the file name). static_id is not an option: it is a
+    constant for all files."""
     try:
         ids = pdf.trailer.get("/ID")
         if not (isinstance(ids, pikepdf.Array) and len(ids) == 2):
@@ -747,15 +789,15 @@ def _prepare_id(pdf, c):
             pdf.trailer["/ID"] = pikepdf.Array([pikepdf.String(os.urandom(16)), ids[1]])
         return "%s / %s" % (a.hex()[:8], b.hex()[:8]), a == b
     except Exception as exc:  # noqa: BLE001
-        c.res.err("/ID не перегенерирован: %s: %s" % (type(exc).__name__, exc))
+        c.res.err(tr("/ID not regenerated: %s: %s") % (type(exc).__name__, exc))
         return None
 
 
 def _save(pdf, path):
-    # Без linearize (см. docstring модуля). deterministic_id -- ID[1] из содержимого.
-    # fix_metadata_version=False: иначе save() сам зовёт open_metadata, и XMP корня
-    # уходит переформатированным сериализатором pikepdf (отступы, порядок атрибутов,
-    # pdf:PDFVersion) -- отпечаток поверх нашей правки через lxml.
+    # No linearize (see the module docstring). deterministic_id -- ID[1] from the content.
+    # fix_metadata_version=False: otherwise save() calls open_metadata itself, and the
+    # root XMP comes out reformatted by the pikepdf serializer (indentation, attribute
+    # order, pdf:PDFVersion) -- a fingerprint on top of our edit through lxml.
     pdf.save(path, deterministic_id=True, fix_metadata_version=False)
 
 
@@ -763,9 +805,11 @@ _ID_RE = re.compile(rb"/ID\s*\[\s*<[0-9A-Fa-f]*>\s*<[0-9A-Fa-f]*>\s*\]")
 
 
 def _drop_id(path):
-    """PARANOID: убрать /ID из трейлера результата (QPDF пишет его всегда). Заменяем равным по
-    длине пробельным заполнением: смещения xref не плывут, словарь остаётся валидным.
-    ponytail: ищем от последнего startxref, не парсим трейлер -- хватает для вывода QPDF."""
+    """PARANOID: remove /ID from the trailer of the result (QPDF always writes it). It
+    is replaced with whitespace padding of equal length: xref offsets do not shift,
+    the dictionary stays valid.
+    ponytail: we search from the last startxref instead of parsing the trailer --
+    enough for QPDF output."""
     with open(path, "r+b") as fh:
         fh.seek(0, 2)
         fh.seek(max(0, fh.tell() - 64))
@@ -786,13 +830,14 @@ _ID_PAIR_RE = re.compile(rb"/ID\s*\[\s*<([0-9A-Fa-f]*)>\s*<([0-9A-Fa-f]*)>\s*\]"
 
 
 def _reroll_id(path, same):
-    """STEALTH: заменить оба значения /ID в трейлере результата случайными той же длины.
+    """STEALTH: replace both /ID values in the trailer of the result with random ones of the same length.
 
-    deterministic_id выводит /ID из содержимого. Повторная чистка уже чищеного файла даёт то
-    же содержимое, а значит тот же /ID: две копии связываются, и оракул честно видит выжившее
-    значение (замерено на настоящем PDF, вычищенном ботом дважды). Случайное значение ни с
-    чем не связано. same -- сохранить форму пары (ID[0]==ID[1], как у Word и Chrome).
-    Длина не меняется, поэтому смещения xref не плывут. False -- /ID не найден, файл не тронут."""
+    deterministic_id derives /ID from the content. Cleaning an already cleaned file
+    again gives the same content, hence the same /ID: two copies get linked, and the
+    oracle honestly sees a surviving value (measured on a real PDF cleaned by the bot
+    twice). A random value is linked to nothing. same -- keep the shape of the pair
+    (ID[0]==ID[1], as in Word and Chrome). The length does not change, so xref
+    offsets do not shift. False -- /ID not found, file untouched."""
     with open(path, "r+b") as fh:
         fh.seek(0, 2)
         fh.seek(max(0, fh.tell() - 64))
@@ -814,11 +859,11 @@ def _reroll_id(path, same):
 
 
 def _fix_header(path, src):
-    """Заменить маркер qpdf в заголовке на равный по длине маркер исходника. -> (было, стало)."""
+    """Replace the qpdf marker in the header with the source's marker of equal length. -> (was, became)."""
     with open(src, "rb") as fh:
         m = re.match(rb"%PDF-\d\.\d[\r\n]+%([\x80-\xff]{4})[\r\n]", fh.read(64))
     mark = m.group(1) if m else _ADOBE_MARK
-    if mark == _QPDF_MARK:               # исходник сам писан qpdf: маркер его, менять нечего
+    if mark == _QPDF_MARK:               # the source was itself written by qpdf: the marker is its own, nothing to change
         return None
     with open(path, "r+b") as fh:
         head = fh.read(32)
@@ -831,33 +876,35 @@ def _fix_header(path, src):
 
 
 def _verify(res, tmp, snap, npages, no_id):
-    """Выход открывается своим парсером и не стал отпечатком. -> список проблем."""
+    """The output opens with our own parser and has not become a fingerprint. -> list of problems."""
     bad = []
     with pikepdf.open(tmp) as q:
         if len(q.pages) != npages:
-            bad.append("число страниц изменилось: %d -> %d" % (npages, len(q.pages)))
+            bad.append(tr("page count changed: %d -> %d") % (npages, len(q.pages)))
         if no_id and "/ID" in q.trailer:
-            bad.append("/ID остался в трейлере")
+            bad.append(tr("/ID is still in the trailer"))
         if "/Prev" in q.trailer:
-            bad.append("в трейлере остался /Prev: прошлые ревизии не сброшены")
+            bad.append(tr("/Prev is still in the trailer: earlier revisions were not dropped"))
         info = q.trailer.get("/Info")
         for key, was in snap.items():
             now = _s(info.get(key)) if isinstance(info, pikepdf.Dictionary) and key in info else None
             if now != was:
-                bad.append("%s изменился при сохранении (чистка сама стала бы отпечатком)" % key)
+                bad.append(tr("%s changed during saving (the cleaning itself would become a "
+                              "fingerprint)") % key)
         left = sum(1 for o in q.objects if isinstance(o, pikepdf.Stream) and _s(o.get("/Type")) == "/EmbeddedFile")
         if left:
-            bad.append("вложений осталось в файле: %d" % left)
+            bad.append(tr("attachments left in the file: %d") % left)
         if q.is_linearized:
-            bad.append("результат линеаризован")
+            bad.append(tr("the result is linearized"))
     eof = _count_eof(tmp)
     if eof != 1:
-        res.err("В результате %d маркеров %%EOF (ожидался 1): возможно, строка внутри потока." % eof)
+        res.err(tr("The result has %d %%EOF markers (expected 1): possibly a string inside a "
+                   "stream.") % eof)
     return bad
 
 
 # ============================================================================
-#  Точка входа
+#  Entry point
 # ============================================================================
 
 
@@ -865,53 +912,56 @@ def _clean(res, src, dst, profile, keep, force_signed, tmp):
     try:
         prof = Profile(str(getattr(profile, "value", profile)).lower())
     except ValueError:
-        raise _Refuse("Неизвестный профиль чистки.")
+        raise _Refuse(tr("Unknown cleaning profile."))
     res.profile = prof.value
     if prof is Profile.REGENERATE:
-        raise _Refuse("Профиль regenerate для PDF не поддерживается (он для офисных форматов).")
+        raise _Refuse(tr("The regenerate profile is not supported for PDF (it is for office "
+                         "formats)."))
     if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(dst)):
-        raise _Refuse("Путь результата совпадает с путём входного файла: вход не перезаписываем.")
+        raise _Refuse(tr("The output path equals the input path: the input is never overwritten."))
     size = os.path.getsize(src)
     if size == 0:
-        raise _Refuse("Файл пуст: возможно, не докачался.")
+        raise _Refuse(tr("The file is empty: possibly the download did not finish."))
     if size > MAX_INPUT:
-        raise _Refuse("Файл больше %d МБ: чистка не выполнена." % (MAX_INPUT >> 20))
+        raise _Refuse(tr("File larger than %d MB: cleaning not performed.") % (MAX_INPUT >> 20))
     sha_before = _sha256(src)
     revs = _count_eof(src)
     c = _C(res, prof, keep)
 
     try:
-        pdf = pikepdf.open(src)                       # строго на чтение
+        pdf = pikepdf.open(src)                       # strictly read-only
     except pikepdf.PasswordError:
-        raise _Refuse("PDF зашифрован и не открывается пустым паролем: чистка невозможна без пароля.")
+        raise _Refuse(tr("The PDF is encrypted and does not open with an empty password: it "
+                         "cannot be cleaned without the password."))
     except pikepdf.PdfError as exc:
-        raise _Refuse("PDF не открывается (%s): файл повреждён или это не PDF." % type(exc).__name__)
+        raise _Refuse(tr("The PDF does not open (%s): the file is damaged or is not a PDF.") % type(exc).__name__)
     with pdf:
         if pdf.is_encrypted:
-            raise _Refuse("PDF зашифрован: чистка зашифрованных файлов не выполняется, чтобы не снять "
-                          "защиту молча.")
+            raise _Refuse(tr("The PDF is encrypted: encrypted files are not cleaned, so as not "
+                             "to strip the protection silently."))
         if any(re.search(r"damaged|reconstruct|recover", w, re.I) for w in pdf.get_warnings()):
-            raise _Refuse("Файл повреждён: QPDF пришлось восстанавливать структуру. Чистка не выполнена, "
-                          "чтобы не отдать вам файл с потерянными частями.")
+            raise _Refuse(tr("The file is damaged: QPDF had to rebuild its structure. Cleaning "
+                             "not performed, so as not to hand you a file with lost parts."))
         npages = len(pdf.pages)
         sigs, docmdp = _filled_signatures(pdf)
         if (sigs or docmdp) and not force_signed:
-            raise _Refuse("Документ подписан цифровой подписью (%d): любая чистка метаданных её уничтожит. "
-                          "Подпись и чистка взаимоисключающи; чтобы всё же очистить и потерять подпись, "
-                          "передайте force_signed=True." % max(len(sigs), 1))
+            raise _Refuse(tr("The document is digitally signed (%d): any metadata cleaning would "
+                             "destroy the signature. A signature and cleaning are mutually "
+                             "exclusive; to clean anyway and lose the signature, pass "
+                             "force_signed=True.") % max(len(sigs), 1))
         was_lin = pdf.is_linearized
         if sigs or docmdp:
-            _step(c, "подпись", _sec_signature, pdf, c, sigs, docmdp)
+            _step(c, tr("signature"), _sec_signature, pdf, c, sigs, docmdp)
         for name, fn, args in (
             ("XMP", _sec_xmp, (pdf, c)),
             ("/Info", _sec_info, (pdf, c)),
-            ("активное содержимое и вложения", _sec_doc, (pdf, c)),
-            ("страницы и аннотации", _sec_pages, (pdf, c)),
-            ("картинки", _sec_images, (pdf, c)),
-            ("форма", _sec_form, (pdf, c)),
+            (tr("active content and attachments"), _sec_doc, (pdf, c)),
+            (tr("pages and annotations"), _sec_pages, (pdf, c)),
+            (tr("images"), _sec_images, (pdf, c)),
+            (tr("form"), _sec_form, (pdf, c)),
             ("/Perms", _sec_perms, (pdf, c)),
-            ("сквозной обход объектов", _sweep_objects, (pdf, c)),
-            ("слои и структурное", _sec_structural, (pdf, c)),
+            (tr("object sweep"), _sweep_objects, (pdf, c)),
+            (tr("layers and structural"), _sec_structural, (pdf, c)),
         ):
             _step(c, name, fn, *args)
         try:
@@ -927,7 +977,7 @@ def _clean(res, src, dst, profile, keep, force_signed, tmp):
     marks = _fix_header(tmp, src)
     id_dropped = c.paranoid and _drop_id(tmp)
     if not c.paranoid:
-        # Без исходного /ID QPDF пишет пару равной -- форму сохраняем такую же.
+        # Without the source /ID QPDF writes an equal pair -- we keep the same shape.
         _reroll_id(tmp, before_id[1] if before_id else True)
     bad = _verify(res, tmp, snap, npages, c.paranoid)
     for b in bad:
@@ -935,43 +985,47 @@ def _clean(res, src, dst, profile, keep, force_signed, tmp):
     if bad:
         return
     if _sha256(src) != sha_before:
-        res.err("Входной файл изменился во время чистки (sha256 до и после не совпал).")
+        res.err(tr("The input file changed during cleaning (sha256 before and after differ)."))
         return
 
     if revs > (2 if was_lin else 1):
-        res.act(Act.REMOVED, "сырые байты", "Инкрементальные ревизии", "%d ревизий" % revs, "1",
-                "Прошлые версии страниц и текст под «замазкой» физически выброшены полной перезаписью "
-                "(сборка мусора QPDF); /Prev в трейлере нет.")
+        res.act(Act.REMOVED, tr("raw bytes"), tr("Incremental revisions"), tr("%d revisions") % revs, "1",
+                tr("Earlier page versions and the text under a \"cover-up\" are physically "
+                   "discarded by the full rewrite (QPDF garbage collection); there is no /Prev "
+                   "in the trailer."))
     if was_lin:
-        res.act(Act.NORMALIZED, "структура", "Линеаризация", "да", "нет",
-                "Сохранено без линеаризации: в первой xref-секции линеаризованного файла /Prev, "
-                "а сама линеаризация -- признак Acrobat.")
+        res.act(Act.NORMALIZED, tr("structure"), tr("Linearization"), tr("yes"), tr("no"),
+                tr("Saved without linearization: the first xref section of a linearized file has "
+                   "/Prev, and linearization itself is an Acrobat sign."))
     if id_dropped:
         res.act(Act.REMOVED, "trailer", "/ID", before_id[0] if before_id else "", "",
-                "PARANOID: /ID убран совсем (он необязателен). У многих продюсеров ID[0] выведен из пути и "
-                "имени файла и связывает файлы; файл без /ID выглядит обработанным.")
+                tr("PARANOID: /ID removed altogether (it is optional). In many producers ID[0] "
+                   "is derived from the file path and name and links files; a file without /ID "
+                   "looks processed."))
     elif before_id:
         with pikepdf.open(tmp) as q:
             after = "/".join(bytes(x).hex()[:8] for x in q.trailer.get("/ID", []))
         res.act(Act.REGENERATED, "trailer", "/ID", before_id[0], after,
-                "ID[0] у многих продюсеров выведен из пути и имени файла и связывает файлы. Оба значения "
-                "новые и случайные; пара %s, как у исходника (разошедшаяся пара выдаёт пересохранение). "
-                "Не из содержимого: иначе повторная чистка того же файла давала бы тот же /ID."
-                % ("совпадает" if before_id[1] else "различна"))
+                tr("In many producers ID[0] is derived from the file path and name and links "
+                   "files. Both values are new and random; the pair is %s, as in the source (a "
+                   "diverged pair betrays a re-save). Not derived from the content: otherwise "
+                   "cleaning the same file again would give the same /ID.")
+                % (tr("equal") if before_id[1] else tr("different")))
     if marks:
-        res.act(Act.NORMALIZED, "заголовок", "бинарный маркер qpdf", marks[0], marks[1],
-                "Маркер %¿÷¢þ -- общеизвестная подпись qpdf; заменён равным по длине маркером исходника.")
+        res.act(Act.NORMALIZED, tr("header"), tr("qpdf binary marker"), marks[0], marks[1],
+                tr("Marker %¿÷¢þ is a well-known qpdf signature; replaced with the source's "
+                   "marker of equal length."))
     os.replace(tmp, dst)
     res.ok = True
 
 
 def clean_pdf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) -> CleanResult:
-    """Очистить PDF src -> dst. Вход не меняется. Не бросает исключений: при отказе
-    ok=False, причина в errors, файл dst не создаётся.
+    """Clean the PDF src -> dst. The input is not modified. Never raises: on refusal
+    ok=False, the reason is in errors, and the file dst is not created.
 
-    keep -- whitelist пользователя: множество строк, сравниваются (без регистра) с label
-    и location действия: "/Author", "dc:creator", "/Info", "стр. 3 /Annots".
-    force_signed -- чистить подписанный файл, уничтожив подпись."""
+    keep -- the user's whitelist: a set of strings, compared (case-insensitively) with
+    the label and location of an action: "/Author", "dc:creator", "/Info", "p. 3 /Annots".
+    force_signed -- clean a signed file, destroying the signature."""
     res = CleanResult(src=str(src), dst=str(dst), fmt="pdf",
                       profile=getattr(profile, "value", str(profile)))
     tmp = str(dst) + ".part"
@@ -981,8 +1035,8 @@ def clean_pdf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) 
         _clean(res, str(src), str(dst), profile, keep, force_signed, tmp)
     except _Refuse as exc:
         res.err(exc)
-    except Exception as exc:  # noqa: BLE001 -- до пользователя не должно долететь ничего
-        res.err("Внутренняя ошибка чистки PDF: %s: %s" % (type(exc).__name__, exc))
+    except Exception as exc:  # noqa: BLE001 -- nothing may reach the user
+        res.err(tr("Internal PDF cleaning error: %s: %s") % (type(exc).__name__, exc))
     finally:
         try:
             if os.path.exists(tmp):
@@ -993,20 +1047,20 @@ def clean_pdf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) 
 
 
 # ============================================================================
-#  Самопроверка: PYTHONIOENCODING=utf-8 python -m core.clean_pdf
-#  Свои файлы с метриками (без вывода содержимого): ... -m core.clean_pdf --real файл.pdf ...
+#  Self-test: PYTHONIOENCODING=utf-8 python -m core.clean_pdf
+#  Your own files with metrics (no content printed): ... -m core.clean_pdf --real file.pdf ...
 # ============================================================================
 
 _FAILS = []
 _TOTAL = [0]
-_WORD_MARK = b"\xb5\xb5\xb5\xb5"      # маркер заголовка Word (µµµµ)
+_WORD_MARK = b"\xb5\xb5\xb5\xb5"      # Word header marker (µµµµ)
 
 
 def _check(name, cond, detail=""):
     _TOTAL[0] += 1
     if not cond:
         _FAILS.append(name)
-    print("  [%s] %s%s" % ("ok" if cond else "ПРОВАЛ", name, "  -- " + str(detail) if (detail and not cond) else ""))
+    print("  [%s] %s%s" % ("ok" if cond else "FAIL", name, "  -- " + str(detail) if (detail and not cond) else ""))
 
 
 def _xmp_fixture():
@@ -1030,7 +1084,7 @@ def _xmp_fixture():
 
 
 def _fx_base(outlines=False, equal_id=False):
-    """Базовый Word-подобный PDF: /Info с личностью, XMP с журналом, теги, закладки."""
+    """Base Word-like PDF: /Info with identity, XMP with a history, tags, bookmarks."""
     N = pikepdf.Name
     pdf = pikepdf.Pdf.new()
     font = pdf.make_indirect(pikepdf.Dictionary(Type=N.Font, Subtype=N.Type1, BaseFont=N.Helvetica))
@@ -1057,7 +1111,7 @@ def _fx_base(outlines=False, equal_id=False):
     m["/Type"], m["/Subtype"] = N.Metadata, N.XML
     pdf.Root["/Metadata"] = m
     if equal_id:
-        pass                         # без /ID QPDF пишет равную пару: так выглядят Word, Chrome, LibreOffice
+        pass                         # without /ID QPDF writes an equal pair: that is what Word, Chrome, LibreOffice look like
     else:
         pdf.trailer["/ID"] = pikepdf.Array([pikepdf.String(bytes([0x41] * 16)), pikepdf.String(bytes([0x42] * 16))])
     return pdf
@@ -1065,8 +1119,9 @@ def _fx_base(outlines=False, equal_id=False):
 
 def _write(tmp, name, pdf, **kw):
     path = os.path.join(tmp, name + ".pdf")
-    # Без open_metadata при сохранении: иначе pikepdf молча заменяет нечитаемый XMP
-    # пустым и распаковывает сжатый -- фикстура «бомба» и «сжатый XMP» не доходила бы до чистки.
+    # No open_metadata on save: otherwise pikepdf silently replaces an unreadable XMP
+    # with an empty one and decompresses a compressed one -- the "bomb" and "compressed
+    # XMP" fixtures would never reach cleaning.
     kw.setdefault("fix_metadata_version", False)
     pdf.save(path, **kw)
     pdf.close()
@@ -1083,7 +1138,7 @@ def _annot(pdf, page, **kw):
 
 
 def _fx_incremental(path):
-    """Ручная инкрементальная ревизия: в первой ревизии TOPSECRET, во второй -- «замазка»."""
+    """Manual incremental revision: the first revision has TOPSECRET, the second a "cover-up"."""
     pdf = pikepdf.Pdf.new()
     pdf.add_blank_page(page_size=(200, 200))
     pdf.pages[0].obj["/Contents"] = pdf.make_stream(b"BT 10 100 Td (TOPSECRET 4111) Tj ET")
@@ -1120,7 +1175,7 @@ def _selftest():
             dst = os.path.join(tmp, name + "_out.pdf")
             h = _sha256(src)
             res = clean_pdf(src, dst, profile, **kw)
-            _check("%s: вход не изменён (sha256 до == после)" % name, _sha256(src) == h)
+            _check("%s: input unchanged (sha256 before == after)" % name, _sha256(src) == h)
             return res, dst
 
         def info_of(path):
@@ -1128,70 +1183,70 @@ def _selftest():
                 inf = q.trailer.get("/Info")
                 return {k: _s(inf.get(k)) for k in inf.keys()} if isinstance(inf, pikepdf.Dictionary) else {}
 
-        # --- 1. базовый STEALTH --------------------------------------------------
-        print("1. STEALTH на Word-подобном файле")
+        # --- 1. basic STEALTH --------------------------------------------------
+        print("1. STEALTH on a Word-like file")
         src = _write(tmp, "base", _fx_base(outlines=True))
         raw = open(src, "rb").read()
-        open(src, "wb").write(raw.replace(b"\n%" + _QPDF_MARK + b"\n", b"\n%" + _WORD_MARK + b"\n", 1))   # как у Word
+        open(src, "wb").write(raw.replace(b"\n%" + _QPDF_MARK + b"\n", b"\n%" + _WORD_MARK + b"\n", 1))   # as in Word
         before = inspect_file(src)
         res, dst = run(src, "stealth")
-        _check("ok и dst создан", res.ok and os.path.exists(dst), res.errors)
+        _check("ok and dst created", res.ok and os.path.exists(dst), res.errors)
         i0, i1 = info_of(src), info_of(dst)
         for k in ("/Author", "/Company", "/PTEX.Fullbanner"):
-            _check("%s убран" % k, k not in i1)
+            _check("%s removed" % k, k not in i1)
         for k in ("/Creator", "/Producer", "/CreationDate", "/ModDate", "/Title", "/Custom"):
-            _check("%s сохранён как был (в т.ч. кириллица)" % k, i1.get(k) == i0.get(k), (i0.get(k), i1.get(k)))
-        _check("Producer не стал pikepdf/qpdf", "pikepdf" not in i1.get("/Producer", "") and "qpdf" not in i1.get("/Producer", "").lower())
+            _check("%s kept as it was (including Cyrillic)" % k, i1.get(k) == i0.get(k), (i0.get(k), i1.get(k)))
+        _check("Producer did not become pikepdf/qpdf", "pikepdf" not in i1.get("/Producer", "") and "qpdf" not in i1.get("/Producer", "").lower())
         with pikepdf.open(dst) as q:
             xmp = q.Root.Metadata.read_bytes().decode("utf-8")
-            _check("XMP остался на месте", "xmpmeta" in xmp)
+            _check("XMP stayed in place", "xmpmeta" in xmp)
             for bad in ("DocumentID", "InstanceID", "History", "DerivedFrom", "dc:creator", "photoshop", "Иван", "uuid:"):
-                _check("в XMP нет %s" % bad, bad not in xmp)
-            _check("xmp:CreatorTool, даты и dc:title на месте", all(x in xmp for x in ("CreatorTool", "CreateDate", "Годовой отчёт")))
+                _check("no %s in XMP" % bad, bad not in xmp)
+            _check("xmp:CreatorTool, dates and dc:title in place", all(x in xmp for x in ("CreatorTool", "CreateDate", "Годовой отчёт")))
             for k in ("/StructTreeRoot", "/MarkInfo", "/Lang", "/Outlines", "/ViewerPreferences"):
-                _check("структурное %s сохранено" % k, k in q.Root)
-            _check("страниц столько же", len(q.pages) == 2)
+                _check("structural %s kept" % k, k in q.Root)
+            _check("same number of pages", len(q.pages) == 2)
             ids = [bytes(x) for x in q.trailer["/ID"]]
         with pikepdf.open(src) as q:
             old_ids = [bytes(x) for x in q.trailer["/ID"]]
-        _check("/ID перегенерирован (оба значения новые)", ids[0] != old_ids[0] and ids[1] != old_ids[1] and len(ids[0]) == 16)
-        _check("форма пары: исходная различна -- и новая различна", ids[0] != ids[1])
-        _check("маркер в заголовке -- как у исходника (Word), а не qpdf", _WORD_MARK in open(dst, "rb").read(32)
+        _check("/ID regenerated (both values are new)", ids[0] != old_ids[0] and ids[1] != old_ids[1] and len(ids[0]) == 16)
+        _check("pair shape: the original is different -- and the new one is different", ids[0] != ids[1])
+        _check("header marker is the source's (Word), not qpdf's", _WORD_MARK in open(dst, "rb").read(32)
                and _QPDF_MARK not in open(dst, "rb").read(32))
-        open(src + "2", "wb").write(raw)                       # исходник, уже писанный qpdf: маркер остаётся его
-        _check("маркер исходника не выдумываем", clean_pdf(src + "2", dst + "2").ok and _QPDF_MARK in open(dst + "2", "rb").read(32))
+        open(src + "2", "wb").write(raw)                       # the source was already written by qpdf: the marker stays its own
+        _check("the source's marker is not invented", clean_pdf(src + "2", dst + "2").ok and _QPDF_MARK in open(dst + "2", "rb").read(32))
         os.remove(src + "2")
         os.remove(dst + "2")
-        _check("KEPT-действия есть (Creator, Producer, структурное)", res.count(Act.KEPT) >= 6)
-        _check("REGENERATED /ID записано", res.count(Act.REGENERATED) == 1)
+        _check("KEPT actions present (Creator, Producer, structural)", res.count(Act.KEPT) >= 6)
+        _check("REGENERATED /ID recorded", res.count(Act.REGENERATED) == 1)
         after = inspect_file(dst)
         left = {f.label.split(" ")[0] for f in after.findings if f.risk.value in ("identity", "environment")}
-        _check("оракул: из критичного остались только /ID и ложный /Prev закладок", left <= {"/ID[0]", "/ID[1]", "Инкрементальные"}, left)
+        _check("oracle: of the critical ones only /ID and the false bookmark /Prev remain", left <= {"/ID[0]", "/ID[1]", "Incremental"}, left)
         new_sig = {s.kind for s in after.signals} - {s.kind for s in before.signals}
-        _check("оракул: сигналов scrubbed/inconsistent не появилось", not (new_sig & {"scrubbed", "inconsistent"}), new_sig)
+        _check("oracle: no scrubbed/inconsistent signals appeared", not (new_sig & {"scrubbed", "inconsistent"}), new_sig)
         r2, d2 = run(dst, "stealth_again")
-        _check("повторная чистка результата тоже ok", r2.ok, r2.errors)
+        _check("re-cleaning the result is ok too", r2.ok, r2.errors)
 
-        # --- 2. равная пара /ID ---------------------------------------------------
-        print("2. форма /ID: равная пара остаётся равной")
+        # --- 2. equal /ID pair ---------------------------------------------------
+        print("2. /ID shape: an equal pair stays equal")
         s2 = _write(tmp, "eqid", _fx_base(equal_id=True))
         with pikepdf.open(s2) as q:
             old = [bytes(x) for x in q.trailer["/ID"]]
         res, dst = run(s2, "eqid")
         with pikepdf.open(dst) as q:
             ids = [bytes(x) for x in q.trailer["/ID"]]
-        _check("фикстура: исходная пара равна", old[0] == old[1])
-        _check("пара совпадала -- совпадает, значение новое", res.ok and ids[0] == ids[1] and ids[0] != old[0])
-        # Повторная чистка результата: раньше /ID выводился из содержимого и совпадал с входом,
-        # оракул видел выжившее значение, бот отвечал «почищено не полностью».
+        _check("fixture: the source pair is equal", old[0] == old[1])
+        _check("the pair was equal -- still equal, the value is new", res.ok and ids[0] == ids[1] and ids[0] != old[0])
+        # Re-cleaning the result: /ID used to be derived from the content and matched
+        # the input, the oracle saw a surviving value, and the bot answered "not fully cleaned".
         res2, dst2 = run(dst, "eqid_again")
         with pikepdf.open(dst2) as q:
             ids2 = [bytes(x) for x in q.trailer["/ID"]]
-        _check("повторная чистка: /ID снова новый, пара равна",
+        _check("re-cleaning: /ID is new again, the pair is equal",
                res2.ok and ids2[0] == ids2[1] and ids2[0] != ids[0], res2.errors)
 
         # --- 3. PARANOID ----------------------------------------------------------
-        print("3. PARANOID: оракул требует critical == 0")
+        print("3. PARANOID: the oracle requires critical == 0")
         s3 = _write(tmp, "par", _fx_base())
         res, dst = run(s3, "par", Profile.PARANOID)
         _check("ok", res.ok, res.errors)
@@ -1199,34 +1254,34 @@ def _selftest():
         _check("critical_after == 0", after.critical == 0,
                [(f.location, f.label) for f in after.findings if f.risk.value in ("identity", "environment")])
         with pikepdf.open(dst) as q:
-            _check("/Info убран целиком, /Metadata убран", "/Info" not in q.trailer and "/Metadata" not in q.Root)
-            _check("/ID убран, страницы на месте", "/ID" not in q.trailer and len(q.pages) == 2)
-            _check("структурное сохранено и в PARANOID", all(k in q.Root for k in ("/StructTreeRoot", "/MarkInfo", "/Lang")))
+            _check("/Info removed entirely, /Metadata removed", "/Info" not in q.trailer and "/Metadata" not in q.Root)
+            _check("/ID removed, pages in place", "/ID" not in q.trailer and len(q.pages) == 2)
+            _check("structural kept in PARANOID too", all(k in q.Root for k in ("/StructTreeRoot", "/MarkInfo", "/Lang")))
 
-        # --- 4. инкрементальные ревизии -------------------------------------------
-        print("4. инкрементальные ревизии: текст под «замазкой»")
+        # --- 4. incremental revisions -------------------------------------------
+        print("4. incremental revisions: text under a \"cover-up\"")
         s4 = os.path.join(tmp, "inc.pdf")
         _fx_incremental(s4)
         eof0, prev0 = _raw(s4)
-        _check("фикстура: TOPSECRET лежит в сырых байтах, 2 ревизии, /Prev 1",
+        _check("fixture: TOPSECRET is in the raw bytes, 2 revisions, /Prev 1",
                b"TOPSECRET" in open(s4, "rb").read() and eof0 == 2 and prev0 == 1, (eof0, prev0))
         b4 = inspect_file(s4)
         for prof in (Profile.STEALTH, Profile.PARANOID):
             res, dst = run(s4, "inc_" + prof.value, prof)
             eof1, prev1 = _raw(dst)
             _check("%s: ok" % prof.value, res.ok, res.errors)
-            _check("%s: TOPSECRET из файла ушёл, %%EOF == 1, /Prev == 0" % prof.value,
+            _check("%s: TOPSECRET is gone from the file, %%EOF == 1, /Prev == 0" % prof.value,
                    b"TOPSECRET" not in open(dst, "rb").read() and eof1 == 1 and prev1 == 0, (eof1, prev1))
             with pikepdf.open(dst) as q:
-                _check("%s: на странице осталась «замазка»" % prof.value, b"REDACTED" in q.pages[0].Contents.read_bytes())
+                _check("%s: the \"cover-up\" remains on the page" % prof.value, b"REDACTED" in q.pages[0].Contents.read_bytes())
             a4 = inspect_file(dst)
-            _check("%s: оракул: «Инкрементальные апдейты» и hazard исчезли" % prof.value,
-                   not any("Инкрементальные" in f.label for f in a4.findings) and not any(s.kind == "hazard" for s in a4.signals))
+            _check("%s: oracle: \"Incremental updates\" and hazard are gone" % prof.value,
+                   not any("Incremental" in f.label for f in a4.findings) and not any(s.kind == "hazard" for s in a4.signals))
             if prof is Profile.PARANOID:
-                _check("PARANOID: critical == 0 (было %d)" % b4.critical, a4.critical == 0)
+                _check("PARANOID: critical == 0 (was %d)" % b4.critical, a4.critical == 0)
 
-        # --- 5. вложения -----------------------------------------------------------
-        print("5. вложения: удалить, но перечислить")
+        # --- 5. attachments -----------------------------------------------------------
+        print("5. attachments: remove, but list")
         pdf = _fx_base()
         pdf.attachments["исходник.xlsx"] = b"PK-secret-spreadsheet" * 50
         fs = pikepdf.AttachedFileSpec(pdf, b"hidden-note" * 20, filename="note.txt")
@@ -1237,15 +1292,15 @@ def _selftest():
             res, dst = run(s5, "att_" + prof.value, prof)
             blob = open(dst, "rb").read()
             _check("%s: ok" % prof.value, res.ok, res.errors)
-            _check("%s: байтов вложений в файле нет" % prof.value, b"PK-secret-spreadsheet" not in blob and b"hidden-note" not in blob)
+            _check("%s: no attachment bytes in the file" % prof.value, b"PK-secret-spreadsheet" not in blob and b"hidden-note" not in blob)
             names = " | ".join(a.before for a in res.actions if a.act is Act.REMOVED)
-            _check("%s: в actions названы оба вложения" % prof.value, "исходник.xlsx" in names and "note.txt" in names, names[:200])
+            _check("%s: both attachments are named in actions" % prof.value, "исходник.xlsx" in names and "note.txt" in names, names[:200])
             with pikepdf.open(dst) as q:
-                _check("%s: /EmbeddedFiles и FileAttachment убраны" % prof.value,
+                _check("%s: /EmbeddedFiles and FileAttachment removed" % prof.value,
                        len(q.attachments) == 0 and "/Annots" not in q.pages[0].obj)
 
-        # --- 6. активное содержимое и ссылки --------------------------------------
-        print("6. активное содержимое")
+        # --- 6. active content and links --------------------------------------
+        print("6. active content")
         pdf = _fx_base()
         js = D(S=N.JavaScript, JS=S("app.alert('x')"))
         pdf.Root["/OpenAction"] = js
@@ -1262,22 +1317,24 @@ def _selftest():
         _check("ok", res.ok, res.errors)
         with pikepdf.open(dst) as q:
             r = q.Root
-            _check("OpenAction, AA, Names/JavaScript, AA страницы убраны",
+            _check("OpenAction, AA, Names/JavaScript, page AA removed",
                    "/OpenAction" not in r and "/AA" not in r and "/JavaScript" not in r.get("/Names", D()) and "/AA" not in q.pages[0].obj)
             acts = [(_s(a["/A"].get("/S")), _s(a["/A"].get("/URI"))) if "/A" in a else None for a in q.pages[0].obj.Annots]
-        _check("Launch и file:// убраны, https и внутренний GoTo остались, GoTo с JS в /Next убран",
+        _check("Launch and file:// removed, https and internal GoTo kept, GoTo with JS in /Next "
+               "removed",
                acts == [None, None, ("/URI", "https://example.com/page"), ("/GoTo", ""), None], acts)
         a6 = inspect_file(dst)
         env = [(f.location, f.label) for f in a6.findings if f.risk.value == "environment"]
-        _check("оракул: окружение (JS/OpenAction/AA/Launch/file://) не осталось", not env, env)
-        _check("оракул: hazard про активное содержимое исчез", not any("Активное содержимое" in s.detail for s in a6.signals))
+        _check("oracle: no environment left (JS/OpenAction/AA/Launch/file://)", not env, env)
+        _check("oracle: the hazard about active content is gone", not any("Active content" in s.detail for s in a6.signals))
         res, dst = run(s6, "act_p", Profile.PARANOID)
         with pikepdf.open(dst) as q:
             kinds = [_s(a.get("/Subtype")) + (":" + _s(a["/A"].get("/S")) if "/A" in a else "") for a in q.pages[0].obj.get("/Annots", [])]
-        _check("PARANOID: от ссылок остался только чистый внутренний GoTo (а с JS в /Next -- удалён)", kinds == ["/Link:/GoTo"], kinds)
+        _check("PARANOID: of the links only a clean internal GoTo is left (the one with JS in "
+               "/Next is removed)", kinds == ["/Link:/GoTo"], kinds)
 
-        # --- 7. комментарии --------------------------------------------------------
-        print("7. аннотации: убрать авторство, не сами аннотации")
+        # --- 7. comments --------------------------------------------------------
+        print("7. annotations: remove authorship, not the annotations themselves")
         pdf = _fx_base()
         note = _annot(pdf, 0, Subtype=N.Text, T="Иван Петров", M="D:20240102000000", CreationDate="D:20240102000000",
                       Contents="проверьте пункт 5", RC="<p>проверьте</p>")
@@ -1288,17 +1345,17 @@ def _selftest():
             an = list(q.pages[0].obj.Annots)
             subs = [_s(a.get("/Subtype")) for a in an]
             keys = set().union(*[set(a.keys()) for a in an])
-        _check("обе аннотации на месте", subs == ["/Text", "/Popup"], subs)
-        _check("/T, /M, /CreationDate, /RC убраны, popup очищен, /Contents родителя сохранён",
+        _check("both annotations in place", subs == ["/Text", "/Popup"], subs)
+        _check("/T, /M, /CreationDate, /RC removed, popup cleared, the parent's /Contents kept",
                not (keys & {"/T", "/M", "/CreationDate", "/RC"}) and "/Contents" in an[0] and "/Contents" not in an[1], keys)
-        _check("KEPT про текст комментариев есть", any(a.label == "/Contents" and a.act is Act.KEPT for a in res.actions))
+        _check("KEPT about the comment text is present", any(a.label == "/Contents" and a.act is Act.KEPT for a in res.actions))
         res, dst = run(s7, "com_p", Profile.PARANOID)
         with pikepdf.open(dst) as q:
-            _check("PARANOID: аннотации удалены целиком", "/Annots" not in q.pages[0].obj)
-        _check("PARANOID: об этом сказано в note", any("целиком" in a.note for a in res.actions if a.act is Act.REMOVED))
+            _check("PARANOID: annotations removed entirely", "/Annots" not in q.pages[0].obj)
+        _check("PARANOID: the note says so", any("entirely" in a.note for a in res.actions if a.act is Act.REMOVED))
 
-        # --- 8. подпись ------------------------------------------------------------
-        print("8. цифровая подпись: по умолчанию отказ")
+        # --- 8. signature ------------------------------------------------------------
+        print("8. digital signature: refusal by default")
         pdf = _fx_base()
         sigd = pdf.make_indirect(D(Type=N.Sig, Filter=N.Adobe_PPKLite, SubFilter=N("/adbe.pkcs7.detached"), Name=S("Иван Петров"),
                                    M=S("D:20240105150500"), Contents=S(b"\x00" * 16), ByteRange=A([0, 1, 2, 3])))
@@ -1307,22 +1364,22 @@ def _selftest():
         pdf.Root["/AcroForm"] = D(Fields=A([fld, empty]), SigFlags=3)
         s8 = _write(tmp, "sig", pdf)
         res, dst = run(s8, "sig")
-        _check("подписанный: ok=False, файл не создан, причина названа",
-               not res.ok and not os.path.exists(dst) and any("подпис" in e for e in res.errors), res.errors)
+        _check("signed: ok=False, file not created, reason named",
+               not res.ok and not os.path.exists(dst) and any("signed" in e for e in res.errors), res.errors)
         res, dst = run(s8, "sig_f", force_signed=True)
-        _check("force_signed: ok, подпись физически убрана", res.ok and b"adbe.pkcs7" not in open(dst, "rb").read(), res.errors)
-        _check("force_signed: Act.REMOVED про подпись", any("подпись" in a.label.lower() and a.act is Act.REMOVED for a in res.actions))
+        _check("force_signed: ok, the signature is physically removed", res.ok and b"adbe.pkcs7" not in open(dst, "rb").read(), res.errors)
+        _check("force_signed: Act.REMOVED about the signature", any("signature" in a.label.lower() and a.act is Act.REMOVED for a in res.actions))
         a8 = inspect_file(dst)
-        _check("force_signed: оракул не видит заполненных подписей",
-               not any(f.label.startswith("Поле подписи «Sig1»") and f.value == "есть" for f in a8.findings))
+        _check("force_signed: the oracle sees no filled signatures",
+               not any(f.label.startswith("Signature field \"Sig1\"") and f.value == "present" for f in a8.findings))
         pdf = _fx_base()
         fld = _annot(pdf, 0, Subtype=N.Widget, FT=N.Sig, T=S("Sig2"))
         pdf.Root["/AcroForm"] = D(Fields=A([fld]))
         res, dst = run(_write(tmp, "sig_empty", pdf), "sig_empty")
-        _check("пустая заготовка подписи НЕ блокирует чистку", res.ok, res.errors)
+        _check("an empty signature placeholder does NOT block cleaning", res.ok, res.errors)
 
-        # --- 9. форма, слои, whitelist ---------------------------------------------
-        print("9. форма, слои, keep")
+        # --- 9. form, layers, whitelist ---------------------------------------------
+        print("9. form, layers, keep")
         pdf = _fx_base()
         tf = _annot(pdf, 0, Subtype=N.Widget, FT=N.Tx, T=S("fio"), V=S("Иван Петров секретно"), AP=D(N=pdf.make_stream(b"q Q")))
         pdf.Root["/AcroForm"] = D(Fields=A([tf]))
@@ -1331,49 +1388,50 @@ def _selftest():
         s9 = _write(tmp, "form", pdf)
         res, dst = run(s9, "form")
         with pikepdf.open(dst) as q:
-            _check("STEALTH: значение поля формы сохранено (содержимое)", "/V" in q.Root.AcroForm.Fields[0])
-        _check("STEALTH: выключенный слой -- UNREMOVABLE, а не молчание", res.count(Act.UNREMOVABLE) == 1)
+            _check("STEALTH: the form field value is kept (content)", "/V" in q.Root.AcroForm.Fields[0])
+        _check("STEALTH: a switched-off layer is UNREMOVABLE, not silence", res.count(Act.UNREMOVABLE) == 1)
         res, dst = run(s9, "form_p", Profile.PARANOID)
         with pikepdf.open(dst) as q:
             f = q.Root.AcroForm.Fields[0]
-            _check("PARANOID: /V и внешний вид поля убраны, NeedAppearances включён",
+            _check("PARANOID: /V and the field's appearance removed, NeedAppearances on",
                    "/V" not in f and "/AP" not in f and bool(q.Root.AcroForm.get("/NeedAppearances")))
         res, dst = run(s7, "keep", keep={"/Author", "dc:creator"})
         with pikepdf.open(dst) as q:
             xmp = q.Root.Metadata.read_bytes().decode("utf-8")
-        _check("keep: /Author и dc:creator оставлены, GUID всё равно убраны",
+        _check("keep: /Author and dc:creator kept, GUIDs removed all the same",
                info_of(dst).get("/Author") == "Иван Петров" and "Иван Петров" in xmp and "DocumentID" not in xmp)
-        _check("keep: в actions KEPT со ссылкой на whitelist", any(a.act is Act.KEPT and "whitelist" in a.note for a in res.actions))
+        _check("keep: actions have KEPT referring to the whitelist", any(a.act is Act.KEPT and "whitelist" in a.note for a in res.actions))
 
-        # --- 10. устойчивость -------------------------------------------------------
-        print("10. битые, пустые, зашифрованные, неверные аргументы")
+        # --- 10. robustness -------------------------------------------------------
+        print("10. broken, empty, encrypted, wrong arguments")
         good = open(s3, "rb").read()
         junk = {"empty": b"", "junk": b"%PDF-1.7\n" + os.urandom(400), "notpdf": b"PK\x03\x04hello", "truncated": good[: len(good) // 2]}
         for name, data in junk.items():
             p = os.path.join(tmp, name + ".pdf")
             open(p, "wb").write(data)
             res, dst = run(p, "bad_" + name)
-            _check("%s: ok=False, есть errors, dst нет, без исключений" % name,
+            _check("%s: ok=False, errors present, no dst, no exceptions" % name,
                    not res.ok and bool(res.errors) and not os.path.exists(dst), res.errors)
         s10 = _write(tmp, "enc", _fx_base(), encryption=pikepdf.Encryption(user="u", owner="o"))
         res, dst = run(s10, "enc")
-        _check("зашифрованный: ok=False, dst нет", not res.ok and not os.path.exists(dst), res.errors)
+        _check("encrypted: ok=False, no dst", not res.ok and not os.path.exists(dst), res.errors)
         s10 = _write(tmp, "enc2", _fx_base(), encryption=pikepdf.Encryption(user="", owner="o"))
         res, dst = run(s10, "enc_empty")
-        _check("зашифрованный с пустым паролем: тоже отказ (защиту молча не снимаем)", not res.ok and not os.path.exists(dst), res.errors)
+        _check("encrypted with an empty password: also a refusal (we never strip protection "
+               "silently)", not res.ok and not os.path.exists(dst), res.errors)
         res = clean_pdf(os.path.join(tmp, "нет_такого.pdf"), os.path.join(tmp, "x.pdf"))
-        _check("несуществующий вход: ok=False, errors без абсолютного пути",
+        _check("nonexistent input: ok=False, errors without an absolute path",
                not res.ok and bool(res.errors) and not any(tmp in e for e in res.errors), res.errors)
         h = _sha256(s3)
         res = clean_pdf(s3, s3)
-        _check("dst == src: отказ, вход цел", not res.ok and _sha256(s3) == h)
+        _check("dst == src: refusal, input intact", not res.ok and _sha256(s3) == h)
         res = clean_pdf(s3, os.path.join(tmp, "x.pdf"), Profile.REGENERATE)
-        _check("профиль regenerate для PDF: отказ", not res.ok and bool(res.errors))
+        _check("regenerate profile for PDF: refusal", not res.ok and bool(res.errors))
         res = clean_pdf(s3, os.path.join(tmp, "x.pdf"), "нет-такого")
-        _check("неизвестный профиль: отказ без исключения", not res.ok and bool(res.errors))
+        _check("unknown profile: refusal without an exception", not res.ok and bool(res.errors))
 
-        # --- 11. самоотпечаток: Producer, подменённый при сохранении ---------------
-        print("11. если save() подменит Producer -- файл не отдаём")
+        # --- 11. self-fingerprint: Producer substituted on save ---------------
+        print("11. if save() substitutes Producer -- the file is not handed over")
         global _save
         orig_save = _save
 
@@ -1386,69 +1444,70 @@ def _selftest():
             res, dst = run(src, "evil")
         finally:
             _save = orig_save
-        _check("подмена Producer после сохранения ловится: ok=False, dst нет", not res.ok and not os.path.exists(dst), res.errors)
+        _check("Producer substitution after saving is caught: ok=False, no dst", not res.ok and not os.path.exists(dst), res.errors)
 
-        # --- 12. сквозные места, сжатый XMP, бомба, циклы --------------------------
-        print("12. сквозные места: XMP картинки, /PieceInfo, /Thumb, /AF, циклы")
+        # --- 12. sweep spots, compressed XMP, bomb, cycles --------------------------
+        print("12. sweep spots: image XMP, /PieceInfo, /Thumb, /AF, cycles")
         pdf = _fx_base()
-        pdf.Root.Metadata.write(zlib.compress(_xmp_fixture()), filter=N.FlateDecode)      # сжатый XMP
+        pdf.Root.Metadata.write(zlib.compress(_xmp_fixture()), filter=N.FlateDecode)      # compressed XMP
         xm = pdf.make_stream(_xmp_fixture())
         xm["/Type"], xm["/Subtype"] = N.Metadata, N.XML
         img = pdf.make_stream(b"\x00\x00\x00", Type=N.XObject, Subtype=N.Image, Width=1, Height=1,
                               ColorSpace=N.DeviceRGB, BitsPerComponent=8)
-        img["/Metadata"] = xm                                                              # XMP у картинки
+        img["/Metadata"] = xm                                                              # XMP on an image
         pdf.pages[0].obj.Resources["/XObject"] = D(Im1=img)
-        pdf.pages[0].contents_add(pdf.make_stream(b"q /Im1 Do Q"))                     # рисуется: не «лишний ресурс»
+        pdf.pages[0].contents_add(pdf.make_stream(b"q /Im1 Do Q"))                     # drawn: not an "unused resource"
         pdf.Root["/PieceInfo"] = D(Illustrator=D(LastModified=S("D:20240101000000")))
         pdf.pages[0].obj["/PieceInfo"] = D(Acrobat=D(LastModified=S("D:20240101000000")))
         pdf.pages[0].obj["/Thumb"] = pdf.make_stream(b"\x00")
         pdf.Root["/AF"] = A([pdf.make_indirect(pikepdf.AttachedFileSpec(pdf, b"af-secret", filename="af.xml").obj)])
         ctree = pdf.make_indirect(D(Kids=A([])))
-        ctree.Kids.append(ctree)                                                           # цикл в дереве имён
+        ctree.Kids.append(ctree)                                                           # cycle in the name tree
         pdf.Root["/Names"] = D(EmbeddedFiles=ctree)
         fld = pdf.make_indirect(D(FT=N.Tx, T=S("a"), Kids=A([])))
-        fld.Kids.append(fld)                                                               # цикл в полях формы
+        fld.Kids.append(fld)                                                               # cycle in the form fields
         pdf.Root["/AcroForm"] = D(Fields=A([fld]))
         s12 = _write(tmp, "misc", pdf)
         res, dst = run(s12, "misc")
-        _check("ok (циклы не повесили чистку)", res.ok, res.errors)
+        _check("ok (cycles did not hang cleaning)", res.ok, res.errors)
         with pikepdf.open(dst) as q:
             xmps = [o.read_bytes() for o in q.objects if isinstance(o, pikepdf.Stream) and _s(o.get("/Type")) == "/Metadata"]
-            _check("XMP корня (сжатый) и XMP картинки вычищены: GUID-ов нет ни в одном потоке",
+            _check("root XMP (compressed) and image XMP cleaned: no GUIDs in any stream",
                    len(xmps) == 2 and not any(b"uuid:" in x or b"DocumentID" in x for x in xmps), len(xmps))
-            _check("/PieceInfo (корень, страница), /Thumb, /AF убраны",
+            _check("/PieceInfo (root, page), /Thumb, /AF removed",
                    "/PieceInfo" not in q.Root and "/PieceInfo" not in q.pages[0].obj and "/Thumb" not in q.pages[0].obj
                    and "/AF" not in q.Root)
-        _check("в actions есть и /PieceInfo, и /AF с именем файла", any(a.label == "/AF" and "af.xml" in a.before for a in res.actions)
+        _check("actions have both /PieceInfo and /AF with the file name", any(a.label == "/AF" and "af.xml" in a.before for a in res.actions)
                and any(a.label == "/PieceInfo" for a in res.actions))
         pdf = _fx_base()
-        pdf.Root.Metadata.write(zlib.compress(b"\x00" * (8 << 20)), filter=N.FlateDecode)   # бомба: 8 МБ нулей в ~8 КБ
+        pdf.Root.Metadata.write(zlib.compress(b"\x00" * (8 << 20)), filter=N.FlateDecode)   # bomb: 8 MB of zeros in ~8 KB
         s12b = _write(tmp, "xmpbomb", pdf)
         res, dst = run(s12b, "newdir/bomb")
         with pikepdf.open(dst) as q:
             small = len(q.Root.Metadata.read_bytes()) < 1000
-        _check("бомба в XMP: не распаковываем, XMP заменён пустой оболочкой, каталог dst создан", res.ok and small and res.count(Act.NORMALIZED) >= 1, res.errors)
+        _check("bomb in XMP: not decompressed, XMP replaced with an empty shell, dst directory "
+               "created", res.ok and small and res.count(Act.NORMALIZED) >= 1, res.errors)
         res, dst = run(s12b, "bomb_p", Profile.PARANOID)
         with pikepdf.open(dst) as q:
-            _check("бомба в XMP, PARANOID: поток убран", res.ok and "/Metadata" not in q.Root, res.errors)
+            _check("bomb in XMP, PARANOID: stream removed", res.ok and "/Metadata" not in q.Root, res.errors)
         pdf = pikepdf.Pdf.new()
         pdf.add_blank_page()
         pdf.Root.Metadata = pdf.make_stream(_EMPTY_XMP, Type=N.Metadata, Subtype=N.XML)
         _save(pdf, os.path.join(tmp, "xmp_bytes.pdf"))
         with pikepdf.open(os.path.join(tmp, "xmp_bytes.pdf")) as q:
-            _check("_save не пересериализует XMP корня (open_metadata не вызывается)",
+            _check("_save does not re-serialize the root XMP (open_metadata is not called)",
                    q.Root.Metadata.read_bytes() == _EMPTY_XMP)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print("\nИТОГО: %d проверок, %d провалено" % (_TOTAL[0], len(_FAILS)))
+    print("\nTOTAL: %d checks, %d failed" % (_TOTAL[0], len(_FAILS)))
     for f in _FAILS:
-        print("  ПРОВАЛ:", f)
+        print("  FAIL:", f)
     return 1 if _FAILS else 0
 
 
 def _real(paths):
-    """Метрики чистки на настоящих файлах. Содержимое и найденные ПДн не печатаются."""
+    """Cleaning metrics on real files. Content and any personal data found are not printed."""
     import shutil
 
     from .inspect import inspect_file
@@ -1471,8 +1530,8 @@ def _real(paths):
             b = inspect_file(p)
             eof0, prev0 = _raw(p)
             f0 = facts(p)
-            print("файл %d: страниц %d; ДО: critical %d, sensitive %d, %%EOF %d, сырых /Prev %d (из них звеньев закладок "
-                  "/Outlines: %d), /Prev в трейлере: %s"
+            print("file %d: pages %d; BEFORE: critical %d, sensitive %d, %%EOF %d, raw /Prev %d "
+                  "(of them /Outlines bookmark links: %d), /Prev in trailer: %s"
                   % (n, f0["pages"], b.critical, b.sensitive, eof0, prev0, f0["outl_prev"], f0["trailer_prev"]))
             for prof in (Profile.STEALTH, Profile.PARANOID):
                 dst = os.path.join(tmp, "o%d_%s.pdf" % (n, prof.value))
@@ -1487,13 +1546,16 @@ def _real(paths):
                                     if k in ("scrubbed", "inconsistent")})
                 left = sorted({(f.location, f.label.split(" ")[0]) for f in a.findings if f.risk.value in ("identity", "environment")})
                 print("  %-8s ok=%s errors=%d  critical %d->%d  sensitive %d->%d" % (prof.value, res.ok, len(res.errors), b.critical, a.critical, b.sensitive, a.sensitive))
-                print("           %%EOF %d->%d; сырых /Prev %d->%d (звеньев закладок осталось %d); /Prev в ТРЕЙЛЕРЕ %s->%s"
+                print("           %%EOF %d->%d; raw /Prev %d->%d (bookmark links left %d); /Prev "
+                      "in the TRAILER %s->%s"
                       % (eof0, eof1, prev0, prev1, f1["outl_prev"], f0["trailer_prev"], f1["trailer_prev"]))
-                print("           сохранено структурное %s из %s; Creator/Producer как были: %s; dst открывается в pikepdf, страниц %s"
-                      % (sorted(f1["keys"]), sorted(f0["keys"]), f1["app"] == f0["app"], "столько же" if f1["pages"] == f0["pages"] else "ИЗМЕНИЛОСЬ"))
-                print("           повторный inspect: новые сигналы scrubbed/inconsistent: %s; остаточно критичное: %s" % (new_kinds or "нет", left))
-                print("           действия: %s" % {k.value: len(v) for k, v in res.by_act().items()})
-            print("           sha256 входа до == после: %s (%s...)" % (_sha256(p) == h0, h0[:12]))
+                print("           structural kept %s of %s; Creator/Producer as they were: %s; "
+                      "dst opens in pikepdf, pages %s"
+                      % (sorted(f1["keys"]), sorted(f0["keys"]), f1["app"] == f0["app"], "same" if f1["pages"] == f0["pages"] else "CHANGED"))
+                print("           re-inspect: new scrubbed/inconsistent signals: %s; critical "
+                      "left: %s" % (new_kinds or "none", left))
+                print("           actions: %s" % {k.value: len(v) for k, v in res.by_act().items()})
+            print("           sha256 of the input before == after: %s (%s...)" % (_sha256(p) == h0, h0[:12]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -1,29 +1,32 @@
 # -*- coding: utf-8 -*-
-"""Тесты чистки (фазы 1-2): PDF, картинки, OOXML, диспетчер core.clean,
-рендер core.cleanreport.
+"""Cleaning tests (phases 1-2): PDF, images, OOXML, the core.clean dispatcher,
+the core.cleanreport renderer.
 
-Главная мысль та же, что в core/cleanmodel.py: инспектор -- ОРАКУЛ. Результат
-чистки проверяется не по списку действий чистильщика, а повторным
-inspect_file() по выходному файлу, плюс независимым сырым поиском значений в
-байтах результата (в том числе в распакованных потоках PDF и чанках PNG).
+The main idea is the same as in core/cleanmodel.py: the inspector is the
+ORACLE. The cleaning result is checked not against the cleaner's list of
+actions but by running inspect_file() again on the output file, plus an
+independent raw search for the values in the output bytes (including
+decompressed PDF streams and PNG chunks).
 
-Главный инвариант, проверяется на КАЖДОМ запуске чистки через _clean():
-sha256 ВХОДНОГО файла до и после совпадает.
+The main invariant, checked on EVERY cleaning run via _clean(): the sha256
+of the INPUT file is the same before and after.
 
-Что здесь НЕ проверяется и почему: чистки OLE2, ODF и RTF не существует
-(фаза 4), поэтому для них проверяется только честный ОТКАЗ -- файл не
-создан, номер фазы назван, отчёт не обещает чистоты. Подгонять тест под
-текущее поведение запрещено (AGENTS.md, п. 6): упавшая проверка здесь -- это
-найденный дефект модуля, а не повод ослабить проверку.
+What is NOT checked here and why: OLE2, ODF and RTF cleaning doesn't exist
+(phase 4), so for them only an honest REFUSAL is checked: no file is
+created, the phase number is named, the report doesn't promise cleanliness.
+Fitting a test to the current behavior is forbidden (AGENTS.md, item 6): a
+failed check here is a defect found in the module, not a reason to weaken
+the check.
 
-Запуск (PYTHONIOENCODING=utf-8 обязателен на Windows):
+Run (PYTHONIOENCODING=utf-8 is required on Windows):
 
     PYTHONIOENCODING=utf-8 python -m tests.test_clean
 
-Без pytest, но совместимо с ним: функции test_*, каждая сама заводит и убирает
-временный каталог. Порядок -- по имени, поэтому test_99_render идёт ПОСЛЕДНИМ
-и разбирает все результаты чистки, накопленные предыдущими тестами.
-Код возврата 1 при любом провале.
+No pytest, but compatible with it: test_* functions, each creates and
+removes its own temporary directory. The order is by name, so test_99_render
+runs LAST and goes through all the cleaning results accumulated by the
+previous tests.
+Exit code 1 on any failure.
 """
 
 from __future__ import annotations
@@ -59,11 +62,11 @@ from core.model import Risk
 from tests import fixtures
 
 # ---------------------------------------------------------------------------
-# учёт результатов
+# result bookkeeping
 # ---------------------------------------------------------------------------
 
-_RESULTS = []   # (имя проверки, прошла?, пояснение)
-_SEEN = []      # (метка, результат чистки): сюда стекаются все результаты для test_98/test_99
+_RESULTS = []   # (check name, passed?, explanation)
+_SEEN = []      # (label, cleaning result): all results flow here for test_98/test_99
 
 
 def _check(name, condition, detail=""):
@@ -76,7 +79,7 @@ def _check(name, condition, detail=""):
 
 
 def _with_tmp(fn):
-    """Каждый test_* сам заводит и убирает свой временный каталог."""
+    """Each test_* creates and removes its own temporary directory."""
 
     def wrapper():
         tmp = tempfile.mkdtemp(prefix="tgbot_clean_test_")
@@ -90,7 +93,7 @@ def _with_tmp(fn):
 
 
 # ---------------------------------------------------------------------------
-# мелкие помощники
+# small helpers
 # ---------------------------------------------------------------------------
 
 STEALTH, PARANOID = Profile.STEALTH, Profile.PARANOID
@@ -115,7 +118,7 @@ def _sha256(path):
 
 
 def _u16(text):
-    """Длина в UTF-16 code units: так считает лимит Telegram, а не len()."""
+    """Length in UTF-16 code units: that's how the Telegram limit counts, not len()."""
     return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
 
@@ -128,7 +131,7 @@ def _pname(profile):
 
 
 def _rnd(n, seed):
-    """Детерминированный «мусор»: воспроизводимый и без os.urandom."""
+    """Deterministic "garbage": reproducible and without os.urandom."""
     out, i = b"", 0
     while len(out) < n:
         out += hashlib.sha256(b"%s:%d" % (seed.encode(), i)).digest()
@@ -137,60 +140,67 @@ def _rnd(n, seed):
 
 
 def _clean(tag, tmp, src, profile=STEALTH, **kw):
-    """clean_file во вложенный out/ + главный инвариант: sha256 входа до и после.
+    """clean_file into a nested out/ + the main invariant: sha256 of the input before and after.
 
-    -> (res, dst). res None, если clean_file бросил исключение (это провал).
-    Результат попадает в _SEEN для финальных тестов рендера."""
+    -> (res, dst). res is None if clean_file raised (that's a failure).
+    The result goes into _SEEN for the final rendering tests."""
     label = "%s/%s" % (tag, _pname(profile))
     base = re.sub(r"[^\w.-]+", "_", tag)
     dst = os.path.join(tmp, "out", "%s_%s%s" % (base, _pname(profile), os.path.splitext(src)[1]))
     before = _sha256(src)
     try:
         res = clean_file(src, dst, profile, **kw)
-    except Exception as exc:  # noqa: BLE001 -- именно это и проверяем
-        _check("%s: clean_file не бросил исключение" % label, False,
+    except Exception as exc:  # noqa: BLE001 -- this is exactly what we test
+        _check("%s: clean_file did not raise" % label, False,
                "%s: %s" % (type(exc).__name__, exc))
         res = None
-    _check("%s: ИНВАРИАНТ -- sha256 входа до == после чистки" % label, _sha256(src) == before)
+    _check("%s: INVARIANT -- input sha256 before == after cleaning" % label, _sha256(src) == before)
     if res is not None:
         _SEEN.append((label, res))
     return res, dst
 
 
+# Presence markers are report markup, not data. The tests run in English, where
+# the markers are longer than the 5-character cutoff below.
+_MARKERS = frozenset(("present", "absent", "not set", "empty", "yes", "no", "on", "off"))
+
+
 def _own_survivors(src_rep, dst_rep):
-    """Собственный подсчёт, независимый от core.clean.survived_values: какие
-    исходные IDENTITY/ENVIRONMENT-значения длиннее 5 символов встречаются в
-    значениях находок результата (подстрока, без регистра и лишних пробелов)."""
+    """Our own count, independent of core.clean.survived_values: which original
+    IDENTITY/ENVIRONMENT values longer than 5 characters occur in the values of
+    the output's findings (substring, case- and extra-whitespace-insensitive)."""
     dst_vals = [_norm(g.value) for g in dst_rep.findings if g.value]
     out = []
     for f in src_rep.findings:
         v = _norm(f.value)
-        if f.risk in _LEAKY and len(v) > 5 and any(v in d for d in dst_vals):
+        if f.risk in _LEAKY and len(v) > 5 and v not in _MARKERS \
+                and any(v in d for d in dst_vals):
             out.append((f.label, f.value))
     return out
 
 
 def _oracle(label, src, dst):
-    """Повторная инспекция результата СВОИМИ руками (а не через res.verified).
-    -> (отчёт src, отчёт dst)."""
+    """Re-inspect the output with OUR OWN hands (not via res.verified).
+    -> (src report, dst report)."""
     a, b = inspect_file(src), inspect_file(dst)
     universe = [f for f in a.findings if f.risk in _LEAKY and len(_norm(f.value)) > 5]
-    _check("%s: оракул не вакуумен -- в исходнике есть IDENTITY/ENVIRONMENT длиннее 5 символов (%d)"
+    _check("%s: the oracle is not vacuous -- the original has IDENTITY/ENVIRONMENT longer than 5 "
+           "characters (%d)"
            % (label, len(universe)), len(universe) > 0)
     surv = survived_values(a, b)
-    _check("%s: ОРАКУЛ -- ни одно исходное значение не встречается в находках результата"
+    _check("%s: ORACLE -- no original value occurs in the output's findings"
            % label, not surv, [(s.label, s.found_at) for s in surv][:5])
     own = _own_survivors(a, b)
-    _check("%s: ОРАКУЛ -- то же по независимому подсчёту" % label, not own, own[:5])
+    _check("%s: ORACLE -- the same by the independent count" % label, not own, own[:5])
     return a, b
 
 
-# --- сырой поиск значений в байтах результата ---------------------------------
+# --- raw search for values in the output bytes --------------------------------
 
 
 def _needles(text):
-    """Как значение может лежать в файле: UTF-8/16, cp1251, latin-1 и hex-строка
-    PDF (UTF-16BE с BOM и без)."""
+    """How a value can sit in the file: UTF-8/16, cp1251, latin-1 and a PDF hex
+    string (UTF-16BE with and without a BOM)."""
     be = text.encode("utf-16-be")
     out = {text.encode("utf-8"), text.encode("utf-16-le"), be,
            be.hex().encode(), (b"\xfe\xff" + be).hex().encode()}
@@ -207,8 +217,8 @@ def _inflate(raw, limit=1 << 22):
 
 
 def _png_chunks(data):
-    """Независимый разбор PNG: ([(тип, тело, crc_верна)], смещение_конца).
-    None -- нет сигнатуры. Оборванный чанк помечается типом b'?'."""
+    """Independent PNG parse: ([(type, body, crc_ok)], end_offset).
+    None means no signature. A truncated chunk gets the type b'?'."""
     if data[:8] != PNG_SIG:
         return None
     pos, out = 8, []
@@ -230,8 +240,8 @@ def _chunks(data):
 
 
 def _png_inflated(data):
-    """Распакованное содержимое сжатых чанков PNG: в zTXt/iTXt/iCCP значения не
-    видны в сырых байтах."""
+    """Decompressed content of compressed PNG chunks: values in zTXt/iTXt/iCCP
+    aren't visible in the raw bytes."""
     out = []
     for t, body, _ok in _chunks(data):
         try:
@@ -242,14 +252,14 @@ def _png_inflated(data):
                 flag, rest = rest[0], rest[2:]
                 text = rest.partition(b"\0")[2].partition(b"\0")[2]
                 out.append(_inflate(text) if flag else text)
-        except Exception:  # noqa: BLE001 -- битый чанк в поиске не помеха
+        except Exception:  # noqa: BLE001 -- a broken chunk doesn't get in the way of the search
             pass
     return out
 
 
 def _blob(path):
-    """Всё, что физически лежит в файле: сырые байты + распакованные потоки PDF
-    (в т.ч. объектные потоки) и сжатые чанки PNG."""
+    """Everything physically in the file: raw bytes + decompressed PDF streams
+    (including object streams) and compressed PNG chunks."""
     data = _read(path)
     parts = [data]
     if data[:5] == b"%PDF-":
@@ -269,17 +279,17 @@ def _blob(path):
 
 
 def _leaked(path, texts, raw=()):
-    """Какие из значений (текст во всех кодировках) и сырых байтовых иголок
-    физически лежат в файле."""
+    """Which of the values (text in all encodings) and raw byte needles physically
+    sit in the file."""
     low = _blob(path).lower()
     found = [t for t in texts if any(n.lower() in low for n in _needles(t))]
-    found += ["<байты %s...>" % n[:6].hex() for n in raw if n.lower() in low]
+    found += ["<bytes %s...>" % n[:6].hex() for n in raw if n.lower() in low]
     return found
 
 
 # ---------------------------------------------------------------------------
-# сборщики файлов (фикстур, которых нет в tests/fixtures.py: SOF и Orientation
-# у JPEG, iCCP/eXIf у PNG, подпись и теги у PDF)
+# file builders (fixtures that tests/fixtures.py doesn't have: SOF and
+# Orientation for JPEG, iCCP/eXIf for PNG, a signature and tags for PDF)
 # ---------------------------------------------------------------------------
 
 EX_ARTIST = "Орлов Орёл Орлович"
@@ -291,19 +301,19 @@ EX_BODY = "BODY-SN-7731-ZQ"
 EX_LENS = "LENS-SN-4419-XR"
 EX_TEXTS = [EX_ARTIST, EX_MAKE, EX_MODEL, EX_SOFT, EX_DATE, EX_BODY, EX_LENS]
 EX_ORIENT_TAG, EX_ARTIST_TAG, EX_GPS_TAG, EX_EXIF_TAG = 0x0112, 0x013B, 0x8825, 0x8769
-# теги IFD0, которых в чистом результате быть не должно
+# IFD0 tags that must not be in a clean result
 EX_FORBIDDEN = {0x010F, 0x0110, 0x0131, EX_ARTIST_TAG, EX_GPS_TAG, EX_EXIF_TAG}
 
 
 def _gps_needles(e):
-    """Байты рациональных чисел широты и долготы в заданном порядке байтов."""
+    """Bytes of the latitude and longitude rationals in the given byte order."""
     return [struct.pack(e + "6I", 59, 1, 56, 1, 1500, 100),
             struct.pack(e + "6I", 30, 1, 19, 1, 2300, 100)]
 
 
 def _exif_tiff(orient, order="<"):
-    """TIFF-блок EXIF: Make/Model/Software/Artist, ExifIFD (дата, серийники тела и
-    объектива) и GPS. orient=None -- без тега Orientation. order: "<" или ">"."""
+    """An EXIF TIFF block: Make/Model/Software/Artist, ExifIFD (date, body and lens
+    serial numbers) and GPS. orient=None means no Orientation tag. order: "<" or ">"."""
     e = order
 
     def asc(s):
@@ -348,8 +358,8 @@ def _exif_tiff(orient, order="<"):
 
 
 def _entropy():
-    """Энтропийный блок с байт-стаффингом FF00 и маркерами RSTn: наивный сканер,
-    обрывающий разбор на первом 0xFF, на нём ломается."""
+    """An entropy block with FF00 byte stuffing and RSTn markers: a naive scanner
+    that stops parsing at the first 0xFF breaks on it."""
     raw = hashlib.sha256(b"entropy").digest() * 6
     out = b"\xab\xff\x00"
     chunks = [raw[i:i + 48] for i in range(0, len(raw), 48)]
@@ -361,7 +371,7 @@ def _entropy():
 
 
 def _jpeg_bytes(orient=6, order="<", w=640, h=480, exif=True, sof=0xC0, tail=b""):
-    """JPEG с настоящим SOF (по умолчанию 640x480), DQT, DHT и SOS."""
+    """A JPEG with a real SOF (640x480 by default), DQT, DHT and SOS."""
     segs = [b"\xff\xd8"]
     if exif:
         app1 = b"Exif\0\0" + _exif_tiff(orient, order)
@@ -378,7 +388,7 @@ def _jpeg_bytes(orient=6, order="<", w=640, h=480, exif=True, sof=0xC0, tail=b""
 
 
 def _jpeg_segments(data):
-    """Независимый разбор сегментов JPEG до SOS включительно: [(маркер, начало, конец)]."""
+    """Independent parse of JPEG segments up to and including SOS: [(marker, start, end)]."""
     if data[:2] != b"\xff\xd8":
         return []
     segs, i = [], 2
@@ -404,7 +414,7 @@ def _sos_at(data):
 
 
 def _sof_dims(data):
-    """(ширина, высота) из первого SOF, None если SOF нет."""
+    """(width, height) from the first SOF, None if there's no SOF."""
     for m, a, _b in _jpeg_segments(data):
         if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):
             _p, h, w = struct.unpack(">BHH", data[a + 4:a + 9])
@@ -413,7 +423,7 @@ def _sof_dims(data):
 
 
 def _tiff_ifd0(tiff):
-    """IFD0 TIFF-блока: (порядок байтов, {тег: (тип, счётчик, 4 байта значения)}) или None."""
+    """IFD0 of a TIFF block: (byte order, {tag: (type, count, 4 value bytes)}) or None."""
     if len(tiff) < 8 or tiff[:2] not in (b"II", b"MM"):
         return None
     e = "<" if tiff[:2] == b"II" else ">"
@@ -433,7 +443,7 @@ def _tiff_ifd0(tiff):
 
 
 def _ifd0_tags(tiff_blocks):
-    """Объединённые теги IFD0 всех блоков: {тег: ((тип, счётчик, значение4), порядок)}."""
+    """Combined IFD0 tags of all blocks: {tag: ((type, count, value4), order)}."""
     tags = {}
     for blk in tiff_blocks:
         got = _tiff_ifd0(blk)
@@ -443,7 +453,7 @@ def _ifd0_tags(tiff_blocks):
 
 
 def _orientation(tags):
-    """Значение Orientation из _ifd0_tags() или None."""
+    """The Orientation value from _ifd0_tags() or None."""
     if EX_ORIENT_TAG not in tags:
         return None
     (_typ, _cnt, raw), e = tags[EX_ORIENT_TAG]
@@ -473,7 +483,7 @@ PNG_FORBIDDEN = {b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"}
 
 
 def _png_bytes(w=8, h=6, pre=(), post=(), trailer=b""):
-    """PNG RGB 8 бит настоящего размера w x h; IDAT в двух чанках. -> (байты, строки пикселей)."""
+    """An 8-bit RGB PNG of the real size w x h; IDAT in two chunks. -> (bytes, pixel rows)."""
     rows = b"".join(b"\x00" + bytes((x * 31 + y * 17) % 256 for x in range(w * 3)) for y in range(h))
     z = zlib.compress(rows, 9)
     cut = max(1, len(z) // 2)
@@ -484,8 +494,8 @@ def _png_bytes(w=8, h=6, pre=(), post=(), trailer=b""):
 
 
 def _live_bomb_png(tmp):
-    """Валидный PNG, в котором лежит настоящий zTXt-чанк-бомба из fixtures.make_broken.
-    -> (путь, строки пикселей)."""
+    """A valid PNG holding the real zTXt chunk bomb from fixtures.make_broken.
+    -> (path, pixel rows)."""
     bomb_src = fixtures.make_broken(tmp)["png_ztxt_bomb"]
     bomb_body = next(b for t, b, _o in _chunks(_read(bomb_src)) if t == b"zTXt")
     data, rows = _png_bytes(pre=[fixtures._png_chunk(b"zTXt", bomb_body)])
@@ -493,7 +503,7 @@ def _live_bomb_png(tmp):
 
 
 def _png_full():
-    """PNG, в котором есть ВСЁ из списка на удаление и всё из списка на сохранение."""
+    """A PNG with EVERYTHING from the removal list and everything from the keep list."""
     ch = fixtures._png_chunk
     xmp = (b'<?xpacket begin="\xef\xbb\xbf" id="W5M0MpCehiHzreSzNTczkc9d"?>'
            b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
@@ -524,7 +534,7 @@ def _png_dims(data):
 
 
 def _corrupt_crc(data, ctype):
-    """Копия PNG с испорченной CRC первого чанка нужного типа."""
+    """A copy of a PNG with a corrupted CRC on the first chunk of the given type."""
     pos = 8
     while pos + 12 <= len(data):
         n = struct.unpack(">I", data[pos:pos + 4])[0]
@@ -532,7 +542,7 @@ def _corrupt_crc(data, ctype):
             i = pos + 8 + n
             return data[:i] + bytes([data[i] ^ 0xFF]) + data[i + 1:]
         pos += 12 + n
-    raise ValueError("нет чанка %r" % ctype)
+    raise ValueError("no chunk %r" % ctype)
 
 
 # --- PDF ---------------------------------------------------------------------
@@ -552,7 +562,7 @@ STRUCT_AUTHOR = "Структура Автор Тестов"
 
 
 def _pdf_rich(path):
-    """PDF через pikepdf с заполненными /Info и XMP (личность, окружение, приложение)."""
+    """A PDF via pikepdf with filled /Info and XMP (identity, environment, application)."""
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(595, 842))
     with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
@@ -578,7 +588,7 @@ def _pdf_rich(path):
 
 
 def _pdf_tagged(path, author=STRUCT_AUTHOR):
-    """PDF с /StructTreeRoot, /MarkInfo, /Lang, /Outlines (3 закладки), /ViewerPreferences."""
+    """A PDF with /StructTreeRoot, /MarkInfo, /Lang, /Outlines (3 bookmarks), /ViewerPreferences."""
     N = pikepdf.Name
     pdf = pikepdf.new()
     for _ in range(3):
@@ -597,8 +607,8 @@ def _pdf_tagged(path, author=STRUCT_AUTHOR):
 
 
 def _pdf_form(path, kind):
-    """kind: "filled" -- заполненная подпись; "placeholder" -- пустая заготовка
-    (/FT /Sig без /V); "docmdp" -- сертифицирующая подпись только в /Perms."""
+    """kind: "filled" is a filled signature; "placeholder" is an empty stub
+    (/FT /Sig without /V); "docmdp" is a certifying signature only in /Perms."""
     N, D, S, A = pikepdf.Name, pikepdf.Dictionary, pikepdf.String, pikepdf.Array
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(200, 200))
@@ -629,7 +639,7 @@ def _pdf_form(path, kind):
 
 
 def _pdf_unequal_id(path):
-    """PDF, у которого /ID[0] != /ID[1] (разошедшаяся пара: так выглядит пересохранённый файл)."""
+    """A PDF where /ID[0] != /ID[1] (a diverged pair: that's what a re-saved file looks like)."""
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(200, 200))
     pdf.docinfo["/Author"] = "Автор Разных Идентификаторов"
@@ -640,7 +650,7 @@ def _pdf_unequal_id(path):
 
 
 def _pdf_incr_secret(path):
-    """Ручная инкрементальная ревизия: в первой ревизии TOPSECRET, во второй -- «замазка»."""
+    """A manual incremental revision: TOPSECRET in the first revision, a "redaction" in the second."""
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(200, 200))
     pdf.pages[0].obj["/Contents"] = pdf.make_stream(b"BT 10 100 Td (TOPSECRET 4111) Tj ET")
@@ -663,7 +673,7 @@ def _pdf_incr_secret(path):
 
 
 def _trailer_ids(path):
-    """[ID0, ID1] из трейлера (bytes) или None."""
+    """[ID0, ID1] from the trailer (bytes) or None."""
     with pikepdf.open(path) as q:
         ids = q.trailer.get("/ID")
         if isinstance(ids, pikepdf.Array) and len(ids) == 2:
@@ -672,14 +682,14 @@ def _trailer_ids(path):
 
 
 # ===========================================================================
-# 1. ИНВАРИАНТ sha256 и ОРАКУЛ -- на каждой фикстуре и каждом профиле
+# 1. The sha256 INVARIANT and the ORACLE, on every fixture and every profile
 # ===========================================================================
 
 
 @_with_tmp
 def test_01_invariant_and_oracle_all_fixtures(tmp):
-    """Каждая make_* из tests/fixtures.py x каждый профиль. Фикстура, которую
-    кто-то добавит позже, попадёт сюда автоматически."""
+    """Every make_* from tests/fixtures.py x every profile. A fixture someone adds
+    later gets in here automatically."""
     names = sorted(n for n in dir(fixtures) if n.startswith("make_") and n != "make_broken")
     cleaned = set()
     for name in names:
@@ -693,36 +703,36 @@ def test_01_invariant_and_oracle_all_fixtures(tmp):
                 continue
             if res.ok:
                 cleaned.add(name)
-                _check("%s: выдан файл -- dst существует и не пуст" % label,
+                _check("%s: a file was produced -- dst exists and is not empty" % label,
                        os.path.isfile(dst) and os.path.getsize(dst) > 0)
-                _check("%s: диспетчер выполнил повторную инспекцию (verified)" % label,
+                _check("%s: the dispatcher ran the re-inspection (verified)" % label,
                        res.verified, res.errors)
-                _check("%s: диспетчер доказал чистоту (clean)" % label, res.clean,
+                _check("%s: the dispatcher proved cleanliness (clean)" % label, res.clean,
                        [(s.label, s.found_at) for s in res.survived])
                 _oracle(label, path, dst)
             else:
-                _check("%s: отказ -- выходной файл НЕ создан" % label, not os.path.exists(dst))
+                _check("%s: refusal -- the output file was NOT created" % label, not os.path.exists(dst))
     want = {"make_pdf", "make_pdf_incremental", "make_jpeg", "make_png"}
-    _check("оракул отработал на PDF, PDF с ревизиями, JPEG и PNG (тест не вакуумен)",
+    _check("the oracle ran on PDF, PDF with revisions, JPEG and PNG (the test is not vacuous)",
            want <= cleaned, sorted(cleaned))
 
 
 # ===========================================================================
-# 2. Независимый сырой поиск значений в байтах результата
+# 2. Independent raw search for values in the output bytes
 # ===========================================================================
 
 
 @_with_tmp
 def test_02_raw_leak_scan(tmp):
-    """Оракул-инспектор мог бы пропустить то, что физически осталось в файле.
-    Здесь значения ищутся прямо в байтах (все кодировки, распакованные потоки PDF
-    и сжатые чанки PNG)."""
+    """The oracle inspector could miss what physically remained in the file.
+    Here the values are searched for right in the bytes (all encodings,
+    decompressed PDF streams and compressed PNG chunks)."""
     pdf, pexp = fixtures.make_pdf(tmp)
     inc, iexp = fixtures.make_pdf_incremental(tmp)
     jpg, jexp = fixtures.make_jpeg(tmp)
     png, nexp = fixtures.make_png(tmp)
     cases = (
-        # (метка, путь, значения, которые ОБЯЗАНЫ исчезнуть в STEALTH / в PARANOID)
+        # (label, path, values that MUST disappear in STEALTH / in PARANOID)
         ("pdf", pdf, pexp["identity"], pexp["values"], ()),
         ("pdf_incremental", inc, iexp["values"] + [fixtures.PDF_INCR_OLD_AUTHOR],
          iexp["values"] + [fixtures.PDF_INCR_OLD_AUTHOR], ()),
@@ -731,20 +741,21 @@ def test_02_raw_leak_scan(tmp):
     )
     for tag, path, st_vals, pa_vals, raw in cases:
         seen = _leaked(path, pa_vals)
-        _check("%s: поиск видит значения в ИСХОДНОМ файле (иначе проверка вакуумна)" % tag,
-               len(seen) == len(pa_vals), "нашлось %d из %d" % (len(seen), len(pa_vals)))
+        _check("%s: the search sees the values in the ORIGINAL file (otherwise the check is "
+               "vacuous)" % tag,
+               len(seen) == len(pa_vals), "found %d of %d" % (len(seen), len(pa_vals)))
         for prof in PROFILES:
             res, dst = _clean("raw_" + tag, tmp, path, prof)
             if res is None or not _check("%s/%s: ok" % (tag, _pname(prof)), res.ok, res.errors):
                 continue
             vals = st_vals if prof is STEALTH else pa_vals
             gone = _leaked(dst, vals, raw)
-            _check("%s/%s: в байтах результата нет ни одного из %d значений" % (tag, _pname(prof), len(vals)),
+            _check("%s/%s: the output bytes contain none of the %d values" % (tag, _pname(prof), len(vals)),
                    not gone, gone)
 
 
 # ===========================================================================
-# 3. PDF: PARANOID -- critical_after == 0; STEALTH -- только новые /ID
+# 3. PDF: PARANOID -- critical_after == 0; STEALTH -- only new /IDs
 # ===========================================================================
 
 
@@ -752,86 +763,90 @@ def test_02_raw_leak_scan(tmp):
 def test_03_pdf_profiles_and_id(tmp):
     for tag, path in (("pdf", fixtures.make_pdf(tmp)[0]), ("pdf_rich", _pdf_rich(os.path.join(tmp, "rich.pdf")))):
         src_ids = _trailer_ids(path)
-        _check("%s: в исходнике есть /ID (иначе проверка регенерации вакуумна)" % tag, src_ids is not None)
+        _check("%s: the original has an /ID (otherwise the regeneration check is vacuous)" % tag, src_ids is not None)
 
-        # ---- PARANOID: критичного не остаётся совсем ----
+        # ---- PARANOID: nothing critical remains at all ----
         res, dst = _clean(tag, tmp, path, PARANOID)
         if res is not None and _check("%s/paranoid: ok" % tag, res.ok, res.errors):
             rep = inspect_file(dst)
             left = [(f.label, f.value[:30]) for f in rep.findings if f.risk in _LEAKY]
-            _check("%s/paranoid: critical_after == 0 (по данным диспетчера)" % tag,
+            _check("%s/paranoid: critical_after == 0 (per the dispatcher)" % tag,
                    res.critical_after == 0, res.critical_after)
-            _check("%s/paranoid: critical == 0 по СОБСТВЕННОЙ повторной инспекции результата" % tag,
+            _check("%s/paranoid: critical == 0 by OUR OWN re-inspection of the output" % tag,
                    rep.critical == 0, left)
-            _check("%s/paranoid: critical_before > 0 -- чистка было что убирать" % tag, res.critical_before > 0)
-            _check("%s/paranoid: остатка нет (residual пуст)" % tag, res.residual == [], res.residual)
-            _check("%s/paranoid: /ID убран из трейлера" % tag, _trailer_ids(dst) is None)
+            _check("%s/paranoid: critical_before > 0 -- the cleaning had something to remove" % tag, res.critical_before > 0)
+            _check("%s/paranoid: nothing remains (residual is empty)" % tag, res.residual == [], res.residual)
+            _check("%s/paranoid: /ID removed from the trailer" % tag, _trailer_ids(dst) is None)
 
-        # ---- STEALTH: допустим остаток ровно из перегенерированных /ID ----
+        # ---- STEALTH: a remainder of exactly the regenerated /IDs is allowed ----
         res, dst = _clean(tag, tmp, path, STEALTH)
         if res is None or not _check("%s/stealth: ok" % tag, res.ok, res.errors):
             continue
         rep = inspect_file(dst)
         crit = [f for f in rep.findings if f.risk in _LEAKY]
         labels = {f.label.split(" ")[0] for f in crit}
-        _check("%s/stealth: критичный остаток состоит ТОЛЬКО из trailer /ID[0], /ID[1]" % tag,
+        _check("%s/stealth: the critical remainder consists ONLY of trailer /ID[0], /ID[1]" % tag,
                labels <= {"/ID[0]", "/ID[1]"}, [(f.location, f.label, f.value[:30]) for f in crit])
         was = {_norm(f.value) for f in inspect_file(path).findings}
-        _check("%s/stealth: значения остатка НОВЫЕ -- в находках исходника их нет" % tag,
+        _check("%s/stealth: the remainder values are NEW -- the original's findings don't have "
+               "them" % tag,
                all(_norm(f.value) not in was for f in crit), [f.value[:20] for f in crit])
         new_ids = _trailer_ids(dst)
-        _check("%s/stealth: в результате есть /ID" % tag, new_ids is not None)
+        _check("%s/stealth: the output has an /ID" % tag, new_ids is not None)
         if src_ids and new_ids:
-            _check("%s/stealth: /ID[0] ОТЛИЧАЕТСЯ от исходного (иначе это не регенерация)" % tag,
+            _check("%s/stealth: /ID[0] DIFFERS from the original (otherwise it's not a "
+                   "regeneration)" % tag,
                    new_ids[0] != src_ids[0], new_ids[0].hex())
-            _check("%s/stealth: /ID[1] ОТЛИЧАЕТСЯ от исходного" % tag, new_ids[1] != src_ids[1], new_ids[1].hex())
-            _check("%s/stealth: форма пары сохранена (равная осталась равной)" % tag,
+            _check("%s/stealth: /ID[1] DIFFERS from the original" % tag, new_ids[1] != src_ids[1], new_ids[1].hex())
+            _check("%s/stealth: the shape of the pair is kept (an equal pair stayed equal)" % tag,
                    (src_ids[0] == src_ids[1]) == (new_ids[0] == new_ids[1]), (src_ids, new_ids))
-        _check("%s/stealth: диспетчер: остаток критичного -- только новые значения" % tag,
+        _check("%s/stealth: dispatcher: the critical remainder is only new values" % tag,
                all(r[2] for r in res.residual), res.residual)
-        _check("%s/stealth: у чистки было что убирать" % tag, res.critical_before > res.critical_after
+        _check("%s/stealth: the cleaning had something to remove" % tag, res.critical_before > res.critical_after
                or res.sensitive_before > res.sensitive_after, (res.critical_before, res.critical_after))
 
-    # ---- разошедшаяся пара /ID ----
+    # ---- a diverged /ID pair ----
     path = _pdf_unequal_id(os.path.join(tmp, "uneq.pdf"))
     src_ids = _trailer_ids(path)
-    _check("uneq: в исходнике /ID[0] != /ID[1] (предусловие)", src_ids is not None and src_ids[0] != src_ids[1])
+    _check("uneq: the original has /ID[0] != /ID[1] (precondition)", src_ids is not None and src_ids[0] != src_ids[1])
     res, dst = _clean("uneq", tmp, path, STEALTH)
     if res is not None and _check("uneq/stealth: ok", res.ok, res.errors):
         new = _trailer_ids(dst)
-        _check("uneq/stealth: оба /ID ОТЛИЧАЮТСЯ от исходных", bool(new and src_ids)
+        _check("uneq/stealth: both /IDs DIFFER from the original ones", bool(new and src_ids)
                and new[0] != src_ids[0] and new[1] != src_ids[1], (src_ids, new))
-        _check("uneq/stealth: пара осталась разошедшейся (форма как у исходника)",
+        _check("uneq/stealth: the pair stayed diverged (same shape as the original)",
                bool(new) and new[0] != new[1], new)
     res, dst = _clean("uneq", tmp, path, PARANOID)
     if res is not None and _check("uneq/paranoid: ok", res.ok, res.errors):
         _check("uneq/paranoid: critical_after == 0", res.critical_after == 0, res.critical_after)
 
-    # ---- каким чистка оставляет приложение и даты (STEALTH не обнуляет, PARANOID убирает) ----
+    # ---- how cleaning leaves the application and dates (STEALTH doesn't blank them, PARANOID removes) ----
     path = _pdf_rich(os.path.join(tmp, "rich2.pdf"))
     res, dst = _clean("rich_info", tmp, path, STEALTH)
     if res is not None and _check("rich_info/stealth: ok", res.ok, res.errors):
         with pikepdf.open(dst) as q:
             info = {k: str(v) for k, v in q.docinfo.items()}
-        _check("STEALTH: /Producer и /Creator оставлены как были (пара Creator/Producer согласована)",
+        _check("STEALTH: /Producer and /Creator left as they were (the Creator/Producer pair is "
+               "consistent)",
                info.get("/Producer") == RICH_PRODUCER and info.get("/Creator") == RICH_CREATOR, info)
-        _check("STEALTH: даты не обнулены и не подменены",
+        _check("STEALTH: dates are not blanked or replaced",
                info.get("/CreationDate") == RICH_CDATE and info.get("/ModDate") == RICH_MDATE, info)
-        _check("STEALTH: /Author, /Company, путь и email убраны из /Info",
+        _check("STEALTH: /Author, /Company, the path and the email removed from /Info",
                not {"/Author", "/Company"} & set(info)
                and not any(RICH_EMAIL in v or RICH_PATH in v for v in info.values()), info)
         gone = _leaked(dst, [RICH_AUTHOR, RICH_COMPANY, RICH_EMAIL, RICH_PATH])
-        _check("STEALTH: ФИО, компания, email и путь не лежат ни в байтах, ни в потоках (XMP)", not gone, gone)
+        _check("STEALTH: the name, company, email and path are in neither the bytes nor the "
+               "streams (XMP)", not gone, gone)
     res, dst = _clean("rich_info", tmp, path, PARANOID)
     if res is not None and _check("rich_info/paranoid: ok", res.ok, res.errors):
         with pikepdf.open(dst) as q:
             info = {k: str(v) for k, v in q.docinfo.items()}
-        _check("PARANOID: /Producer, /Creator и даты убраны", not {"/Producer", "/Creator", "/CreationDate",
+        _check("PARANOID: /Producer, /Creator and the dates removed", not {"/Producer", "/Creator", "/CreationDate",
                                                                     "/ModDate"} & set(info), info)
 
 
 # ===========================================================================
-# 4. PDF: инкрементальные ревизии выброшены
+# 4. PDF: incremental revisions are dropped
 # ===========================================================================
 
 
@@ -841,7 +856,7 @@ def test_04_pdf_incremental_revisions(tmp):
              ("pdf_incr_secret", _pdf_incr_secret(os.path.join(tmp, "secret.pdf")))]
     for tag, path in cases:
         src = _read(path)
-        _check("%s: в ИСХОДНИКЕ два %%%%EOF -- фикстура и правда инкрементальная" % tag,
+        _check("%s: the ORIGINAL has two %%%%EOF -- the fixture really is incremental" % tag,
                src.count(b"%%EOF") == 2, src.count(b"%%EOF"))
         for prof in PROFILES:
             label = "%s/%s" % (tag, _pname(prof))
@@ -849,45 +864,47 @@ def test_04_pdf_incremental_revisions(tmp):
             if res is None or not _check("%s: ok" % label, res.ok, res.errors):
                 continue
             out = _read(dst)
-            _check("%s: в сырых байтах результата РОВНО одно вхождение %%%%EOF" % label,
+            _check("%s: the raw output bytes contain EXACTLY one %%%%EOF" % label,
                    out.count(b"%%EOF") == 1, out.count(b"%%EOF"))
             with pikepdf.open(dst) as q:
-                _check("%s: в трейлере результата нет /Prev" % label, "/Prev" not in q.trailer)
-                _check("%s: страница на месте" % label, len(q.pages) == 1)
-            _check("%s: в действиях записано, что ревизии выброшены" % label,
-                   any(a.act is Act.REMOVED and "ревизи" in a.label.lower() for a in res.actions),
+                _check("%s: the output trailer has no /Prev" % label, "/Prev" not in q.trailer)
+                _check("%s: the page is in place" % label, len(q.pages) == 1)
+            _check("%s: the actions record that the revisions were dropped" % label,
+                   any(a.act is Act.REMOVED and "revision" in a.label.lower() for a in res.actions),
                    [a.label for a in res.actions])
-    # то, ради чего выбрасываются ревизии: текст «под замазкой» уходит физически
+    # the reason revisions are dropped: the text "under the redaction" physically goes away
     path = cases[1][1]
     raw = _read(path)
-    _check("секрет: TOPSECRET лежит в сырых байтах ИСХОДНИКА (в прошлой ревизии)", b"TOPSECRET" in raw)
+    _check("secret: TOPSECRET sits in the raw bytes of the ORIGINAL (in the earlier revision)", b"TOPSECRET" in raw)
     with pikepdf.open(path) as q:
-        _check("секрет: текущая ревизия показывает «замазку», а не секрет (предусловие)",
+        _check("secret: the current revision shows the \"redaction\", not the secret "
+               "(precondition)",
                b"REDACTED" in q.pages[0].Contents.read_bytes())
     for prof in PROFILES:
         res, dst = _clean("pdf_incr_secret", tmp, path, prof)
         if res is None or not res.ok:
             continue
         blob = _blob(dst)
-        _check("секрет/%s: TOPSECRET и 4111 не лежат ни в байтах, ни в распакованных потоках" % _pname(prof),
+        _check("secret/%s: TOPSECRET and 4111 are in neither the bytes nor the decompressed "
+               "streams" % _pname(prof),
                b"TOPSECRET" not in blob and b"4111" not in blob)
-        _check("секрет/%s: ТЕКУЩЕЕ содержимое страницы (REDACTED) сохранено" % _pname(prof), b"REDACTED" in blob)
-        _check("секрет/%s: автор прошлой ревизии не лежит в файле" % _pname(prof),
+        _check("secret/%s: the CURRENT page content (REDACTED) is kept" % _pname(prof), b"REDACTED" in blob)
+        _check("secret/%s: the earlier revision's author is not in the file" % _pname(prof),
                not _leaked(dst, ["Иван Петров Секретный"]))
 
 
 # ===========================================================================
-# 5. PDF: структурное сохраняется в ОБОИХ профилях
+# 5. PDF: structural data is kept in BOTH profiles
 # ===========================================================================
 
 
 @_with_tmp
 def test_05_pdf_structural_kept(tmp):
     path = _pdf_tagged(os.path.join(tmp, "tagged.pdf"))
-    need = (("/StructTreeRoot", "Дерево структуры"), ("/Lang", "Язык документа"), ("/Outlines", "Оглавление"))
+    need = (("/StructTreeRoot", "Structure tree"), ("/Lang", "Document language"), ("/Outlines", "Outline"))
     src_rep = inspect_file(path)
     for key, word in need:
-        _check("tagged: в отчёте инспекции ИСХОДНИКА есть %s (предусловие)" % key,
+        _check("tagged: the inspection report of the ORIGINAL has %s (precondition)" % key,
                any(f.risk is Risk.STRUCTURAL and word in f.label for f in src_rep.findings))
     for prof in PROFILES:
         label = "tagged/%s" % _pname(prof)
@@ -897,32 +914,32 @@ def test_05_pdf_structural_kept(tmp):
         rep = inspect_file(dst)
         kept = {a.label for a in res.actions if a.act is Act.KEPT}
         for key, word in need:
-            _check("%s: %s -- в отчёте о чистке записан как сохранённый (KEPT)" % (label, key),
+            _check("%s: %s -- recorded as kept (KEPT) in the cleaning report" % (label, key),
                    key in kept, sorted(kept))
-            _check("%s: %s -- есть в отчёте инспекции РЕЗУЛЬТАТА (STRUCTURAL)" % (label, key),
+            _check("%s: %s -- present in the inspection report of the OUTPUT (STRUCTURAL)" % (label, key),
                    any(f.risk is Risk.STRUCTURAL and word in f.label for f in rep.findings))
         removed = {a.label for a in res.actions if a.act is Act.REMOVED}
-        _check("%s: ни одно структурное поле не помечено удалённым" % label,
+        _check("%s: no structural field is marked as removed" % label,
                not removed & {"/StructTreeRoot", "/MarkInfo", "/Lang", "/Outlines", "/PageLabels",
                               "/ViewerPreferences"}, sorted(removed))
         with pikepdf.open(dst) as q:
             root = q.Root
-            _check("%s: /StructTreeRoot физически в каталоге результата" % label, "/StructTreeRoot" in root)
-            _check("%s: /MarkInfo физически сохранён" % label, "/MarkInfo" in root)
+            _check("%s: /StructTreeRoot is physically in the output catalog" % label, "/StructTreeRoot" in root)
+            _check("%s: /MarkInfo is physically kept" % label, "/MarkInfo" in root)
             _check("%s: /Lang == ru-RU" % label, str(root.get("/Lang")) == "ru-RU", root.get("/Lang"))
             titles, item = [], root.Outlines.First if "/Outlines" in root else None
             while item is not None and len(titles) < 10:
                 titles.append(str(item.Title))
                 item = item.get("/Next")
-            _check("%s: закладки -- те же три заголовка в том же порядке" % label,
+            _check("%s: bookmarks -- the same three titles in the same order" % label,
                    titles == ["Глава 1", "Глава 2", "Глава 3"], titles)
-            _check("%s: все 3 страницы на месте" % label, len(q.pages) == 3)
-        _check("%s: личность (автор) при этом убрана" % label, not _leaked(dst, [STRUCT_AUTHOR]))
+            _check("%s: all 3 pages are in place" % label, len(q.pages) == 3)
+        _check("%s: the identity (author) is removed all the same" % label, not _leaked(dst, [STRUCT_AUTHOR]))
         _oracle(label, path, dst)
 
 
 # ===========================================================================
-# 6. PDF: подпись
+# 6. PDF: signature
 # ===========================================================================
 
 
@@ -930,74 +947,74 @@ def test_05_pdf_structural_kept(tmp):
 def test_06_pdf_signature(tmp):
     signed = _pdf_form(os.path.join(tmp, "signed.pdf"), "filled")
     src_rep = inspect_file(signed)
-    _check("signed: инспектор видит заполненную подпись (предусловие)",
-           any(SIGNER in f.value or "подпис" in f.label.lower() for f in src_rep.findings))
+    _check("signed: the inspector sees the filled signature (precondition)",
+           any(SIGNER in f.value or "signature" in f.label.lower() for f in src_rep.findings))
 
-    # --- по умолчанию: честный отказ, файла нет ---
+    # --- by default: an honest refusal, no file ---
     for prof in PROFILES:
         label = "signed/%s" % _pname(prof)
         res, dst = _clean("signed", tmp, signed, prof)
         if res is None:
             continue
-        _check("%s: по умолчанию ok=False" % label, not res.ok)
-        _check("%s: выходной файл НЕ создан" % label, not os.path.exists(dst))
-        _check("%s: причина названа внятно (подпись)" % label,
-               any("подпис" in e.lower() for e in res.errors), res.errors)
-        _check("%s: нет ни действий, ни заявленной чистоты" % label,
+        _check("%s: ok=False by default" % label, not res.ok)
+        _check("%s: the output file was NOT created" % label, not os.path.exists(dst))
+        _check("%s: the reason is named clearly (signature)" % label,
+               any("signature" in e.lower() for e in res.errors), res.errors)
+        _check("%s: no actions and no claimed cleanliness" % label,
                not res.actions and not res.clean and res.critical_after == -1)
     out = os.path.join(tmp, "direct.pdf")
     r = clean_pdf(signed, out)
-    _check("clean_pdf напрямую: ok=False, файла и .part нет, причина названа",
+    _check("clean_pdf directly: ok=False, no file and no .part, the reason is named",
            not r.ok and not os.path.exists(out) and not os.path.exists(out + ".part")
-           and any("подпис" in e.lower() for e in r.errors), r.errors)
+           and any("signature" in e.lower() for e in r.errors), r.errors)
 
-    # --- force_signed: чистит, подпись уничтожена и об этом сказано ---
+    # --- force_signed: cleans, the signature is destroyed and that's stated ---
     for prof in PROFILES:
         label = "signed_force/%s" % _pname(prof)
         res, dst = _clean("signed_force", tmp, signed, prof, force_signed=True)
         if res is None or not _check("%s: ok" % label, res.ok, res.errors):
             continue
         blob = _blob(dst)
-        _check("%s: подпись физически убрана (нет adbe.pkcs7)" % label, b"adbe.pkcs7" not in blob)
-        _check("%s: имя подписанта не лежит в файле" % label, not _leaked(dst, [SIGNER]))
-        _check("%s: в действиях честно записано, что подпись уничтожена (REMOVED)" % label,
-               any(a.act is Act.REMOVED and "подпис" in a.label.lower() for a in res.actions),
+        _check("%s: the signature is physically removed (no adbe.pkcs7)" % label, b"adbe.pkcs7" not in blob)
+        _check("%s: the signer's name is not in the file" % label, not _leaked(dst, [SIGNER]))
+        _check("%s: the actions honestly record that the signature was destroyed (REMOVED)" % label,
+               any(a.act is Act.REMOVED and "signature" in a.label.lower() for a in res.actions),
                [(a.act.value, a.label) for a in res.actions])
         with pikepdf.open(dst) as q:
             fields = q.Root.AcroForm.Fields if "/AcroForm" in q.Root else []
-            _check("%s: поле осталось пустой заготовкой (/V нет)" % label,
+            _check("%s: the field stayed an empty stub (no /V)" % label,
                    all("/V" not in f for f in fields), [list(f.keys()) for f in fields])
         _oracle(label, signed, dst)
 
-    # --- пустая заготовка поля: НЕ подпись, чистка идёт штатно ---
+    # --- an empty field stub: NOT a signature, cleaning proceeds normally ---
     ph = _pdf_form(os.path.join(tmp, "placeholder.pdf"), "placeholder")
     for prof in PROFILES:
         label = "sig_placeholder/%s" % _pname(prof)
         res, dst = _clean("sig_placeholder", tmp, ph, prof)
-        if res is None or not _check("%s: чистка идёт штатно, force_signed не нужен" % label, res.ok, res.errors):
+        if res is None or not _check("%s: cleaning proceeds normally, force_signed isn't needed" % label, res.ok, res.errors):
             continue
         with pikepdf.open(dst) as q:
             f = q.Root.AcroForm.Fields[0]
-            _check("%s: заготовка на месте: /FT /Sig, /V нет" % label,
+            _check("%s: the stub is in place: /FT /Sig, no /V" % label,
                    str(f.get("/FT")) == "/Sig" and "/V" not in f, list(f.keys()))
-        _check("%s: автор убран" % label, not _leaked(dst, [SIG_AUTHOR]))
+        _check("%s: the author is removed" % label, not _leaked(dst, [SIG_AUTHOR]))
 
-    # --- сертифицирующая подпись только в /Perms /DocMDP ---
+    # --- a certifying signature only in /Perms /DocMDP ---
     dm = _pdf_form(os.path.join(tmp, "docmdp.pdf"), "docmdp")
     res, dst = _clean("docmdp", tmp, dm, STEALTH)
     if res is not None:
-        _check("docmdp: сертифицирующая подпись (/Perms /DocMDP) -- тоже отказ по умолчанию",
-               not res.ok and not os.path.exists(dst) and any("подпис" in e.lower() for e in res.errors),
+        _check("docmdp: a certifying signature (/Perms /DocMDP) -- also refused by default",
+               not res.ok and not os.path.exists(dst) and any("signature" in e.lower() for e in res.errors),
                res.errors)
     res, dst = _clean("docmdp_force", tmp, dm, STEALTH, force_signed=True)
     if res is not None and _check("docmdp_force: ok", res.ok, res.errors):
         with pikepdf.open(dst) as q:
-            _check("docmdp_force: /Perms снят, подписи в файле нет",
+            _check("docmdp_force: /Perms removed, no signature in the file",
                    "/Perms" not in q.Root and b"adbe.pkcs7" not in _blob(dst))
 
 
 # ===========================================================================
-# 7. JPEG: без перекодирования -- энтропийный блок бит в бит
+# 7. JPEG: no re-encoding -- the entropy block bit for bit
 # ===========================================================================
 
 
@@ -1008,10 +1025,10 @@ def test_07_jpeg_scan_bit_exact(tmp):
     for tag, path in (("fixture_jpeg", fx_path), ("sof_640x480", own)):
         src = _read(path)
         so = _sos_at(src)
-        _check("%s: в исходнике найден SOS (предусловие)" % tag, so is not None)
+        _check("%s: SOS found in the original (precondition)" % tag, so is not None)
         if so is None:
             continue
-        _check("%s: блок от SOS до конца файла непустой (%d байт)" % (tag, len(src) - so), len(src) - so > 10)
+        _check("%s: the block from SOS to the end of the file is not empty (%d bytes)" % (tag, len(src) - so), len(src) - so > 10)
         for prof in PROFILES:
             label = "%s/%s" % (tag, _pname(prof))
             res, dst = _clean(tag, tmp, path, prof)
@@ -1019,24 +1036,25 @@ def test_07_jpeg_scan_bit_exact(tmp):
                 continue
             out = _read(dst)
             do = _sos_at(out)
-            _check("%s: SOS найден в результате" % label, do is not None)
+            _check("%s: SOS found in the output" % label, do is not None)
             if do is None:
                 continue
-            _check("%s: БИТ В БИТ -- src[SOS:] == dst[SOS:] (%d байт): перекодирования не было"
+            _check("%s: BIT FOR BIT -- src[SOS:] == dst[SOS:] (%d bytes): there was no "
+                   "re-encoding"
                    % (label, len(src) - so), src[so:] == out[do:])
-            _check("%s: verify_image подтверждает scan_same" % label,
+            _check("%s: verify_image confirms scan_same" % label,
                    verify_image(path, dst).get("scan_same") is True, verify_image(path, dst))
-            _check("%s: результат начинается с SOI и заканчивается EOI" % label,
+            _check("%s: the output starts with SOI and ends with EOI" % label,
                    out[:2] == b"\xff\xd8" and out[-2:] == b"\xff\xd9")
             if tag == "sof_640x480":
-                _check("%s: стаффинг FF00 и маркеры RSTn внутри блока уцелели" % label, _entropy() in out)
-            _check("%s: таблицы квантования (DQT) на месте, не пересобраны" % label,
+                _check("%s: the FF00 stuffing and RSTn markers inside the block survived" % label, _entropy() in out)
+            _check("%s: the quantization tables (DQT) are in place, not rebuilt" % label,
                    src[[a for m, a, _b in _jpeg_segments(src) if m == 0xDB][0]:][:69]
                    in out)
 
 
 # ===========================================================================
-# 8. JPEG: ОРИЕНТАЦИЯ -- главная регрессия (повёрнутые на бок фотографии)
+# 8. JPEG: ORIENTATION -- the main regression (photos turned on their side)
 # ===========================================================================
 
 
@@ -1047,7 +1065,8 @@ def test_08_jpeg_orientation_preserved(tmp):
             tag = "jpeg_%s_o%d" % ("LE" if order == "<" else "BE", orient)
             path = _write(os.path.join(tmp, tag + ".jpg"), _jpeg_bytes(orient, order))
             src = _read(path)
-            _check("%s: независимый разбор читает Orientation=%d из ИСХОДНИКА (предусловие)" % (tag, orient),
+            _check("%s: the independent parse reads Orientation=%d from the ORIGINAL "
+                   "(precondition)" % (tag, orient),
                    _orientation(_jpeg_exif_tags(src)) == orient, _orientation(_jpeg_exif_tags(src)))
             for prof in PROFILES:
                 label = "%s/%s" % (tag, _pname(prof))
@@ -1058,21 +1077,23 @@ def test_08_jpeg_orientation_preserved(tmp):
                 tags = _jpeg_exif_tags(out)
                 got = _orientation(tags)
                 if orient == 1:
-                    _check("%s: Orientation=1 -- APP1 удалён целиком либо тег равен 1" % label,
+                    _check("%s: Orientation=1 -- APP1 removed entirely or the tag equals 1" % label,
                            got in (None, 1), got)
                 else:
-                    _check("%s: тег Orientation ОБЯЗАН остаться, значение %d (читаем прямо из APP1)"
-                           % (label, orient), got == orient, "в результате: %r" % (got,))
+                    _check("%s: the Orientation tag MUST remain, value %d (read right from APP1)"
+                           % (label, orient), got == orient, "in the output: %r" % (got,))
                 bad = sorted(hex(t) for t in set(tags) & EX_FORBIDDEN)
-                _check("%s: в APP1 нет тегов Artist, GPS, Make, Model, Software, указателя ExifIFD" % label,
+                _check("%s: APP1 has no Artist, GPS, Make, Model, Software tags or ExifIFD "
+                       "pointer" % label,
                        not bad, bad)
                 gone = _leaked(dst, EX_TEXTS, _gps_needles(order))
-                _check("%s: Artist, серийники, GPS, дата, камера и ПО физически исчезли из байтов" % label,
+                _check("%s: Artist, serial numbers, GPS, date, camera and software physically "
+                       "gone from the bytes" % label,
                        not gone, gone)
-                _check("%s: размеры из SOF не изменились (640x480)" % label,
+                _check("%s: the SOF dimensions didn't change (640x480)" % label,
                        _sof_dims(src) == (640, 480) == _sof_dims(out), (_sof_dims(src), _sof_dims(out)))
                 so, do = _sos_at(src), _sos_at(out)
-                _check("%s: энтропийный блок бит в бит" % label,
+                _check("%s: the entropy block bit for bit" % label,
                        do is not None and src[so:] == out[do:])
                 v = verify_image(path, dst)
                 _check("%s: verify_image: ok, orient_ok, dims_same" % label,
@@ -1080,12 +1101,13 @@ def test_08_jpeg_orientation_preserved(tmp):
                 if orient in (1, 6, 8):
                     _oracle(label, path, dst)
 
-    # PNG: тот же риск через eXIf
+    # PNG: the same risk via eXIf
     for orient in (1, 6, 8):
         tag = "png_exif_o%d" % orient
         data, rows = _png_bytes(pre=[fixtures._png_chunk(b"eXIf", _exif_tiff(orient, "<"))])
         path = _write(os.path.join(tmp, tag + ".png"), data)
-        _check("%s: независимый разбор читает Orientation=%d из исходного eXIf (предусловие)" % (tag, orient),
+        _check("%s: the independent parse reads Orientation=%d from the original eXIf "
+               "(precondition)" % (tag, orient),
                _orientation(_png_exif_tags(data)) == orient)
         for prof in PROFILES:
             label = "%s/%s" % (tag, _pname(prof))
@@ -1096,20 +1118,21 @@ def test_08_jpeg_orientation_preserved(tmp):
             tags = _png_exif_tags(out)
             got = _orientation(tags)
             if orient == 1:
-                _check("%s: Orientation=1 -- eXIf удалён либо тег равен 1" % label, got in (None, 1), got)
+                _check("%s: Orientation=1 -- eXIf removed or the tag equals 1" % label, got in (None, 1), got)
             else:
-                _check("%s: тег Orientation в eXIf ОБЯЗАН остаться, значение %d" % (label, orient),
-                       got == orient, "в результате: %r" % (got,))
+                _check("%s: the Orientation tag in eXIf MUST remain, value %d" % (label, orient),
+                       got == orient, "in the output: %r" % (got,))
             bad = sorted(hex(t) for t in set(tags) & EX_FORBIDDEN)
-            _check("%s: в eXIf нет Artist, GPS, Make, Model, Software" % label, not bad, bad)
+            _check("%s: eXIf has no Artist, GPS, Make, Model, Software" % label, not bad, bad)
             gone = _leaked(dst, EX_TEXTS, _gps_needles("<"))
-            _check("%s: Artist, серийники, GPS физически исчезли из байтов" % label, not gone, gone)
-            _check("%s: пиксели те же (IDAT бит в бит, распаковка даёт те же строки)" % label,
+            _check("%s: Artist, serial numbers, GPS physically gone from the bytes" % label, not gone, gone)
+            _check("%s: the pixels are the same (IDAT bit for bit, decompression gives the same "
+                   "rows)" % label,
                    _png_idat(out) == _png_idat(data) and zlib.decompress(_png_idat(out)) == rows)
 
 
 # ===========================================================================
-# 9. Размеры изображения не изменились (SOF у JPEG, IHDR у PNG)
+# 9. Image dimensions didn't change (SOF for JPEG, IHDR for PNG)
 # ===========================================================================
 
 
@@ -1124,14 +1147,14 @@ def test_09_image_dims_unchanged(tmp):
         cases.append(("png_%dx%d" % (w, h), ".png", _png_bytes(w, h, pre=meta)[0], (w, h), _png_dims))
     for tag, ext, data, want, dims in cases:
         path = _write(os.path.join(tmp, tag + ext), data)
-        _check("%s: размеры исходника читаются независимым разбором: %s" % (tag, want),
+        _check("%s: the original's dimensions are read by the independent parse: %s" % (tag, want),
                dims(data) == want, dims(data))
         for prof in PROFILES:
             label = "%s/%s" % (tag, _pname(prof))
             res, dst = _clean(tag, tmp, path, prof)
             if res is None or not _check("%s: ok" % label, res.ok, res.errors):
                 continue
-            _check("%s: ширина и высота ДО и ПОСЛЕ совпадают: %s" % (label, want),
+            _check("%s: width and height BEFORE and AFTER match: %s" % (label, want),
                    dims(_read(dst)) == want, dims(_read(dst)))
             v = verify_image(path, dst)
             _check("%s: verify_image: dims_same" % label, v.get("dims_same") is True, v)
@@ -1139,12 +1162,12 @@ def test_09_image_dims_unchanged(tmp):
     for prof in PROFILES:
         res, dst = _clean("fixture_png", tmp, path, prof)
         if res is not None and res.ok:
-            _check("fixture_png/%s: IHDR (1x1) не изменился" % _pname(prof),
+            _check("fixture_png/%s: IHDR (1x1) didn't change" % _pname(prof),
                    _png_dims(_read(path)) == _png_dims(_read(dst)) == (1, 1))
 
 
 # ===========================================================================
-# 10. PNG: чанки, CRC, порядок, ICC
+# 10. PNG: chunks, CRC, order, ICC
 # ===========================================================================
 
 
@@ -1154,8 +1177,8 @@ def test_10_png_chunks(tmp):
     path = _write(os.path.join(tmp, "full.png"), data)
     src_chunks = _chunks(data)
     src_types = [t for t, _b, _o in src_chunks]
-    _check("предусловие: CRC всех чанков исходника верны", all(o for _t, _b, o in src_chunks))
-    _check("предусловие: в исходнике есть tEXt, zTXt, iTXt, eXIf, tIME и iCCP",
+    _check("precondition: the CRCs of all the original's chunks are correct", all(o for _t, _b, o in src_chunks))
+    _check("precondition: the original has tEXt, zTXt, iTXt, eXIf, tIME and iCCP",
            PNG_FORBIDDEN <= set(src_types) and b"iCCP" in src_types, src_types)
     src_body = {t: b for t, b, _o in src_chunks}
     for prof in PROFILES:
@@ -1165,54 +1188,56 @@ def test_10_png_chunks(tmp):
             continue
         out = _read(dst)
         parsed = _png_chunks(out)
-        if not _check("%s: результат разбирается как PNG" % label, parsed is not None):
+        if not _check("%s: the output parses as PNG" % label, parsed is not None):
             continue
         chunks, end = parsed
         types = [t for t, _b, _o in chunks]
         body = {t: b for t, b, _o in chunks}
         left = sorted(t.decode() for t in PNG_FORBIDDEN & set(types))
-        _check("%s: tEXt, zTXt, iTXt, eXIf, tIME удалены" % label, not left, "остались: %s" % left)
-        _check("%s: CRC всех %d чанков результата корректны (пересчитаны binascii.crc32)" % (label, len(chunks)),
+        _check("%s: tEXt, zTXt, iTXt, eXIf, tIME removed" % label, not left, "left: %s" % left)
+        _check("%s: the CRCs of all %d output chunks are correct (recomputed with binascii.crc32)" % (label, len(chunks)),
                all(o for _t, _b, o in chunks), [t for t, _b, o in chunks if not o])
-        _check("%s: IHDR первый, IEND последний" % label,
+        _check("%s: IHDR first, IEND last" % label,
                types[:1] == [b"IHDR"] and types[-1:] == [b"IEND"], types)
-        _check("%s: после IEND в файле ничего нет" % label, end == len(out), (end, len(out)))
-        _check("%s: IHDR не изменился (размеры, глубина, тип цвета)" % label,
+        _check("%s: nothing in the file after IEND" % label, end == len(out), (end, len(out)))
+        _check("%s: IHDR didn't change (dimensions, depth, color type)" % label,
                body.get(b"IHDR") == src_body[b"IHDR"])
-        _check("%s: IDAT совпал побайтно и распаковывается в те же строки пикселей" % label,
+        _check("%s: IDAT matches byte for byte and decompresses into the same pixel rows" % label,
                _png_idat(out) == _png_idat(data) and zlib.decompress(_png_idat(out)) == rows)
-        _check("%s: gAMA и pHYs (STRUCTURAL) сохранены без изменений" % label,
+        _check("%s: gAMA and pHYs (STRUCTURAL) kept unchanged" % label,
                body.get(b"gAMA") == src_body[b"gAMA"] and body.get(b"pHYs") == src_body[b"pHYs"], types)
         gone = _leaked(dst, P_TEXTS + EX_TEXTS, _gps_needles("<"))
-        _check("%s: значения tEXt, zTXt, iTXt, XMP, EXIF, GPS не лежат ни в байтах, ни в распакованных чанках"
+        _check("%s: tEXt, zTXt, iTXt, XMP, EXIF, GPS values are in neither the bytes nor the "
+               "decompressed chunks"
                % label, not gone, gone)
         _oracle(label, path, dst)
         if prof is STEALTH:
-            _check("%s: iCCP сохранён байт в байт" % label, body.get(b"iCCP") == src_body[b"iCCP"], types)
+            _check("%s: iCCP kept byte for byte" % label, body.get(b"iCCP") == src_body[b"iCCP"], types)
         else:
             removed = any(a.act is Act.REMOVED and "ICC" in a.label for a in res.actions)
-            _check("%s: iCCP либо сохранён, либо его удаление записано в действиях (молча не пропадает)" % label,
+            _check("%s: iCCP is either kept or its removal is recorded in the actions (it "
+                   "doesn't vanish silently)" % label,
                    b"iCCP" in types or removed, [(a.act.value, a.label) for a in res.actions][:8])
     res, dst = _clean("png_full_keepicc", tmp, path, PARANOID, keep={"icc"})
     if res is not None and _check("png_full_keepicc/paranoid: ok", res.ok, res.errors):
         body = {t: b for t, b, _o in _chunks(_read(dst))}
-        _check("keep={'icc'}: iCCP остаётся и в PARANOID байт в байт", body.get(b"iCCP") == src_body[b"iCCP"])
-        _check("keep={'icc'}: остальные метаданные (tEXt, eXIf, tIME) всё равно убраны",
+        _check("keep={'icc'}: iCCP stays byte for byte in PARANOID too", body.get(b"iCCP") == src_body[b"iCCP"])
+        _check("keep={'icc'}: the other metadata (tEXt, eXIf, tIME) is removed all the same",
                not (PNG_FORBIDDEN & {t for t, _b, _o in _chunks(_read(dst))}))
 
-    # хвост после IEND (классический тайник) выброшен
+    # the tail after IEND (a classic hiding spot) is dropped
     data, _rows = _png_bytes(trailer=b"SECRET-TAIL-PAYLOAD-0451")
     path = _write(os.path.join(tmp, "tail.png"), data)
     for prof in PROFILES:
         res, dst = _clean("png_tail", tmp, path, prof)
         if res is not None and res.ok:
             out = _read(dst)
-            _check("png_tail/%s: данные после IEND выброшены" % _pname(prof),
+            _check("png_tail/%s: the data after IEND is dropped" % _pname(prof),
                    b"SECRET-TAIL-PAYLOAD" not in out and _png_chunks(out)[1] == len(out))
 
 
 # ===========================================================================
-# 16. JPEG: данные после EOI выброшены; zTXt-бомба в живом PNG не вешает чистку
+# 16. JPEG: data after EOI is dropped; a zTXt bomb in a live PNG doesn't hang cleaning
 # ===========================================================================
 
 
@@ -1225,13 +1250,13 @@ def test_16_image_hidden_payload_and_bomb(tmp):
         if res is None or not _check("%s: ok" % label, res.ok, res.errors):
             continue
         out = _read(dst)
-        _check("%s: данные после EOI (тайник) выброшены, файл кончается на EOI" % label,
+        _check("%s: the data after EOI (a hiding spot) is dropped, the file ends at EOI" % label,
                b"SECRET-TAIL-PAYLOAD" not in out and out[-2:] == b"\xff\xd9")
         so, do = _sos_at(_read(path)), _sos_at(out)
-        _check("%s: энтропийный блок до EOI бит в бит" % label,
+        _check("%s: the entropy block up to EOI bit for bit" % label,
                do is not None and _read(path)[so:so + (len(out) - do)] == out[do:])
 
-    # настоящая zTXt-бомба (200 МБ нулей в ~200 КБ) внутри ВАЛИДНОГО PNG
+    # a real zTXt bomb (200 MB of zeros in ~200 KB) inside a VALID PNG
     path, rows = _live_bomb_png(tmp)
     for prof in PROFILES:
         label = "png_ztxt_bomb_live/%s" % _pname(prof)
@@ -1240,36 +1265,37 @@ def test_16_image_hidden_payload_and_bomb(tmp):
         dt = time.time() - t0
         if res is None:
             continue
-        _check("%s: отработало быстро и без раздувания памяти (%.1f с)" % (label, dt), dt < 30, dt)
-        if _check("%s: ok -- чанк-бомба вычищен без распаковки" % label, res.ok, res.errors):
+        _check("%s: finished quickly and without memory blow-up (%.1f s)" % (label, dt), dt < 30, dt)
+        if _check("%s: ok -- the chunk bomb was removed without decompressing" % label, res.ok, res.errors):
             out = _read(dst)
-            _check("%s: результат маленький, zTXt нет, пиксели те же" % label,
+            _check("%s: the output is small, no zTXt, the pixels are the same" % label,
                    len(out) < 10000 and b"zTXt" not in {t for t, _b, _o in _chunks(out)}
                    and zlib.decompress(_png_idat(out)) == rows, len(out))
 
 
 # ===========================================================================
-# 11. ОТКАЗЫ: форматы без чистильщика -- честное «не почищено» и номер фазы
+# 11. REFUSALS: formats without a cleaner -- an honest "not cleaned" and the phase number
 # ===========================================================================
 
 
 def _claims_clean(text):
-    """Объявляет ли текст отчёта файл чистым. «НЕ ПОЧИЩЕН» -- не объявляет, а
-    render_plain переносит строки (textwrap), так что пробелы нормализуем."""
+    """Whether the report text declares the file clean. "NOT CLEANED" doesn't, and
+    render_plain wraps lines (textwrap), so whitespace is normalized."""
     flat = " ".join(text.split())
-    return "ЧИСТО: повторная" in flat or re.search(r"(?<!НЕ )ПОЧИЩЕН", flat) is not None
+    return "CLEAN: re-inspection" in flat or re.search(r"(?<!NOT )CLEANED", flat) is not None
 
 
 def _phases(text):
-    """Все номера фаз, упомянутые в тексте: «фаза 2», «в фазе 4»."""
-    return {int(m) for m in re.findall(r"фаз[аеыу]\s+(\d+)", text)}
+    """All phase numbers mentioned in the text: "phase 2", "in phase 4"."""
+    return {int(m) for m in re.findall(r"[Pp]hase\s+(\d+)", text)}
 
 
-# (метка, фабрика, допустимые номера фазы). Легаси OLE2 -- фаза 4: на месте не
-# чистится в принципе, история правок вшита в контейнер.
+# (label, factory, allowed phase numbers). Legacy OLE2 is phase 4: it can't be
+# cleaned in place at all, the edit history is woven into the container.
 _REFUSED = (
-    # docx, docx_wordlike, xlsx, pptx убраны: с фазы 2 они ЧИСТЯТСЯ, а не
-    # отказываются. Их поведение проверяется в тестах чистки OOXML ниже.
+    # docx, docx_wordlike, xlsx, pptx are gone from here: since phase 2 they ARE
+    # CLEANED rather than refused. Their behavior is checked in the OOXML
+    # cleaning tests below.
     ("doc", fixtures.make_doc, (4,)),
     ("doc_active", fixtures.make_doc_active, (4,)),
     ("xls", fixtures.make_xls, (4,)),
@@ -1278,93 +1304,93 @@ _REFUSED = (
 
 
 def test_14_cleanable_matches_cleaners():
-    """cleanreport.CLEANABLE обязан совпадать с тем, что диспетчер реально умеет.
+    """cleanreport.CLEANABLE must match what the dispatcher can really do.
 
-    Это не придирка к дублированию, а защита от молчаливой дыры: кнопки чистки в
-    боте показываются по CLEANABLE, а не по core.clean._CLEANERS. Добавить
-    чистильщик и забыть про CLEANABLE -- значит получить бота, который
-    отказывает в чистке формата, уже умеющего чиститься, и никакой тест формата
-    этого не заметит. Ровно так фаза 2 и доехала до бота нерабочей.
+    This isn't nitpicking about duplication but a guard against a silent hole:
+    the bot shows the cleaning buttons based on CLEANABLE, not on
+    core.clean._CLEANERS. Adding a cleaner and forgetting CLEANABLE means a bot
+    that refuses to clean a format that can already be cleaned, and no format
+    test would notice. That's exactly how phase 2 reached the bot broken.
     """
     families = set(clean_mod._CLEANERS)
     expected = {fmt for fmt, fam in sniff.FAMILY.items() if fam in families}
-    # TIFF/HEIC clean_image отклоняет намеренно (риск испортить файл), поэтому
-    # они входят в семейство image, но чистимыми не считаются.
+    # clean_image rejects TIFF/HEIC on purpose (risk of damaging the file), so
+    # they belong to the image family but don't count as cleanable.
     expected -= set(cleanreport._REFUSED)
-    _check("CLEANABLE == форматы семейств, у которых есть чистильщик, минус намеренно "
-           "отклонённые: %s" % ", ".join(sorted(expected)),
+    _check("CLEANABLE == formats of the families that have a cleaner, minus the deliberately "
+           "rejected ones: %s" % ", ".join(sorted(expected)),
            set(cleanreport.CLEANABLE) == expected,
-           "лишние в CLEANABLE: %s; недостающие: %s"
+           "extra in CLEANABLE: %s; missing: %s"
            % (sorted(set(cleanreport.CLEANABLE) - expected),
               sorted(expected - set(cleanreport.CLEANABLE))))
-    # Второй конец той же связи: формат с чистильщиком не имеет права
-    # одновременно числиться отказанным с номером фазы.
+    # The other end of the same link: a format with a cleaner must not also be
+    # listed as refused with a phase number.
     both = sorted(set(cleanreport.CLEANABLE) & set(cleanreport._PHASE))
-    _check("формат не может быть и чистимым, и ожидающим фазы", not both, both)
+    _check("a format can't be both cleanable and waiting for a phase", not both, both)
     planned = sorted(f for f in cleanreport.CLEANABLE if sniff.FAMILY.get(f) in clean_mod._PLANNED)
-    _check("чистимый формат не стоит в таблице отказов диспетчера _PLANNED", not planned, planned)
+    _check("a cleanable format is not in the dispatcher's refusal table _PLANNED", not planned, planned)
 
 
 def test_15_customxml_namespaces_agree():
-    """Инспектор и чистильщик обязаны одинаково понимать корни customXml.
+    """The inspector and the cleaner must understand customXml roots the same way.
 
-    Инспектор -- оракул: что он относит к ENVIRONMENT, то чистильщик обязан
-    убрать. Корень, который инспектор считает утечкой SharePoint, а чистильщик
-    в своём списке не имеет, остаётся в файле -- и правильно почищенный файл
-    получает вердикт «почищено не полностью» на ровном месте. Списки лежат в
-    двух модулях (инспектор не имеет права зависеть от чистильщика), поэтому их
-    совпадение проверяется здесь, а не достигается общим импортом.
+    The inspector is the oracle: whatever it counts as ENVIRONMENT, the cleaner
+    must remove. A root the inspector considers a SharePoint leak but the
+    cleaner doesn't have in its list stays in the file, and a properly cleaned
+    file gets a "not fully cleaned" verdict out of nowhere. The lists live in
+    two modules (the inspector must not depend on the cleaner), so their match
+    is checked here rather than achieved through a shared import.
     """
     insp_sp = set(insp_ooxml._CX_SHAREPOINT_NS)
     clean_sp = set(clean_ooxml._SP_ROOT_NS)
-    _check("список корней SharePoint у инспектора и чистильщика совпадает",
+    _check("the SharePoint root lists of the inspector and the cleaner match",
            insp_sp == clean_sp,
-           "только у инспектора: %s; только у чистильщика: %s"
+           "only the inspector: %s; only the cleaner: %s"
            % (sorted(insp_sp - clean_sp), sorted(clean_sp - insp_sp)))
     insp_c = set(insp_ooxml._CX_CONTENT_NS)
     clean_c = set(clean_ooxml._CONTENT_ROOT_NS)
-    _check("список корней-содержимого у инспектора и чистильщика совпадает",
+    _check("the content root lists of the inspector and the cleaner match",
            insp_c == clean_c,
-           "только у инспектора: %s; только у чистильщика: %s"
+           "only the inspector: %s; only the cleaner: %s"
            % (sorted(insp_c - clean_c), sorted(clean_c - insp_c)))
-    _check("корень не может быть одновременно утечкой SharePoint и содержимым",
+    _check("a root can't be both a SharePoint leak and content",
            not (insp_sp & insp_c), sorted(insp_sp & insp_c))
 
 
 @_with_tmp
 def test_16_rtf_cleaning(tmp):
-    """RTF чистится на месте. Оракул -- повторная инспекция, не список действий.
+    """RTF is cleaned in place. The oracle is the re-inspection, not the list of actions.
 
-    STEALTH оставляет генератор: пустая строка приложения сама след чистки.
-    PARANOID убирает и его. Путь в теле документа -- утечка окружения, он
-    уходит в обоих профилях.
+    STEALTH keeps the generator: an empty application string is itself a
+    cleaning trace. PARANOID removes it too. A path in the document body is an
+    environment leak, it goes in both profiles.
     """
     path, _exp = fixtures.make_rtf(tmp)
     before = open(path, "rb").read()
     for prof in PROFILES:
         res, dst = _clean("rtf", tmp, path, prof)
-        _check("rtf/%s: ok и файл создан" % _pname(prof), res.ok and os.path.exists(dst), res.errors)
-        _check("rtf/%s: вход не изменён" % _pname(prof), open(path, "rb").read() == before)
+        _check("rtf/%s: ok and the file is created" % _pname(prof), res.ok and os.path.exists(dst), res.errors)
+        _check("rtf/%s: the input was not modified" % _pname(prof), open(path, "rb").read() == before)
         if not res.ok:
             continue
         src_rep, dst_rep = inspect_file(path), inspect_file(dst)
         lived = survived_values(src_rep, dst_rep)
-        _check("rtf/%s: ни одно исходное значение не выжило" % _pname(prof), not lived,
+        _check("rtf/%s: no original value survived" % _pname(prof), not lived,
                [(s.label, s.value[:40]) for s in lived])
         blob = " ".join(f.value or "" for f in dst_rep.findings)
         if prof is Profile.STEALTH:
-            _check("rtf/stealth: генератор на месте", fixtures.RTF_GENERATOR in blob, blob[:200])
+            _check("rtf/stealth: the generator is in place", fixtures.RTF_GENERATOR in blob, blob[:200])
         else:
-            _check("rtf/paranoid: генератора нет", fixtures.RTF_GENERATOR not in blob)
+            _check("rtf/paranoid: no generator", fixtures.RTF_GENERATOR not in blob)
 
 
 @_with_tmp
 def test_17_odf_cleaning(tmp):
-    """ODF чистится через zipfix. STEALTH оставляет генератор, PARANOID нет.
+    """ODF is cleaned via zipfix. STEALTH keeps the generator, PARANOID doesn't.
 
-    Таймстемпы ZIP не переписываются: у фикстуры они 1980-01-01, и после
-    чистки должны остаться теми же. Иначе файл от Word получит реальное
-    время, а файл от LibreOffice -- эпоху.
+    The ZIP timestamps aren't rewritten: the fixture has 1980-01-01, and they
+    must stay the same after cleaning. Otherwise a file from Word would get a
+    real time, and a file from LibreOffice the epoch.
     """
     path, _exp = fixtures.make_odt(tmp)
     before = open(path, "rb").read()
@@ -1376,21 +1402,21 @@ def test_17_odf_cleaning(tmp):
     src_times = times(path)
     for prof in PROFILES:
         res, dst = _clean("odt", tmp, path, prof)
-        _check("odt/%s: ok и файл создан" % _pname(prof),
+        _check("odt/%s: ok and the file is created" % _pname(prof),
                res.ok and os.path.exists(dst), res.errors)
-        _check("odt/%s: вход не изменён" % _pname(prof), open(path, "rb").read() == before)
+        _check("odt/%s: the input was not modified" % _pname(prof), open(path, "rb").read() == before)
         if not res.ok:
             continue
-        _check("odt/%s: время записей ZIP не переписано" % _pname(prof),
+        _check("odt/%s: the ZIP entry times were not rewritten" % _pname(prof),
                times(dst) == src_times, times(dst))
         lived = survived_values(inspect_file(path), inspect_file(dst))
-        _check("odt/%s: ни одно исходное значение не выжило" % _pname(prof), not lived,
+        _check("odt/%s: no original value survived" % _pname(prof), not lived,
                [(s.label, s.value[:40]) for s in lived])
         blob = " ".join(f.value or "" for f in inspect_file(dst).findings)
         if prof is Profile.STEALTH:
-            _check("odt/stealth: генератор на месте", fixtures.ODT_GENERATOR in blob)
+            _check("odt/stealth: the generator is in place", fixtures.ODT_GENERATOR in blob)
         else:
-            _check("odt/paranoid: генератора нет", fixtures.ODT_GENERATOR not in blob)
+            _check("odt/paranoid: no generator", fixtures.ODT_GENERATOR not in blob)
 
 
 @_with_tmp
@@ -1399,8 +1425,8 @@ def test_11_refusals_unsupported_formats(tmp):
         d = os.path.join(tmp, name)
         os.makedirs(d)
         path, _exp = maker(d)
-        _check("%s: sniff опознал формат файла (%s) -- отказ вызван отсутствием чистильщика, "
-               "а не мусором" % (name, sniff.sniff(path)), sniff.sniff(path) not in ("unknown", "unreadable"))
+        _check("%s: sniff recognized the file format (%s) -- the refusal is caused by the "
+               "missing cleaner, not by garbage" % (name, sniff.sniff(path)), sniff.sniff(path) not in ("unknown", "unreadable"))
         for prof in PROFILES:
             label = "%s/%s" % (name, _pname(prof))
             res, dst = _clean(name, d, path, prof)
@@ -1408,59 +1434,62 @@ def test_11_refusals_unsupported_formats(tmp):
                 continue
             msg = " ".join(res.errors)
             _check("%s: ok=False" % label, not res.ok)
-            _check("%s: выходной файл НЕ создан" % label, not os.path.exists(dst))
-            _check("%s: в тексте ошибки сказано, что файл НЕ очищен" % label, "НЕ очищен" in msg, msg)
+            _check("%s: the output file was NOT created" % label, not os.path.exists(dst))
+            _check("%s: the error text says the file was NOT cleaned" % label, "NOT cleaned" in msg, msg)
             named = _phases(msg)
-            _check("%s: в тексте ошибки назван номер фазы, допустимый для формата %s" % (label, phases),
-                   len(named) == 1 and named <= set(phases), "названо: %s; %s" % (sorted(named), msg))
-            _check("%s: planned_phase совпадает с названной в тексте фазой" % label,
+            _check("%s: the error text names a phase number allowed for the format %s" % (label, phases),
+                   len(named) == 1 and named <= set(phases), "named: %s; %s" % (sorted(named), msg))
+            _check("%s: planned_phase matches the phase named in the text" % label,
                    res.planned_phase > 0 and {res.planned_phase} == named, (res.planned_phase, named))
-            _check("%s: чистота не заявлена -- clean=False, не verified, critical_after=-1, действий нет" % label,
+            _check("%s: no cleanliness claimed -- clean=False, not verified, critical_after=-1, "
+                   "no actions" % label,
                    not res.clean and not res.verified and res.critical_after == -1 and not res.actions)
-            _check("%s: в ошибках нет ни пути каталога, ни имени файла" % label,
+            _check("%s: the errors have neither the directory path nor the file name" % label,
                    d not in msg and os.path.basename(path) not in msg, msg)
-        # существующий dst при отказе не затирается
+        # an existing dst is not overwritten on a refusal
         sent = os.path.join(d, "sentinel.out")
         _write(sent, b"old")
         res = clean_file(path, sent)
-        _check("%s: отказ не трогает уже существующий выходной файл" % name,
+        _check("%s: a refusal doesn't touch an already existing output file" % name,
                not res.ok and _read(sent) == b"old")
 
-        # отчёт для пользователя не обещает чистоты и называет ту же фазу
+        # the user report doesn't promise cleanliness and names the same phase
         res, _dst = _clean(name + "_report", d, path, STEALTH)
         if res is None:
             continue
         plain = cleanreport.render_plain(res)
         tg = "\n".join(cleanreport.render_telegram(res))
         summ = cleanreport.summary_line(res)
-        _check("%s: отчёт (текст и Telegram) говорит «ФАЙЛ НЕ ПОЧИЩЕН»" % name,
-               "ФАЙЛ НЕ ПОЧИЩЕН" in plain and "ФАЙЛ НЕ ПОЧИЩЕН" in tg)
-        _check("%s: сводка начинается с «НЕ почищен»" % name, summ.startswith("НЕ почищен"), summ)
-        _check("%s: отчёт нигде не называет файл чистым" % name,
+        _check("%s: the report (text and Telegram) says \"FILE NOT CLEANED\"" % name,
+               "FILE NOT CLEANED" in plain and "FILE NOT CLEANED" in tg)
+        _check("%s: the summary starts with \"NOT cleaned\"" % name, summ.startswith("NOT cleaned"), summ)
+        _check("%s: the report never calls the file clean" % name,
                not _claims_clean(plain) and not _claims_clean(tg))
-        # Предусловие равенства ниже: файл ОТКАЗАН, и номер фазы в отчёте --
-        # причина отказа. У почищенного файла planned_phase == 0, а фаза в его
-        # отчёте называется информационно (предупреждение про Regenerate как
-        # путь к незаметности), и равенство к нему не применимо.
-        _check("%s: предусловие -- файл отказан и у отказа есть номер фазы" % name,
+        # The precondition for the equality below: the file is REFUSED, and the phase
+        # number in the report is the reason for the refusal. A cleaned file has
+        # planned_phase == 0, and its report names a phase for information (a warning
+        # about Regenerate as the path to being undetectable), so the equality
+        # doesn't apply to it.
+        _check("%s: precondition -- the file is refused and the refusal has a phase number" % name,
                not res.ok and res.planned_phase > 0, (res.ok, res.planned_phase))
         ph = _phases(plain) | _phases(tg)
-        _check("%s: отчёт cleanreport и диспетчер называют ОДНУ И ТУ ЖЕ фазу (пользователь видит оба текста)" % name,
-               ph == {res.planned_phase}, "фазы в отчёте: %s, planned_phase=%s" % (sorted(ph), res.planned_phase))
+        _check("%s: the cleanreport report and the dispatcher name THE SAME phase (the user sees "
+               "both texts)" % name,
+               ph == {res.planned_phase}, "phases in the report: %s, planned_phase=%s" % (sorted(ph), res.planned_phase))
 
-    # профиль REGENERATE (фаза 4) для PDF не создаёт файл
+    # the REGENERATE profile (phase 4) creates no file for PDF
     path = fixtures.make_pdf(tmp)[0]
     dst = os.path.join(tmp, "regen.pdf")
     res = clean_file(path, dst, Profile.REGENERATE)
-    _check("REGENERATE: ok=False, фаза 4 названа, файла нет",
+    _check("REGENERATE: ok=False, phase 4 is named, no file",
            not res.ok and res.planned_phase == 4 and not os.path.exists(dst) and 4 in _phases(" ".join(res.errors)),
            res.errors)
     res = clean_file(path, dst, "no-such-profile")
-    _check("неизвестный профиль: ok=False, файла нет", not res.ok and not os.path.exists(dst), res.errors)
+    _check("unknown profile: ok=False, no file", not res.ok and not os.path.exists(dst), res.errors)
 
 
 # ===========================================================================
-# 12. Защита от затирания входа
+# 12. Protection against overwriting the input
 # ===========================================================================
 
 
@@ -1472,16 +1501,16 @@ def test_12_no_overwrite_of_input(tmp):
         os.makedirs(d)
         path, _exp = maker(d)
         base = os.path.basename(path)
-        variants = [("тот же путь", path), ("через «.»", os.path.join(d, ".", base)),
-                    ("через «x/..»", os.path.join(d, "x", "..", base))]
+        variants = [("same path", path), ("via '.'", os.path.join(d, ".", base)),
+                    ("via 'x/..'", os.path.join(d, "x", "..", base))]
         if os.name == "nt":
-            variants.append(("другой регистр", os.path.join(d, base.upper())))
+            variants.append(("different case", os.path.join(d, base.upper())))
         link = os.path.join(d, "hard_" + base)
         linked = False
         try:
             os.link(path, link)
             linked = True
-            variants.append(("жёсткая ссылка", link))
+            variants.append(("hard link", link))
         except (OSError, NotImplementedError, AttributeError):
             pass
         before, listing = _sha256(path), sorted(os.listdir(d))
@@ -1490,16 +1519,16 @@ def test_12_no_overwrite_of_input(tmp):
             try:
                 res = clean_file(path, dst)
             except Exception as exc:  # noqa: BLE001
-                _check("%s не бросил исключение" % label, False, "%s: %s" % (type(exc).__name__, exc))
+                _check("%s did not raise" % label, False, "%s: %s" % (type(exc).__name__, exc))
                 continue
             _SEEN.append(("%s/overwrite/%s" % (name, vname), res))
             _check("%s -> ok=False" % label, not res.ok, res.errors)
-            _check("%s: src не изменён (sha256)" % label, _sha256(path) == before)
-            if vname == "жёсткая ссылка":
-                _check("%s: и ссылка (та же inode) не изменена" % label, _sha256(link) == before)
-        _check("%s: в каталоге не появилось и не осталось лишних файлов" % name,
+            _check("%s: src was not modified (sha256)" % label, _sha256(path) == before)
+            if vname == "hard link":
+                _check("%s: and the link (same inode) was not modified" % label, _sha256(link) == before)
+        _check("%s: no extra files appeared or remained in the directory" % name,
                sorted(os.listdir(d)) == listing, sorted(os.listdir(d)))
-        # сами чистильщики, в обход диспетчера: вход цел при любом dst
+        # the cleaners themselves, bypassing the dispatcher: the input stays intact for any dst
         if name == "pdf":
             r = clean_pdf(path, path)
             _check("pdf: clean_pdf(src, src) -> ok=False", not r.ok, r.errors)
@@ -1510,12 +1539,12 @@ def test_12_no_overwrite_of_input(tmp):
             _check("%s: clean_image(src, src) -> ok=False" % name, not r.ok, r.errors)
             if linked:
                 r = clean_image(path, link)
-                _check("%s: clean_image(src, жёсткая ссылка на src) -> ok=False" % name, not r.ok, r.errors)
-        _check("%s: после вызовов чистильщиков напрямую src не изменён" % name, _sha256(path) == before)
+                _check("%s: clean_image(src, a hard link to src) -> ok=False" % name, not r.ok, r.errors)
+        _check("%s: after calling the cleaners directly src was not modified" % name, _sha256(path) == before)
 
 
 # ===========================================================================
-# 13. ПАТОЛОГИИ: ни одного исключения наружу, вход цел, файла нет
+# 13. PATHOLOGIES: not a single exception escapes, the input is intact, no file
 # ===========================================================================
 
 
@@ -1545,7 +1574,8 @@ def test_13_pathologies(tmp):
             "pdf_junk_after_magic", "png_ztxt_bomb", "png_junk_after_magic", "jpeg_junk_after_magic",
             "jpeg_cut_before_sos", "jpeg_truncated", "zip_bad_entry", "zip_bomb"} | {
         n for n in cases if n.startswith("png_bad_crc_")}
-    _check("набор патологий собран: пустой файл, мусор с магией, обрезанный PDF, битые CRC, zTXt-бомба",
+    _check("the pathology set is assembled: an empty file, garbage with magic, a truncated PDF, "
+           "broken CRCs, a zTXt bomb",
            {"empty", "pdf_header_junk", "pdf_truncated_half", "png_bad_crc_IDAT", "png_ztxt_bomb"} <= set(cases),
            sorted(cases))
     for name, path in sorted(cases.items()):
@@ -1555,35 +1585,36 @@ def test_13_pathologies(tmp):
         t0 = time.time()
         try:
             res = clean_file(path, dst)
-        except Exception as exc:  # noqa: BLE001 -- именно это и проверяем
-            _check("%s: исключение НЕ вылетело наружу" % name, False, "%s: %s" % (type(exc).__name__, exc))
+        except Exception as exc:  # noqa: BLE001 -- this is exactly what we test
+            _check("%s: the exception did NOT escape" % name, False, "%s: %s" % (type(exc).__name__, exc))
             continue
         dt = time.time() - t0
         _SEEN.append(("pathology/" + name, res))
-        _check("%s: вернулся DispatchResult, быстро (%.1f с)" % (name, dt), isinstance(res, DispatchResult) and dt < 30, dt)
-        _check("%s: вход не изменён (sha256)" % name, _sha256(path) == before)
+        _check("%s: a DispatchResult came back, quickly (%.1f s)" % (name, dt), isinstance(res, DispatchResult) and dt < 30, dt)
+        _check("%s: the input was not modified (sha256)" % name, _sha256(path) == before)
         if name in must:
             _check("%s: ok=False" % name, not res.ok, "ok=True, errors=%s" % res.errors)
-            _check("%s: errors непусты -- причина названа" % name, bool(res.errors))
+            _check("%s: errors are non-empty -- the reason is named" % name, bool(res.errors))
         if not res.ok:
             msg = " ".join(res.errors)
-            _check("%s: выходной файл НЕ создан" % name, not os.path.exists(dst))
-            _check("%s: временных файлов (.clean_*, .part) не осталось" % name, not _no_leftovers(out_dir),
+            _check("%s: the output file was NOT created" % name, not os.path.exists(dst))
+            _check("%s: no temporary files (.clean_*, .part) are left" % name, not _no_leftovers(out_dir),
                    _no_leftovers(out_dir))
-            _check("%s: в ошибках нет пути каталога и имени файла" % name,
+            _check("%s: the errors have no directory path and no file name" % name,
                    tmp not in msg and os.path.basename(path) not in msg, msg)
-            _check("%s: чистота не заявлена, действий нет" % name,
+            _check("%s: no cleanliness claimed, no actions" % name,
                    not res.clean and res.critical_after == -1 and not res.actions)
             sent = os.path.join(tmp, "sentinel_" + name)
             _write(sent, b"old")
             r2 = clean_file(path, sent)
-            _check("%s: существующий выходной файл при отказе не тронут" % name,
+            _check("%s: an existing output file is untouched on a refusal" % name,
                    not r2.ok and _read(sent) == b"old")
         else:
-            _check("%s: файл выдан -- dst существует и результат подтверждён повторной инспекцией" % name,
+            _check("%s: a file was produced -- dst exists and the result is confirmed by "
+                   "re-inspection" % name,
                    os.path.isfile(dst) and res.verified, res.errors)
 
-    # свип: любая одиночная порча PNG (бит-флип в любом месте или обрыв) -> отказ, а не тихо испорченный выход
+    # sweep: any single PNG corruption (a bit flip anywhere or a truncation) -> refusal, not a silently broken output
     png = _png_bytes(pre=[fixtures._png_chunk(b"tEXt", b"Author\0" + P_AUTHOR.encode("latin-1"))])[0]
     problems = []
     runs = 0
@@ -1594,26 +1625,27 @@ def test_13_pathologies(tmp):
         try:
             res = clean_file(src, dst)
         except Exception as exc:  # noqa: BLE001
-            problems.append("флип %d: исключение %s" % (i, type(exc).__name__))
+            problems.append("flip %d: exception %s" % (i, type(exc).__name__))
             continue
         runs += 1
         if res.ok or os.path.exists(dst) or _sha256(src) != hashlib.sha256(bad).hexdigest():
-            problems.append("флип %d: ok=%s dst=%s" % (i, res.ok, os.path.exists(dst)))
+            problems.append("flip %d: ok=%s dst=%s" % (i, res.ok, os.path.exists(dst)))
     for cut in range(1, len(png), 13):
         src = _write(os.path.join(tmp, "cut.png"), png[:cut])
         dst = os.path.join(tmp, "cut_out", "o.png")
         try:
             res = clean_file(src, dst)
         except Exception as exc:  # noqa: BLE001
-            problems.append("обрыв %d: исключение %s" % (cut, type(exc).__name__))
+            problems.append("cut %d: exception %s" % (cut, type(exc).__name__))
             continue
         runs += 1
         if res.ok or os.path.exists(dst):
-            problems.append("обрыв %d: ok=%s dst=%s" % (cut, res.ok, os.path.exists(dst)))
-    _check("PNG: все %d одиночных порч (бит-флип, обрыв) отклонены, исключений нет, файла нет" % runs,
+            problems.append("cut %d: ok=%s dst=%s" % (cut, res.ok, os.path.exists(dst)))
+    _check("PNG: all %d single corruptions (bit flip, truncation) rejected, no exceptions, no "
+           "file" % runs,
            not problems, problems[:5])
 
-    # свип: обрыв PDF в любой точке -> либо отказ, либо полностью валидный результат с одним %%EOF
+    # sweep: a PDF truncated at any point -> either a refusal or a fully valid output with one %%EOF
     problems, runs = [], 0
     for cut in sorted(set(list(range(9, len(pdf), 37)) + list(range(len(pdf) - 30, len(pdf))))):
         src = _write(os.path.join(tmp, "cutp.pdf"), pdf[:cut])
@@ -1623,12 +1655,12 @@ def test_13_pathologies(tmp):
         try:
             res = clean_file(src, dst)
         except Exception as exc:  # noqa: BLE001
-            problems.append("обрыв %d: исключение %s" % (cut, type(exc).__name__))
+            problems.append("cut %d: exception %s" % (cut, type(exc).__name__))
             continue
         runs += 1
         if not res.ok:
             if os.path.exists(dst):
-                problems.append("обрыв %d: отказ, но файл создан" % cut)
+                problems.append("cut %d: refused, but a file was created" % cut)
             continue
         try:
             with pikepdf.open(dst) as q:
@@ -1636,13 +1668,13 @@ def test_13_pathologies(tmp):
         except Exception:  # noqa: BLE001
             good = False
         if not good:
-            problems.append("обрыв %d: ok=True, но результат невалиден" % cut)
-    _check("PDF: на всех %d точках обрыва -- отказ либо полностью валидный результат" % runs,
+            problems.append("cut %d: ok=True, but the output is invalid" % cut)
+    _check("PDF: at all %d truncation points -- a refusal or a fully valid output" % runs,
            not problems, problems[:5])
 
 
 # ===========================================================================
-# 15. Честность вердиктов: проверка не верит чистильщику на слово
+# 15. Honest verdicts: the check doesn't take the cleaner's word for it
 # ===========================================================================
 
 
@@ -1650,29 +1682,30 @@ def test_13_pathologies(tmp):
 def test_15_honest_verdicts(tmp):
     path = fixtures.make_pdf(tmp)[0]
 
-    # verify=False: файл выдан, но чистоту утверждать нельзя
+    # verify=False: a file is produced, but cleanliness can't be claimed
     res, dst = _clean("pdf_noverify", tmp, path, STEALTH, verify=False)
     if res is not None:
         text = cleanreport.render_plain(res) + "\n".join(cleanreport.render_telegram(res))
-        _check("verify=False: ok, но clean=False, verified=False, critical_after=-1",
+        _check("verify=False: ok, but clean=False, verified=False, critical_after=-1",
                res.ok and not res.clean and not res.verified and res.critical_after == -1)
-        _check("verify=False: отчёт говорит «РЕЗУЛЬТАТ НЕ ПРОВЕРЕН» и не объявляет файл чистым",
-               "НЕ ПРОВЕРЕН" in text and "ЧИСТО: повторная" not in text)
+        _check("verify=False: the report says \"RESULT NOT VERIFIED\" and doesn't declare the "
+               "file clean",
+               "NOT VERIFIED" in text and "CLEAN: re-inspection" not in text)
 
-    # keep: оставленное по просьбе значение -- не скрываем, а показываем
+    # keep: a value kept on request isn't hidden but shown
     res, dst = _clean("pdf_keep", tmp, path, STEALTH, keep={"/Author"})
-    if res is not None and _check("keep: ok и verified", res.ok and res.verified, res.errors):
-        _check("keep: /Author физически остался в файле (просьба выполнена)", bool(_leaked(dst, [fixtures.PDF_AUTHOR])))
-        _check("keep: диспетчер НЕ объявляет файл чистым и называет оставшееся значение",
+    if res is not None and _check("keep: ok and verified", res.ok and res.verified, res.errors):
+        _check("keep: /Author physically stayed in the file (the request was honored)", bool(_leaked(dst, [fixtures.PDF_AUTHOR])))
+        _check("keep: the dispatcher does NOT declare the file clean and names the kept value",
                not res.clean and any(fixtures.PDF_AUTHOR in sv.value for sv in res.survived),
                [(s.label, s.value) for s in res.survived])
-        _check("keep: отчёт не называет файл чистым",
-               "ЧИСТО: повторная" not in cleanreport.render_plain(res))
+        _check("keep: the report doesn't call the file clean",
+               "CLEAN: re-inspection" not in cleanreport.render_plain(res))
 
-    # подмена чистильщиков -- документированный шов core.clean._CLEANERS
+    # swapping the cleaners: the documented core.clean._CLEANERS seam
     saved = dict(clean_mod._CLEANERS)
     try:
-        def liar(s, d, prof, keep, force):          # копирует файл как есть и клянётся, что чисто
+        def liar(s, d, prof, keep, force):          # copies the file as is and swears it's clean
             shutil.copyfile(s, d)
             r = CleanResult(src=s, dst=d, fmt="pdf", profile="stealth")
             r.ok = True
@@ -1683,19 +1716,19 @@ def test_15_honest_verdicts(tmp):
         res, dst = _clean("pdf_liar", tmp, path, STEALTH)
         if res is not None:
             text = cleanreport.render_plain(res) + "\n".join(cleanreport.render_telegram(res))
-            _check("чистильщик-лжец: утечка не убрана -- survived не пуст, clean=False",
+            _check("lying cleaner: the leak is not removed -- survived is not empty, clean=False",
                    res.ok and res.verified and bool(res.survived) and not res.clean, res.survived)
-            _check("чистильщик-лжец: отчёт не называет файл чистым", "ЧИСТО: повторная" not in text)
+            _check("lying cleaner: the report doesn't call the file clean", "CLEAN: re-inspection" not in text)
 
-        def boom(s, d, prof, keep, force):          # пишет половину файла и падает
+        def boom(s, d, prof, keep, force):          # writes half the file and crashes
             with open(d, "wb") as fh:
                 fh.write(b"%PDF-1.4 half")
-            raise RuntimeError("взрыв")
+            raise RuntimeError("boom")
 
         clean_mod._CLEANERS["pdf"] = boom
         res, dst = _clean("pdf_boom", tmp, path, STEALTH)
         if res is not None:
-            _check("исключение чистильщика: ok=False, файла нет, мусора нет",
+            _check("cleaner exception: ok=False, no file, no garbage",
                    not res.ok and not os.path.exists(dst) and not _no_leftovers(os.path.dirname(dst)),
                    (res.errors, os.listdir(os.path.dirname(dst)) if os.path.isdir(os.path.dirname(dst)) else None))
 
@@ -1703,7 +1736,7 @@ def test_15_honest_verdicts(tmp):
         os.makedirs(png_dir)
         png_path = fixtures.make_png(png_dir)[0]
 
-        def other_format(s, d, prof, keep, force):  # «чистка» выдала не PDF
+        def other_format(s, d, prof, keep, force):  # the "cleaning" produced something that isn't a PDF
             shutil.copyfile(png_path, d)
             r = CleanResult(src=s, dst=d, fmt="pdf", profile="stealth")
             r.ok = True
@@ -1712,26 +1745,26 @@ def test_15_honest_verdicts(tmp):
         clean_mod._CLEANERS["pdf"] = other_format
         res, dst = _clean("pdf_other_format", tmp, path, STEALTH)
         if res is not None:
-            _check("результат другого формата не выдаётся: ok=False, файла нет",
+            _check("an output of a different format is not handed over: ok=False, no file",
                    not res.ok and not os.path.exists(dst), res.errors)
     finally:
         clean_mod._CLEANERS.clear()
         clean_mod._CLEANERS.update(saved)
-    _check("швы: core.clean._CLEANERS восстановлен после подмен", clean_mod._CLEANERS == saved)
+    _check("seams: core.clean._CLEANERS restored after the swaps", clean_mod._CLEANERS == saved)
 
 
 # ===========================================================================
-# 97. То, что реально печатает CLI: итог диспетчера не противоречит своим же цифрам
+# 97. What the CLI really prints: the dispatcher's summary doesn't contradict its own numbers
 # ===========================================================================
 
 
 @_with_tmp
 def test_97_cli_verdict_text(tmp):
-    """python -m core.clean печатает итог диспетчера СВЕРХУ и отчёт cleanreport ниже.
-    Пользователь читает именно этот текст, поэтому итог не имеет права говорить
-    «часть исходных значений осталась», когда в той же распечатке «пережившихся
-    чистку: 0» (случай: инспектор не смог разобрать часть исходника -- доказательство
-    неполное, но утечки никто не видел)."""
+    """python -m core.clean prints the dispatcher's summary ON TOP and the
+    cleanreport report below. That's the text the user reads, so the summary
+    must not say "some of the original values remained" when the same printout
+    says "survived cleaning: 0" (the case: the inspector couldn't parse part of
+    the original, so the proof is incomplete, but nobody saw a leak)."""
     import contextlib
 
     def run_cli(src, extra=()):
@@ -1743,51 +1776,52 @@ def test_97_cli_verdict_text(tmp):
                 rc = clean_mod.main([src, "--out", out, "--overwrite"] + list(extra))
         except SystemExit as exc:     # argparse
             rc = exc.code
-        _check("CLI %s: вход не изменён (sha256)" % os.path.basename(src), _sha256(src) == before)
+        _check("CLI %s: the input was not modified (sha256)" % os.path.basename(src), _sha256(src) == before)
         return rc, buf.getvalue(), out
 
     bomb, _rows = _live_bomb_png(tmp)
     rc, text, out = run_cli(bomb)
-    survived_zero = "пережившихся чистку: 0" in text
-    _check("CLI, zTXt-бомба: файл выдан, чистота не доказана -> код возврата 2", rc == 2 and os.path.isfile(out), rc)
-    _check("CLI, zTXt-бомба: в распечатке есть «пережившихся чистку: 0» (предусловие)", survived_zero, text[:400])
-    _check("CLI, zTXt-бомба: итог не утверждает «часть исходных значений осталась» при нуле выживших",
-           not (survived_zero and "часть исходных значений осталась" in text), text[:300])
+    survived_zero = "survived cleaning: 0" in text
+    _check("CLI, zTXt bomb: the file is produced, cleanliness not proven -> exit code 2", rc == 2 and os.path.isfile(out), rc)
+    _check("CLI, zTXt bomb: the printout has \"survived cleaning: 0\" (precondition)", survived_zero, text[:400])
+    _check("CLI, zTXt bomb: the summary doesn't claim \"some of the original values remained\" "
+           "with zero survivors",
+           not (survived_zero and "some of the original values remained" in text), text[:300])
 
     path = fixtures.make_pdf(tmp)[0]
     rc, text, out = run_cli(path)
-    _check("CLI, обычный PDF: код возврата 0 и итог «ПОЧИЩЕНО: ни одно исходное значение»",
-           rc == 0 and "ПОЧИЩЕНО: ни одно исходное значение" in text and "НЕ ПОЛНОСТЬЮ" not in text, (rc, text[:200]))
+    _check("CLI, ordinary PDF: exit code 0 and the summary \"CLEANED: no original value\"",
+           rc == 0 and "CLEANED: no original value" in text and "NOT FULLY" not in text, (rc, text[:200]))
 
-    # С фазы 2 docx чистится. Отказ с номером фазы остаётся у форматов,
-    # чистки которых ещё нет: легаси OLE2 (фаза 4), ODF и RTF.
+    # Since phase 2 docx is cleaned. A refusal with a phase number remains for
+    # formats whose cleaning doesn't exist yet: legacy OLE2 (phase 4), ODF and RTF.
     rc, text, out = run_cli(fixtures.make_docx(tmp)[0])
-    _check("CLI, docx: код возврата 0, файл выдан, «ПОЧИЩЕНО»",
-           rc == 0 and os.path.isfile(out) and "ПОЧИЩЕНО" in text and "НЕ ПОЧИЩЕНО" not in text,
+    _check("CLI, docx: exit code 0, the file is produced, \"CLEANED\"",
+           rc == 0 and os.path.isfile(out) and "CLEANED" in text and "NOT CLEANED" not in text,
            (rc, text[:300]))
 
     rc, text, out = run_cli(fixtures.make_doc(tmp)[0])
-    _check("CLI, legacy .doc: код возврата 1, файла нет, «НЕ ПОЧИЩЕНО», названа фаза 4",
-           rc == 1 and not os.path.exists(out) and "НЕ ПОЧИЩЕНО" in text and 4 in _phases(text),
+    _check("CLI, legacy .doc: exit code 1, no file, \"NOT CLEANED\", phase 4 is named",
+           rc == 1 and not os.path.exists(out) and "NOT CLEANED" in text and 4 in _phases(text),
            (rc, text[:300]))
 
 
 # ===========================================================================
-# 20. Фаза 2: чистка OOXML
+# 20. Phase 2: OOXML cleaning
 # ===========================================================================
 
-_WORD_EPOCH = (1980, 1, 1, 0, 0, 0)   # что Office ставит всем записям ZIP
+_WORD_EPOCH = (1980, 1, 1, 0, 0, 0)   # what Office sets on all ZIP entries
 
 
 @_with_tmp
 def test_20_ooxml_cleaning(tmp):
-    """Фаза 2: чистка docx/xlsx/pptx поверх байт-точной пересборки ZIP.
+    """Phase 2: docx/xlsx/pptx cleaning on top of a byte-exact ZIP rebuild.
 
-    Заменяет проверки, которые раньше утверждали, что эти форматы ОТКАЗЫВАЮТ.
-    Главное здесь -- не только «утечек не осталось», но и «пакет остался
-    пакетом Office»: порядок записей, DOS-таймстемпы, Application. Наивная
-    пересборка их ломает, и файл Word превращается в файл-от-библиотеки,
-    который наш же инспектор опознаёт сигналом ai.
+    Replaces the checks that used to claim these formats are REFUSED. The main
+    thing here is not only "no leaks are left" but also "the package stayed an
+    Office package": entry order, DOS timestamps, Application. A naive rebuild
+    breaks them, and a Word file turns into a library-made file that our own
+    inspector recognizes with the ai signal.
     """
     import zipfile
 
@@ -1806,68 +1840,68 @@ def test_20_ooxml_cleaning(tmp):
             res, dst = _clean(name, tmp, src, profile)
             if res is None:
                 continue
-            _check("%s: файл выдан и признан чистым" % tag,
+            _check("%s: the file is produced and recognized as clean" % tag,
                    res.ok and res.clean, (res.ok, res.errors[:1]))
-            _check("%s: ни одно исходное значение не выжило" % tag,
+            _check("%s: no original value survived" % tag,
                    not res.survived, [s_.value for s_ in res.survived][:3])
 
             if not os.path.isfile(dst):
                 continue
             with zipfile.ZipFile(dst) as z:
-                _check("%s: результат открывается, testzip проходит" % tag, z.testzip() is None)
+                _check("%s: the output opens, testzip passes" % tag, z.testzip() is None)
                 out_order = [i.filename for i in z.infolist()]
                 out_ts = {i.filename: i.date_time for i in z.infolist()}
-            _check("%s: [Content_Types].xml остался первой записью" % tag,
+            _check("%s: [Content_Types].xml stayed the first entry" % tag,
                    out_order and out_order[0] == "[Content_Types].xml", out_order[:2])
             kept = [n for n in src_order if n in set(out_order)]
-            _check("%s: порядок уцелевших записей не изменился" % tag, out_order == kept,
+            _check("%s: the order of the surviving entries didn't change" % tag, out_order == kept,
                    (out_order[:4], kept[:4]))
-            # Таймстемпы ZIP -- канал утечки сам по себе (docs/METADATA.md): Word
-            # ставит всем записям 1980-01-01, библиотеки -- реальное время
-            # сохранения. Поэтому «сохранить как было» верно ТОЛЬКО для пакета от
-            # Word; у пакета с реальным временем сохранять его означало бы оставить
-            # утечку, и чистильщик обязан привести всё к 1980-01-01. Запрещено
-            # ровно одно: вынести реальное время в результат.
+            # ZIP timestamps are a leak channel in themselves (docs/METADATA.md): Word
+            # sets 1980-01-01 on all entries, libraries the real save time. So "keep
+            # them as they were" is right ONLY for a package from Word; for a package
+            # with real times, keeping them would mean leaving the leak, and the cleaner
+            # has to bring everything to 1980-01-01. Exactly one thing is forbidden:
+            # carrying the real time over into the output.
             real_out = [n for n, t in out_ts.items() if tuple(t) != _WORD_EPOCH]
             if all(tuple(t) == _WORD_EPOCH for t in src_ts.values()):
                 bad_ts = [n for n in out_ts if n in src_ts and out_ts[n] != src_ts[n]]
-                _check("%s: пакет от Word -- DOS-таймстемпы записей не тронуты" % tag,
+                _check("%s: package from Word -- the entries' DOS timestamps are untouched" % tag,
                        not bad_ts, bad_ts[:3])
             else:
-                _check("%s: реальное время записей приведено к 1980-01-01 (иначе время "
-                       "сохранения утекает через контейнер)" % tag, not real_out, real_out[:3])
-            _check("%s: реального времени сохранения в таймстемпах результата нет" % tag,
+                _check("%s: the entries' real time is brought to 1980-01-01 (otherwise the save "
+                       "time leaks through the container)" % tag, not real_out, real_out[:3])
+            _check("%s: no real save time in the output timestamps" % tag,
                    not real_out, real_out[:3])
 
             after = inspect_file(dst)
             app = [f.value for f in after.findings if "Application" in (f.label or "")]
-            # Если в исходнике Application не было (xlsx-фикстура идёт без
-            # docProps/app.xml), сохранять нечего и появиться он не имеет права:
-            # дописанный Application -- подделка провенанса.
+            # If the original had no Application (the xlsx fixture comes without
+            # docProps/app.xml), there's nothing to keep and it must not appear: an
+            # added Application is a forged provenance.
             if profile is STEALTH:
-                _check("%s: Application сохранён как есть -- это правда о файле "
-                       "(в исходнике %s)" % (tag, "был" if src_had_app else "не было"),
+                _check("%s: Application kept as is -- that's the truth about the file (the "
+                       "original %s)" % (tag, "had one" if src_had_app else "had none"),
                        bool(app) == src_had_app, app)
-            # Проверять «части больше нет» имеет смысл только если она БЫЛА:
-            # иначе утверждение выполняется вакуумно и ничего не охраняет.
-            # people.xml есть у make_docx, printerSettings -- только у make_pptx.
+            # Checking "the part is gone" only makes sense if it WAS there: otherwise the
+            # assertion holds vacuously and guards nothing.
+            # make_docx has people.xml, only make_pptx has printerSettings.
             if "word/people.xml" in src_order:
-                _check("%s: word/people.xml с userId не осталось" % tag,
+                _check("%s: no word/people.xml with userId is left" % tag,
                        "word/people.xml" not in out_order)
             src_prn = [n for n in src_order if "printerSettings" in n]
             if src_prn:
-                _check("%s: printerSettings с именем принтера (было %d шт.) не осталось"
+                _check("%s: no printerSettings with the printer name (there were %d) is left"
                        % (tag, len(src_prn)),
                        not [n for n in out_order if "printerSettings" in n], out_order)
                 raw = _read(dst)
-                _check("%s: имя принтера не осталось и в сырых байтах результата" % tag,
+                _check("%s: the printer name is not left in the raw output bytes either" % tag,
                        fixtures.PPTX_PRINTER.encode("utf-16le") not in raw
                        and fixtures.PPTX_PRINTER.encode("utf-8") not in raw)
 
-        # Честность про незаметность: для OOXML stealth файл опознаётся как
-        # чищеный, и отчёт ОБЯЗАН это сказать. Пустые dc:creator и
-        # cp:lastModifiedBy вместе -- сами по себе признак; это предел формата,
-        # а не дефект, см. docs/ROADMAP.md.
+        # Honesty about being undetectable: for OOXML stealth the file is
+        # recognizable as scrubbed, and the report MUST say so. Empty dc:creator and
+        # cp:lastModifiedBy together are a sign by themselves; that's the limit of
+        # the format, not a defect, see docs/ROADMAP.md.
         res, dst = _clean(name + "_warn", tmp, src, STEALTH)
         if res is None:
             continue
@@ -1875,33 +1909,34 @@ def test_20_ooxml_cleaning(tmp):
         if kinds:
             plain = cleanreport.render_plain(res)
             tg = "\n".join(cleanreport.render_telegram(res))
-            _check("%s: отчёт предупреждает, что файл опознаётся как чищеный" % name,
-                   "ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ" in plain and "ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ" in tg,
+            _check("%s: the report warns that the file is recognizable as scrubbed" % name,
+                   "RECOGNIZABLE AS SCRUBBED" in plain and "RECOGNIZABLE AS SCRUBBED" in tg,
                    plain[:200])
-            _check("%s: предупреждение называет Regenerate как решение" % name,
+            _check("%s: the warning names Regenerate as the solution" % name,
                    "Regenerate" in plain, plain[:200])
 
 
 @_with_tmp
 def test_21_regenerate_scrubs_properties(tmp):
-    """REGENERATE обязан не только пересоздать файл, но и вычистить свойства.
+    """REGENERATE must not only recreate the file but also clean the properties.
 
-    Регрессия на найденный дефект: clean_regen делал ровно одно действие --
-    конвертацию через LibreOffice -- и считал работу сделанной. Но LibreOffice
-    при --convert-to ПЕРЕНОСИТ свойства документа: автор, кто сохранял,
-    организация и кастомная метка MSIP с email доезжали в результат. Опция
-    RemovePersonalInfoOnSaving в профиле на конвертацию не распространяется.
-    Пользователь получал файл, который считал максимально очищенным, со своим
-    именем и почтой внутри -- худший возможный исход для этого проекта.
+    Regression test for a defect found: clean_regen did exactly one action (the
+    conversion through LibreOffice) and considered the job done. But
+    LibreOffice with --convert-to CARRIES OVER the document properties: the
+    author, who saved it, the organization and a custom MSIP label with an
+    email made it into the output. The RemovePersonalInfoOnSaving option in the
+    profile doesn't apply to conversion. The user got a file they considered
+    maximally cleaned, with their name and email inside: the worst possible
+    outcome for this project.
 
-    Без LibreOffice на машине проверка пропускается: режим тогда честно
-    отказывает, и это покрыто отдельно.
+    Without LibreOffice on the machine the check is skipped: the mode then
+    refuses honestly, and that's covered separately.
     """
     from core.clean_regen import find_soffice
 
     if not find_soffice():
-        _check("regenerate: LibreOffice не найден -- проверка пропущена", True,
-               "это не провал: режим в таком случае обязан честно отказывать")
+        _check("regenerate: LibreOffice not found -- check skipped", True,
+               "not a failure: in this case the mode must refuse honestly")
         return
 
     src, _exp = fixtures.make_docx(tmp)
@@ -1909,27 +1944,28 @@ def test_21_regenerate_scrubs_properties(tmp):
     if res is None:
         return
 
-    _check("regenerate: файл выдан", res.ok and os.path.isfile(dst),
+    _check("regenerate: the file is produced", res.ok and os.path.isfile(dst),
            (res.ok, res.errors[:1]))
-    _check("regenerate: НИ ОДНО исходное значение не выжило",
+    _check("regenerate: NOT A SINGLE original value survived",
            not res.survived,
            [getattr(x, "value", "") for x in res.survived][:4])
-    _check("regenerate: одной конвертации мало -- есть действия чистки свойств",
+    _check("regenerate: one conversion isn't enough -- there are property cleaning actions",
            res.count() > 1, res.count())
-    _check("regenerate: инвариант -- вход не изменён", True)
+    _check("regenerate: invariant -- the input was not modified", True)
 
 
 def test_22_oracle_short_values():
-    """Регрессия на критичную находку критика: оракул был слеп к коротким значениям.
+    """Regression test for a critical review finding: the oracle was blind to short values.
 
-    survived_values пропускал всё короче MIN_VALUE_LEN, и чистильщик-лжец
-    (простая копия файла) получал clean=True и вердикт «ПОЧИЩЕНО» на документе
-    с dc:creator «Иван». «Олег», «Анна», «Bob» -- туда же. Центральное
-    утверждение проекта («ни одно исходное значение не встречается в
-    результате») не работало на самом частом классе данных -- на именах.
+    survived_values skipped everything shorter than MIN_VALUE_LEN, and a lying
+    cleaner (a plain copy of the file) got clean=True and a "CLEANED" verdict
+    on a document with dc:creator "Иван". "Олег", "Анна", "Bob" too. The
+    project's central claim ("no original value occurs in the output") didn't
+    work on the most common class of data: names.
 
-    Порог стоял не зря: подстрокой «ru» нашлось бы внутри «trust». Поэтому
-    короткие значения сравниваются по границам слова, а не пропускаются.
+    The threshold was there for a reason: the substring "ru" would be found
+    inside "trust". So short values are compared on word boundaries instead of
+    being skipped.
     """
     from core.clean import survived_values
     from core.model import Report, Risk
@@ -1940,29 +1976,29 @@ def test_22_oracle_short_values():
         return r
 
     for name in ("Иван", "Олег", "Анна", "Bob", "Ivan"):
-        _check("оракул: короткое имя %r не теряется" % name,
+        _check("oracle: the short name %r is not lost" % name,
                len(survived_values(rep(name), rep(name))) == 1, name)
 
     for short, longer in (("ru", "trust"), ("1.7", "21.75"),
                           ("Иван", "Иванов"), ("ru", "Другое")):
-        _check("оракул: %r внутри %r -- НЕ совпадение" % (short, longer),
+        _check("oracle: %r inside %r -- NOT a match" % (short, longer),
                not survived_values(rep(short), rep(longer)), (short, longer))
 
-    _check("оракул: короткое значение как отдельное слово находится",
+    _check("oracle: a short value as a separate word is found",
            len(survived_values(rep("Иван"), rep("Автор: Иван"))) == 1)
-    _check("оракул: длинное значение по-прежнему ищется подстрокой",
+    _check("oracle: a long value is still searched for as a substring",
            len(survived_values(rep("Иванов Иван"),
                                rep("Подготовил Иванов Иван, отдел"))) == 1)
 
-    # Маркеры присутствия -- разметка отчёта, а не данные: «есть» в исходнике и
-    # «есть» в результате это не пережившая чистку утечка.
-    for marker in ("есть", "нет", "да", "true"):
-        _check("оракул: маркер %r не считается утечкой" % marker,
+    # Presence markers are report markup, not data: "present" in the original and
+    # "present" in the output is not a leak that survived cleaning.
+    for marker in ("present", "no", "yes", "true"):
+        _check("oracle: the marker %r is not counted as a leak" % marker,
                not survived_values(rep(marker), rep(marker)), marker)
 
 
 def _pdf_with_photo(tmp, jpg):
-    """PDF «как из img2pdf»: JPEG лежит потоком /DCTDecode байт в байт, с EXIF."""
+    """A PDF "as if from img2pdf": the JPEG sits as a /DCTDecode stream byte for byte, with EXIF."""
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(200, 200))
     img = pikepdf.Stream(pdf, _read(jpg))
@@ -1970,8 +2006,8 @@ def _pdf_with_photo(tmp, jpg):
                 "/Height": 8, "/ColorSpace": pikepdf.Name("/DeviceGray"), "/BitsPerComponent": 8,
                 "/Filter": pikepdf.Name("/DCTDecode")})
     pdf.pages[0].Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im0=img))
-    # Страница обязана РИСОВАТЬ картинку: неиспользуемую QPDF выбросит как мусор,
-    # и тест доказал бы чистоту удалением, а не чисткой.
+    # The page has to DRAW the image: QPDF would throw out an unused one as
+    # garbage, and the test would prove cleanliness by deletion, not by cleaning.
     pdf.pages[0].Contents = pdf.make_stream(b"q 200 0 0 200 0 0 cm /Im0 Do Q")
     path = os.path.join(tmp, "scan.pdf")
     pdf.save(path)
@@ -1980,31 +2016,32 @@ def _pdf_with_photo(tmp, jpg):
 
 @_with_tmp
 def test_23_pdf_photo_exif(tmp):
-    """Регрессия: EXIF фотографии внутри PDF переживал чистку, а отчёт писал «чисто».
+    """Regression test: the EXIF of a photo inside a PDF survived cleaning, while the report said "clean".
 
-    Инспектор PDF не заглядывал в потоки картинок, поэтому оракулу нечего было
-    сравнивать: GPS дома и серийник камеры уезжали получателю с вердиктом
-    «ПОЧИЩЕНО». PDF из фотографий (img2pdf, сканер-приложения) -- частый случай."""
+    The PDF inspector didn't look into image streams, so the oracle had nothing
+    to compare: the home GPS and the camera serial number went to the recipient
+    with a "CLEANED" verdict. PDFs made from photos (img2pdf, scanner apps) are
+    a common case."""
     jpg, _ = fixtures.make_jpeg(tmp)
     src = _pdf_with_photo(tmp, jpg)
     rep = inspect_file(src)
-    _check("pdf+фото: инспектор видит GPS в картинке",
-           any("картинка" in f.location and "GPS" in f.location for f in rep.findings))
-    _check("pdf+фото: инспектор видит серийник в картинке",
+    _check("pdf+photo: the inspector sees GPS in the image",
+           any("image" in f.location and "GPS" in f.location for f in rep.findings))
+    _check("pdf+photo: the inspector sees the serial number in the image",
            any(fixtures.JPEG_SERIAL in f.value for f in rep.findings))
     for profile in PROFILES:
-        res, dst = _clean("pdf+фото", tmp, src, profile)
-        if res is None or not _check("pdf+фото/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+        res, dst = _clean("pdf+photo", tmp, src, profile)
+        if res is None or not _check("pdf+photo/%s: the file is produced" % _pname(profile), res.ok, res.errors[:2]):
             continue
-        _check("pdf+фото/%s: clean (оракул ничего не нашёл)" % _pname(profile), res.clean,
+        _check("pdf+photo/%s: clean (the oracle found nothing)" % _pname(profile), res.clean,
                [(s.label, s.value) for s in res.survived][:4])
         raw = _read(dst)
-        _check("pdf+фото/%s: серийника и автора нет в байтах результата" % _pname(profile),
+        _check("pdf+photo/%s: the serial number and the author are not in the output bytes" % _pname(profile),
                fixtures.JPEG_SERIAL.encode() not in raw and fixtures.JPEG_ARTIST.encode() not in raw)
         with pikepdf.open(dst) as q:
             imgs = [o.read_raw_bytes() for o in q.objects
                     if isinstance(o, pikepdf.Stream) and o.get("/Subtype") == "/Image"]
-        _check("pdf+фото/%s: картинка на месте и осталась JPEG" % _pname(profile),
+        _check("pdf+photo/%s: the image is in place and is still a JPEG" % _pname(profile),
                len(imgs) == 1 and imgs[0][:2] == b"\xff\xd8" and imgs[0].rstrip()[-2:] == b"\xff\xd9",
                len(imgs))
 
@@ -2013,8 +2050,9 @@ SHARED_EDITOR = "Скрытый Участник"
 
 
 def _xlsx_shared(tmp):
-    """xlsx с журналом общей книги, как его пишет Excel: revisionHeaders (userName,
-    dateTime), userNames (все, кто открывал), revisionLog; связи и Override на месте."""
+    """An xlsx with a shared workbook log, the way Excel writes it: revisionHeaders
+    (userName, dateTime), userNames (everyone who opened it), revisionLog;
+    relationships and Override in place."""
     src, _ = fixtures.make_xlsx(tmp)
     ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
@@ -2056,31 +2094,31 @@ def _xlsx_shared(tmp):
 
 @_with_tmp
 def test_24_xlsx_shared_workbook(tmp):
-    """Регрессия: журнал общей книги (xl/revisions) с именами всех участников
-    переживал чистку и не был виден инспектору."""
+    """Regression test: the shared workbook log (xl/revisions) with the names of
+    all participants survived cleaning and wasn't visible to the inspector."""
     src = _xlsx_shared(tmp)
-    _check("xlsx общая книга: инспектор видит участника",
+    _check("xlsx shared workbook: the inspector sees the participant",
            any(SHARED_EDITOR in f.value and f.risk is Risk.IDENTITY for f in inspect_file(src).findings))
     for profile in PROFILES:
         res, dst = _clean("xlsx-shared", tmp, src, profile)
-        if res is None or not _check("xlsx общая книга/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+        if res is None or not _check("xlsx shared workbook/%s: the file is produced" % _pname(profile), res.ok, res.errors[:2]):
             continue
-        _check("xlsx общая книга/%s: clean" % _pname(profile), res.clean,
+        _check("xlsx shared workbook/%s: clean" % _pname(profile), res.clean,
                [(s.label, s.value) for s in res.survived][:4])
         with zipfile.ZipFile(dst) as z:
             names = z.namelist()
             blob = b"".join(z.read(n) for n in names)
-        _check("xlsx общая книга/%s: xl/revisions убран, ссылок на него не осталось" % _pname(profile),
+        _check("xlsx shared workbook/%s: xl/revisions removed, no references to it left" % _pname(profile),
                not any(n.startswith("xl/revisions/") for n in names) and b"revisions/" not in blob,
                [n for n in names if "revision" in n])
-        _check("xlsx общая книга/%s: имени участника нет в байтах" % _pname(profile),
+        _check("xlsx shared workbook/%s: the participant's name is not in the bytes" % _pname(profile),
                SHARED_EDITOR.encode("utf-8") not in blob)
 
 
 @_with_tmp
 def test_25_rtf_upr_author(tmp):
-    """Регрессия: нелатинский автор в {\\upr{\\author ANSI}{\\*\\ud{\\author Юникод}}}
-    переживал чистку: подгруппа называется upr, и поимённый разбор её не видел."""
+    """Regression test: a non-Latin author in {\\upr{\\author ANSI}{\\*\\ud{\\author Unicode}}}
+    survived cleaning: the subgroup is called upr, and parsing by name didn't see it."""
     name = "Скрытый Автор"
     ansi = "".join("\\'%02x" % b for b in name.encode("cp1251"))
     uni = "".join("\\u%d?" % ord(ch) for ch in name)
@@ -2088,37 +2126,38 @@ def test_25_rtf_upr_author(tmp):
            "{\\creatim\\yr2024\\mo3\\dy1\\hr10\\min0}}{\\*\\generator Microsoft Word 11.0.0000;}"
            "Hello\\par}" % (ansi, uni))
     src = _write(os.path.join(tmp, "upr.rtf"), rtf.encode("latin-1"))
-    _check("rtf \\upr: инспектор видит автора",
+    _check("rtf \\upr: the inspector sees the author",
            any(f.value == name and f.risk is Risk.IDENTITY for f in inspect_file(src).findings))
     for profile in PROFILES:
         res, dst = _clean("rtf-upr", tmp, src, profile)
-        if res is None or not _check("rtf \\upr/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+        if res is None or not _check("rtf \\upr/%s: the file is produced" % _pname(profile), res.ok, res.errors[:2]):
             continue
         out = _read(dst).decode("latin-1")
         _check("rtf \\upr/%s: clean" % _pname(profile), res.clean,
                [(s.label, s.value) for s in res.survived][:4])
-        _check("rtf \\upr/%s: ни ANSI-, ни юникодной копии имени" % _pname(profile),
+        _check("rtf \\upr/%s: neither the ANSI nor the Unicode copy of the name" % _pname(profile),
                ansi not in out and uni not in out and "\\upr" not in out, out[:200])
-        _check("rtf \\upr/%s: текст документа цел" % _pname(profile), "Hello\\par" in out)
+        _check("rtf \\upr/%s: the document text is intact" % _pname(profile), "Hello\\par" in out)
 
 
 def test_26_report_residual_honest():
-    """Регрессия: при остатке критичного отчёт всегда писал «это НОВЫЕ значения»,
-    даже когда диспетчер (residual) знал, что значение было и в исходнике."""
+    """Regression test: with a critical remainder, the report always said "these
+    are NEW values", even when the dispatcher (residual) knew the value was in
+    the original too."""
     def mk(residual):
         return DispatchResult("a", "b", "pdf", "stealth", ok=True, verified=True, survived=[],
                               critical_before=3, critical_after=len(residual), residual=residual)
 
-    old = cleanreport.render_plain(mk([("/Root", "Поле подписи", False), ("trailer", "/ID[0]", True)]))
-    old = " ".join(old.split())   # отчёт переносит строки по ширине
-    _check("отчёт: старое значение в остатке не названо новым",
-           "НОВЫЕ значения" not in old and "Поле подписи" in old, old[:300])
+    old = cleanreport.render_plain(mk([("/Root", "Signature field", False), ("trailer", "/ID[0]", True)]))
+    old = " ".join(old.split())   # the report wraps lines by width
+    _check("report: an old value in the remainder is not called new",
+           "NEW values" not in old and "Signature field" in old, old[:300])
     new = cleanreport.render_plain(mk([("trailer", "/ID[0]", True)]))
-    _check("отчёт: только новые -- так и сказано", "НОВЫЕ значения" in new, new[:300])
+    _check("report: only new ones -- and that's what it says", "NEW values" in new, new[:300])
 
 
 def _repack(src, out, edits=(), add=()):
-    """Копия ZIP-пакета с заменой байтов в частях и добавленными частями."""
+    """A copy of a ZIP package with bytes replaced in parts and parts added."""
     with zipfile.ZipFile(src) as zi, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zo:
         for info in zi.infolist():
             data = zi.read(info.filename)
@@ -2138,68 +2177,69 @@ def _values(rep):
 
 @_with_tmp
 def test_28_dispatcher_and_sniff_regressions(tmp):
-    """Регрессии ревью: поле new_signals, ZIP с несжатым PDF, записи-каталоги, скраб путей."""
+    """Review regressions: the new_signals field, a ZIP with an uncompressed PDF, directory entries, path scrubbing."""
     from core.model import Report as _Rep
 
-    # new_signals было присвоено на лету, а поле dataclass потерялось в 89121fc:
-    # в --json его не было, а при отказе оставались сигналы невыданного файла.
-    _check("new_signals -- настоящее поле DispatchResult (видно в asdict / --json)",
+    # new_signals was assigned on the fly, and the dataclass field got lost in 89121fc:
+    # --json didn't have it, and on a refusal the signals of the file not handed over remained.
+    _check("new_signals is a real DispatchResult field (visible in asdict / --json)",
            "new_signals" in dataclasses.asdict(DispatchResult("a", "b", "pdf", "stealth")))
-    res = clean_file(os.path.join(tmp, "нет.pdf"), os.path.join(tmp, "o.pdf"))
-    _check("при отказе new_signals и detect пусты", res.new_signals == [] and res.detect == "")
+    res = clean_file(os.path.join(tmp, "missing.pdf"), os.path.join(tmp, "o.pdf"))
+    _check("on a refusal new_signals and detect are empty", res.new_signals == [] and res.detect == "")
 
-    # ZIP, где первая запись -- несжатый PDF: «%PDF-» в первой сотне байт.
+    # A ZIP whose first entry is an uncompressed PDF: "%PDF-" in the first hundred bytes.
     pdf, _ = fixtures.make_pdf(tmp)
     zpath = os.path.join(tmp, "pdfs.zip")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as z:
         z.write(pdf, "a.pdf")
         z.write(pdf, "b.pdf")
-    _check("ZIP с несжатыми PDF определяется как zip, а не pdf", sniff.sniff(zpath) == "zip",
+    _check("a ZIP with uncompressed PDFs is detected as zip, not pdf", sniff.sniff(zpath) == "zip",
            sniff.sniff(zpath))
     junk = _write(os.path.join(tmp, "junk.pdf"), b"garbage line\n" + _read(pdf))
-    _check("PDF с мусором перед %PDF- по-прежнему pdf", sniff.sniff(junk) == "pdf", sniff.sniff(junk))
+    _check("a PDF with garbage before %PDF- is still pdf", sniff.sniff(junk) == "pdf", sniff.sniff(junk))
 
-    # Записи-каталоги в word/media/: пустое тело давало «файл пустой», и чистота
-    # не доказывалась никогда (gaps).
+    # Directory entries in word/media/: the empty body produced "the file is
+    # empty", and cleanliness was never proven (gaps).
     docx, _ = fixtures.make_docx(tmp)
     dirs = _repack(docx, os.path.join(tmp, "dirs.docx"),
                    add=(("word/media/", b""), ("word/embeddings/", b"")))
     rep = inspect_file(dirs)
-    _check("запись-каталог не даёт ошибки «файл пустой»",
-           not any("пустой" in e for e in rep.errors), rep.errors)
-    res, _dst = _clean("docx-каталоги", tmp, dirs)
+    _check("a directory entry doesn't produce a \"file is empty\" error",
+           not any("empty" in e for e in rep.errors), rep.errors)
+    res, _dst = _clean("docx-dirs", tmp, dirs)
     if res is not None:
-        _check("docx с записями-каталогами: чистота доказана", res.ok and res.clean,
+        _check("docx with directory entries: cleanliness is proven", res.ok and res.clean,
                (res.errors[:2], res.gaps[:2]))
 
-    # Скраб путей в ошибках не должен калечить имена частей и URL.
+    # Path scrubbing in errors must not mangle part names and URLs.
     r = _Rep(path="x", fmt="docx")
-    r.err("word/media/image1.png: битая картинка")
-    r.err("см. http://example.com/x")
-    r.err("не открылся C:\\Users\\owner\\AppData\\Local\\Temp\\x.bin")
-    r.err("не открылся '/home/owner/tmp/x.bin'")
-    _check("скраб: относительное имя части и URL целы, абсолютные пути скрыты",
+    r.err("word/media/image1.png: broken image")
+    r.err("see http://example.com/x")
+    r.err("failed to open C:\\Users\\owner\\AppData\\Local\\Temp\\x.bin")
+    r.err("failed to open '/home/owner/tmp/x.bin'")
+    _check("scrub: the relative part name and the URL are intact, absolute paths are hidden",
            r.errors[0].startswith("word/media/image1.png") and "http://example.com" in r.errors[1]
            and "owner" not in r.errors[2] and "owner" not in r.errors[3], r.errors)
 
 
 @_with_tmp
 def test_29_pdf_info_bad_key_and_broken_xmp(tmp):
-    """Регрессии фаззинга: ключ /Info не в UTF-8 ронял секцию /Info (TypeError в
-    get()), а XMP с байтом Latin-1 не разбирался вовсе -- автор в XMP переживал чистку."""
+    """Fuzzing regressions: a non-UTF-8 /Info key crashed the /Info section (a
+    TypeError in get()), and an XMP with a Latin-1 byte wasn't parsed at all:
+    the author in the XMP survived cleaning."""
     src = os.path.join(tmp, "badkey.pdf")
     pdf = pikepdf.new()
     pdf.add_blank_page()
     pdf.trailer.Info = pdf.make_indirect(pikepdf.Dictionary(Author=pikepdf.String("Bad Key Author")))
     pdf.save(src, object_stream_mode=pikepdf.ObjectStreamMode.disable, compress_streams=False)
     raw = _read(src)
-    _write(src, raw.replace(b"/Author", b"/Au\x9dhor", 1))     # та же длина: xref цел
-    res, dst = _clean("pdf-ключ-не-utf8", tmp, src, PARANOID)
+    _write(src, raw.replace(b"/Author", b"/Au\x9dhor", 1))     # same length: xref intact
+    res, dst = _clean("pdf-key-not-utf8", tmp, src, PARANOID)
     if res is not None:
-        _check("pdf: ключ /Info не в UTF-8 -- секция не падает",
+        _check("pdf: a non-UTF-8 /Info key -- the section doesn't crash",
                res.ok and not res.count(Act.FAILED) and not any("/Info" in e for e in res.errors),
                res.errors[:2])
-        _check("pdf: значение под битым ключом убрано",
+        _check("pdf: the value under the broken key is removed",
                res.ok and "Bad Key Author" not in _values(inspect_file(dst)))
 
     xmp = (b'<?xpacket begin="\xef\xbb\xbf" id="W5M0MpCehiHzreSzNTczkc9d"?>'
@@ -2212,22 +2252,23 @@ def test_29_pdf_info_bad_key_and_broken_xmp(tmp):
     pdf = pikepdf.new()
     pdf.add_blank_page()
     pdf.Root.Metadata = pdf.make_stream(xmp)
-    pdf.save(src, fix_metadata_version=False)   # иначе pikepdf сам заменит битый XMP пустым
-    _check("pdf: XMP с байтом Latin-1 инспектор разбирает и видит автора",
+    pdf.save(src, fix_metadata_version=False)   # otherwise pikepdf itself replaces a broken XMP with an empty one
+    _check("pdf: the inspector parses an XMP with a Latin-1 byte and sees the author",
            any(f.value == "Latin Xmp Creator" and f.risk is Risk.IDENTITY for f in inspect_file(src).findings))
     for profile in PROFILES:
         res, dst = _clean("pdf-xmp-latin1", tmp, src, profile)
         if res is None:
             continue
-        _check("pdf XMP Latin-1/%s: чисто, автора в результате нет" % _pname(profile),
+        _check("pdf XMP Latin-1/%s: clean, the author is not in the output" % _pname(profile),
                res.ok and res.clean and "Latin Xmp Creator" not in _values(inspect_file(dst)),
                (res.errors[:2], [s.value for s in res.survived]))
 
 
 def test_30_regen_defang_links():
-    """Регрессия: обезвреживание перед LibreOffice ловило только http/ftp в сырых
-    байтах. Замерено: по file://-ссылке LO открывает файл (на Windows file://сервер
-    -- SMB и NTLM-хэш владельца), а «&#104;ttp://» обходил проверку и давал запросы."""
+    """Regression test: defanging before LibreOffice only caught http/ftp in the
+    raw bytes. Measured: LO opens a file via a file:// link (on Windows,
+    file://server means SMB and the owner's NTLM hash), and "&#104;ttp://"
+    bypassed the check and produced requests."""
     from core.clean_regen import _defang_bytes
 
     remote = (b'Target="http://x/a.png"', b'Target="&#104;ttp://x/a.png"',
@@ -2240,36 +2281,38 @@ def test_30_regen_defang_links():
              b'TargetMode="External"')
     for raw in remote:
         new, n = _defang_bytes(raw)
-        _check("defang: %r обезврежено" % raw, n == 1 and new.endswith((b'""', b"''")), new)
+        _check("defang: %r defanged" % raw, n == 1 and new.endswith((b'""', b"''")), new)
     for raw in local:
         new, n = _defang_bytes(raw)
-        _check("defang: %r не тронуто" % raw, n == 0 and new == raw, new)
+        _check("defang: %r left untouched" % raw, n == 0 and new == raw, new)
 
 
 @_with_tmp
 def test_31_regenerate_rtf_scrubbed(tmp):
-    """Регрессия: после пересоздания RTF -> RTF дочистка не запускалась («формат не
-    поддержан дочисткой»), а LibreOffice переносит \\info с автором как есть."""
+    """Regression test: after regenerating RTF -> RTF the second pass didn't run
+    ("format isn't supported by the second pass"), while LibreOffice carries
+    \\info with the author over as is."""
     from core.clean_regen import find_soffice
 
     if not find_soffice():
-        _check("regenerate rtf: LibreOffice не найден -- проверка пропущена", True)
+        _check("regenerate rtf: LibreOffice not found -- check skipped", True)
         return
     src, _exp = fixtures.make_rtf(tmp)
     res, _dst = _clean("regen-rtf", tmp, src, Profile.REGENERATE)
     if res is None:
         return
-    _check("regenerate rtf: дочистка выполнена",
-           not any("не поддержан дочисткой" in e for e in res.errors), res.errors[:2])
-    _check("regenerate rtf: файл выдан и чист", res.ok and res.clean,
+    _check("regenerate rtf: the second pass ran",
+           not any("isn't supported by the second pass" in e for e in res.errors), res.errors[:2])
+    _check("regenerate rtf: the file is produced and clean", res.ok and res.clean,
            [(s.label, s.value) for s in res.survived][:3])
 
 
 @_with_tmp
 def test_32_odf_template_and_broken(tmp):
-    """Регрессия: путь к шаблону ODF лежит в xlink:href пустого meta:template.
-    Инспектор читал текст элемента («Шаблон: (пусто)»), чистка элемент не трогала:
-    C:/Users/ИМЯ/... уезжал в «почищенном» файле мимо оракула."""
+    """Regression test: the ODF template path sits in the xlink:href of an empty
+    meta:template. The inspector read the element text ("Template: (empty)"),
+    the cleaner didn't touch the element: C:/Users/NAME/... went out in the
+    "cleaned" file past the oracle."""
     src, _exp = fixtures.make_odt(tmp)
     links = (b'<meta:template xmlns:xlink="http://www.w3.org/1999/xlink" xlink:type="simple" '
              b'xlink:title="Blank > Odt" xlink:href="file:///C:/Users/tpl.owner/Templates/blank.ott" '
@@ -2278,39 +2321,40 @@ def test_32_odf_template_and_broken(tmp):
              b'xlink:href="file://fileserver01/share/x.odt" meta:delay="PT0S"></meta:auto-reload>')
     tpl = _repack(src, os.path.join(tmp, "tpl.odt"),
                   edits=(("meta.xml", b"<meta:generator>", links + b"<meta:generator>"),))
-    tpl_f = [f for f in inspect_file(tpl).findings if f.label == "Шаблон"]
-    _check("odt: инспектор видит путь шаблона из xlink:href",
+    tpl_f = [f for f in inspect_file(tpl).findings if f.label == "Template"]
+    _check("odt: the inspector sees the template path from xlink:href",
            any("tpl.owner" in f.value and f.risk is Risk.ENVIRONMENT for f in tpl_f), tpl_f)
     for profile in PROFILES:
-        res, dst = _clean("odt-шаблон", tmp, tpl, profile)
+        res, dst = _clean("odt-template", tmp, tpl, profile)
         if res is None or not res.ok:
-            _check("odt шаблон/%s: файл выдан" % _pname(profile), False, res and res.errors[:2])
+            _check("odt template/%s: the file is produced" % _pname(profile), False, res and res.errors[:2])
             continue
         with zipfile.ZipFile(dst) as z:
             meta = z.read("meta.xml")
-        _check("odt шаблон/%s: путь и сервер убраны, файл чист" % _pname(profile),
+        _check("odt template/%s: the path and the server are removed, the file is clean" % _pname(profile),
                res.clean and b"tpl.owner" not in meta and b"fileserver01" not in meta
                and b"<meta:generator>" in meta, ([s.value for s in res.survived], meta[:200]))
 
-    # Битая запись ZIP -- порча файла, а не «внутренняя ошибка».
+    # A broken ZIP entry is file corruption, not an "internal error".
     broken = os.path.join(tmp, "broken.odt")
     with zipfile.ZipFile(src) as zi, zipfile.ZipFile(broken, "w", zipfile.ZIP_STORED) as zo:
         for info in zi.infolist():
             info.compress_type = zipfile.ZIP_STORED
             zo.writestr(info, zi.read(info.filename))
     raw = _read(broken)
-    _write(broken, raw.replace(b"Test ODT Fixture", b"Test ODT Fixturx", 1))   # CRC не сойдётся
+    _write(broken, raw.replace(b"Test ODT Fixture", b"Test ODT Fixturx", 1))   # the CRC won't match
     res = clean_file(broken, os.path.join(tmp, "broken_out.odt"))
-    _check("odt с битой записью: «повреждён», а не «внутренняя ошибка»",
-           not res.ok and any("повреждён" in e for e in res.errors)
-           and not any("Внутренняя ошибка" in e for e in res.errors), res.errors)
+    _check("odt with a broken entry: \"damaged\", not \"internal error\"",
+           not res.ok and any("damaged" in e for e in res.errors)
+           and not any("Internal" in e for e in res.errors), res.errors)
 
 
 @_with_tmp
 def test_34_odt_photo_exif(tmp):
-    """Регрессия: картинки из Pictures/ ODF оставались как есть вместе с EXIF.
-    Инспектор разбирает Pictures/ рекурсивно, поэтому любой .odt с фотографией
-    после чистки получал «НЕ ЧИСТО»: GPS, серийник и автор фото переживали чистку."""
+    """Regression test: images from ODF Pictures/ stayed as they were, EXIF included.
+    The inspector parses Pictures/ recursively, so any .odt with a photo got
+    "NOT CLEAN" after cleaning: the photo's GPS, serial number and author
+    survived cleaning."""
     jpg, _ = fixtures.make_jpeg(tmp)
     src, _exp = fixtures.make_odt(tmp)
     entry = (b'<manifest:file-entry manifest:full-path="Pictures/photo.jpg" '
@@ -2319,29 +2363,30 @@ def test_34_odt_photo_exif(tmp):
                   edits=(("META-INF/manifest.xml", b"</manifest:manifest>", entry),),
                   add=(("Pictures/photo.jpg", _read(jpg)),))
     rep = inspect_file(src)
-    _check("odt+фото: инспектор видит серийник в картинке",
+    _check("odt+photo: the inspector sees the serial number in the image",
            any(fixtures.JPEG_SERIAL in f.value for f in rep.findings))
     for profile in PROFILES:
-        res, dst = _clean("odt+фото", tmp, src, profile)
-        if res is None or not _check("odt+фото/%s: файл выдан" % _pname(profile), res.ok, res.errors[:2]):
+        res, dst = _clean("odt+photo", tmp, src, profile)
+        if res is None or not _check("odt+photo/%s: the file is produced" % _pname(profile), res.ok, res.errors[:2]):
             continue
-        _check("odt+фото/%s: clean (оракул ничего не нашёл)" % _pname(profile), res.clean,
+        _check("odt+photo/%s: clean (the oracle found nothing)" % _pname(profile), res.clean,
                [(s.label, s.value) for s in res.survived][:4])
         raw = _read(dst)
         with zipfile.ZipFile(dst) as z:
             pic = z.read("Pictures/photo.jpg")
-            raw += pic   # запись могла быть сжата: смотрим и распакованные байты
-        _check("odt+фото/%s: серийника и автора нет в байтах результата" % _pname(profile),
+            raw += pic   # the entry could be compressed: look at the decompressed bytes too
+        _check("odt+photo/%s: the serial number and the author are not in the output bytes" % _pname(profile),
                fixtures.JPEG_SERIAL.encode() not in raw and fixtures.JPEG_ARTIST.encode() not in raw)
-        _check("odt+фото/%s: картинка на месте и осталась JPEG" % _pname(profile),
+        _check("odt+photo/%s: the image is in place and is still a JPEG" % _pname(profile),
                pic[:2] == b"\xff\xd8" and pic.rstrip()[-2:] == b"\xff\xd9" and b"Exif" not in pic)
 
 
 @_with_tmp
 def test_33_ooxml_blind_spots(tmp):
-    """Регрессии: x15ac:absPath и fileSharing в xlsx, ppt/authors.xml чистка убирала,
-    а инспектор (оракул, отчёт пользователю) их не видел; w:docVar «Owner» с ФИО
-    числился провенансом, и Stealth оставлял имя в файле."""
+    """Regressions: the cleaner removed x15ac:absPath and fileSharing in xlsx and
+    ppt/authors.xml, but the inspector (the oracle, the user report) didn't see
+    them; a w:docVar "Owner" with a full name counted as provenance, and Stealth
+    left the name in the file."""
     xlsx, _ = fixtures.make_xlsx(tmp)
     xlsx = _repack(xlsx, os.path.join(tmp, "abs.xlsx"), edits=((
         "xl/workbook.xml", b"<sheets>",
@@ -2368,28 +2413,29 @@ def test_33_ooxml_blind_spots(tmp):
         tag = os.path.basename(path)
         rep = inspect_file(path)
         for value, risk in secrets.items():
-            _check("%s: инспектор видит %r как %s" % (tag, value, risk.value),
+            _check("%s: the inspector sees %r as %s" % (tag, value, risk.value),
                    any(value in f.value and f.risk is risk for f in rep.findings))
         res, dst = _clean(tag, tmp, path, STEALTH)
         if res is None or not res.ok:
-            _check("%s: файл выдан" % tag, False, res and res.errors[:2])
+            _check("%s: the file is produced" % tag, False, res and res.errors[:2])
             continue
         with zipfile.ZipFile(dst) as z:
             blob = b"".join(z.read(n) for n in z.namelist())
         left = [v for v in secrets if v.encode() in blob]
-        _check("%s: Stealth чист, значений нет в байтах" % tag, res.clean and not left,
+        _check("%s: Stealth is clean, the values are not in the bytes" % tag, res.clean and not left,
                (left, [s.value for s in res.survived][:3]))
         if tag == "docvars.docx":
-            _check("docx: безобидная переменная документа на месте", b"draft-stage-1" in blob)
+            _check("docx: a harmless document variable is in place", b"draft-stage-1" in blob)
 
 
-# 98. Вердикты диспетчера и отчёта не противоречат друг другу
+# 98. The dispatcher's and the report's verdicts don't contradict each other
 # ===========================================================================
 
 
 def test_27_find_soffice_other_os():
-    """LibreOffice на macOS не в PATH: лежит внутри .app. Mac здесь нет, поэтому
-    подменяем окружение, isfile и which -- проверяем сам порядок поиска."""
+    """LibreOffice on macOS isn't on PATH: it lives inside the .app. There's no
+    Mac here, so we swap out the environment, isfile and which, and check the
+    search order itself."""
     from core import clean_regen as cr
 
     real = (cr.os.environ.get("ProgramFiles"), cr.os.environ.get("ProgramFiles(x86)"),
@@ -2402,17 +2448,17 @@ def test_27_find_soffice_other_os():
         cr.os.access = lambda p, mode: True
         cr.glob.glob = lambda pattern: []
         cr.os.path.isfile = lambda p: p == mac
-        _check("soffice: macOS -- найден внутри LibreOffice.app", cr.find_soffice() == mac, cr.find_soffice())
+        _check("soffice: macOS -- found inside LibreOffice.app", cr.find_soffice() == mac, cr.find_soffice())
         cr.glob.glob = lambda pattern: ["/opt/libreoffice7.6/program/soffice", "/opt/libreoffice24.8/program/soffice"]
         cr.os.path.isfile = lambda p: p.startswith("/opt/")
-        _check("soffice: Linux /opt -- найден", (cr.find_soffice() or "").startswith("/opt/libreoffice"),
+        _check("soffice: Linux /opt -- found", (cr.find_soffice() or "").startswith("/opt/libreoffice"),
                cr.find_soffice())
         cr.shutil.which = lambda name: "/usr/bin/soffice" if name == "soffice" else None
-        _check("soffice: PATH важнее стандартных мест", cr.find_soffice() == "/usr/bin/soffice")
+        _check("soffice: PATH beats the standard locations", cr.find_soffice() == "/usr/bin/soffice")
         cr.shutil.which = lambda name: None
         cr.glob.glob = lambda pattern: []
         cr.os.path.isfile = lambda p: False
-        _check("soffice: нигде нет -- None", cr.find_soffice() is None)
+        _check("soffice: nowhere -- None", cr.find_soffice() is None)
     finally:
         for key, val in (("ProgramFiles", real[0]), ("ProgramFiles(x86)", real[1])):
             if val is not None:
@@ -2421,21 +2467,22 @@ def test_27_find_soffice_other_os():
 
 
 def test_98_verdicts_agree():
-    """Пользователь видит оба текста (CLI печатает вердикт диспетчера сверху и
-    отчёт cleanreport ниже). Они не имеют права расходиться ни в одну сторону."""
+    """The user sees both texts (the CLI prints the dispatcher's verdict on top and
+    the cleanreport report below). They must not diverge in either direction."""
     seen = [(l, r) for l, r in _SEEN if isinstance(r, DispatchResult)]
-    _check("накоплено результатов для сверки: %d" % len(seen), len(seen) > 50, len(seen))
-    false_alarm = [l for l, r in seen if r.ok and r.clean and "НЕ ЧИСТО" in cleanreport.render_plain(r)]
-    _check("файл ДОКАЗАННО чист (диспетчер) -- отчёт не кричит «НЕ ЧИСТО» (ложная тревога)",
+    _check("results accumulated for cross-checking: %d" % len(seen), len(seen) > 50, len(seen))
+    false_alarm = [l for l, r in seen if r.ok and r.clean and "NOT CLEAN" in cleanreport.render_plain(r)]
+    _check("the file is PROVEN clean (dispatcher) -- the report doesn't shout \"NOT CLEAN\" (a "
+           "false alarm)",
            not false_alarm, false_alarm[:6])
-    overclaim = [l for l, r in seen if r.ok and not r.clean and "ЧИСТО: повторная" in cleanreport.render_plain(r)]
-    _check("чистота НЕ доказана (диспетчер) -- отчёт не называет файл чистым", not overclaim, overclaim[:6])
+    overclaim = [l for l, r in seen if r.ok and not r.clean and "CLEAN: re-inspection" in cleanreport.render_plain(r)]
+    _check("cleanliness NOT proven (dispatcher) -- the report doesn't call the file clean", not overclaim, overclaim[:6])
     refused_ok = [l for l, r in seen if not r.ok and _claims_clean(cleanreport.render_plain(r))]
-    _check("файл НЕ выдан -- отчёт нигде не называет его чистым", not refused_ok, refused_ok[:6])
+    _check("the file is NOT produced -- the report never calls it clean", not refused_ok, refused_ok[:6])
 
 
 # ===========================================================================
-# 99. РЕНДЕР: лимит Telegram, теги, экранирование (идёт ПОСЛЕДНИМ)
+# 99. RENDERING: the Telegram limit, tags, escaping (runs LAST)
 # ===========================================================================
 
 _TG_TAGS = ("b", "i", "u", "s", "a", "code", "pre", "blockquote", "tg-spoiler")
@@ -2464,39 +2511,39 @@ class _TagCheck(HTMLParser):
 
 
 def _html_problems(msg):
-    """Что не так с сообщением Telegram HTML: чужие теги, несбалансированные теги,
-    голые <, > и & в тексте."""
+    """What's wrong with a Telegram HTML message: foreign tags, unbalanced tags,
+    bare <, > and & in the text."""
     p = _TagCheck()
     try:
         p.feed(msg)
         p.close()
     except Exception as exc:  # noqa: BLE001
-        return ["парсер: %s" % exc]
-    bad = list(p.bad) + ["не закрыт <%s>" % t for t in p.stack]
+        return ["parser: %s" % exc]
+    bad = list(p.bad) + ["<%s> not closed" % t for t in p.stack]
     text = re.sub(r"</?(?:%s)>" % "|".join(_TG_TAGS), "", msg)
     if "<" in text or ">" in text:
-        bad.append("голые < или > в тексте")
+        bad.append("bare < or > in the text")
     if re.search(r"&(?!(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);)", text):
-        bad.append("голый &")
+        bad.append("bare &")
     return bad
 
 
 def _render_problems(res, hostile=()):
-    """Проблемы Telegram-рендера одного результата. hostile -- строки, которых в
-    сыром виде в сообщениях быть не должно."""
+    """Telegram rendering problems of one result. hostile lists strings that must
+    not appear raw in the messages."""
     try:
         msgs = cleanreport.render_telegram(res)
     except Exception as exc:  # noqa: BLE001
-        return ["render_telegram бросил %s: %s" % (type(exc).__name__, exc)], []
+        return ["render_telegram raised %s: %s" % (type(exc).__name__, exc)], []
     out = []
     if not msgs or not all(isinstance(m, str) and m for m in msgs):
-        out.append("пустой список или пустое сообщение")
+        out.append("empty list or empty message")
     for i, m in enumerate(msgs):
         n = _u16(m)
         if n > _TG_LIMIT:
-            out.append("сообщение %d: %d UTF-16 units > %d" % (i + 1, n, _TG_LIMIT))
-        out += ["сообщение %d: %s" % (i + 1, p) for p in _html_problems(m)]
-        out += ["сообщение %d: сырое %r" % (i + 1, h) for h in hostile if h in m]
+            out.append("message %d: %d UTF-16 units > %d" % (i + 1, n, _TG_LIMIT))
+        out += ["message %d: %s" % (i + 1, p) for p in _html_problems(m)]
+        out += ["message %d: raw %r" % (i + 1, h) for h in hostile if h in m]
     return out, msgs
 
 
@@ -2505,14 +2552,14 @@ def _hostile_result(n_each=1, value="<script>&", ok=True):
     for _ in range(n_each):
         for act in Act:
             r.act(act, "loc " + value, "label " + value, "before " + value, "after " + value, "note " + value)
-    r.errors.append("ошибка " + value)
+    r.errors.append("error " + value)
     r.critical_before, r.critical_after, r.sensitive_before, r.sensitive_after = 5, 0, 7, 3
     return r
 
 
 @_with_tmp
 def test_99_render(tmp):
-    # --- 1. каждый результат чистки, накопленный всеми тестами ---
+    # --- 1. every cleaning result accumulated by all the tests ---
     problems, privacy, plain_bad, n_msgs, n_multi = [], [], [], 0, 0
     for label, res in _SEEN:
         probs, msgs = _render_problems(res, hostile=("<script",))
@@ -2522,21 +2569,21 @@ def test_99_render(tmp):
         text = "\n".join(msgs)
         for secret in {os.path.basename(str(res.src)), os.path.basename(str(res.dst))} - {""}:
             if len(secret) > 6 and secret in text:
-                privacy.append("%s: в отчёт попало имя файла" % label)
+                privacy.append("%s: the file name got into the report" % label)
         try:
             plain, line = cleanreport.render_plain(res), cleanreport.summary_line(res)
             if not (isinstance(plain, str) and plain and isinstance(line, str) and line and "\n" not in line):
                 plain_bad.append(label)
         except Exception as exc:  # noqa: BLE001
             plain_bad.append("%s: %s" % (label, type(exc).__name__))
-    _check("render_telegram на всех %d результатах (%d сообщений): каждое <= %d UTF-16 units, теги "
-           "сбалансированы и разрешены, голых <, >, & нет" % (len(_SEEN), n_msgs, _TG_LIMIT),
-           not problems and len(_SEEN) > 50, problems[:5] or "накоплено мало результатов: %d" % len(_SEEN))
-    _check("render_plain и summary_line на всех результатах: непустые, сводка в одну строку",
+    _check("render_telegram on all %d results (%d messages): each <= %d UTF-16 units, tags "
+           "balanced and allowed, no bare <, >, &" % (len(_SEEN), n_msgs, _TG_LIMIT),
+           not problems and len(_SEEN) > 50, problems[:5] or "too few results accumulated: %d" % len(_SEEN))
+    _check("render_plain and summary_line on all results: non-empty, the summary is one line",
            not plain_bad, plain_bad[:5])
-    _check("приватность: имена файлов не попали ни в одно сообщение отчёта", not privacy, privacy[:5])
+    _check("privacy: file names got into none of the report messages", not privacy, privacy[:5])
 
-    # --- 2. реальный PDF со значением «<script>&» в Author и XMP ---
+    # --- 2. a real PDF with the value "<script>&" in Author and XMP ---
     pdf = pikepdf.new()
     pdf.add_blank_page(page_size=(200, 200))
     with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
@@ -2554,52 +2601,55 @@ def test_99_render(tmp):
             continue
         probs, msgs = _render_problems(res, hostile=("<script", "<b>тег"))
         text = "\n".join(msgs)
-        _check("%s: теги и длина сообщений в порядке, сырого <script> нет" % label, not probs, probs[:4])
-        _check("%s: удалённое значение показано ЭКРАНИРОВАННЫМ: &lt;script&gt;&amp;" % label,
+        _check("%s: tags and message lengths are fine, no raw <script>" % label, not probs, probs[:4])
+        _check("%s: the removed value is shown ESCAPED: &lt;script&gt;&amp;" % label,
                "&lt;script&gt;&amp;" in text, text[:300])
 
-    # --- 3. враждебный результат, собранный руками: «<script>&» во ВСЕХ полях ---
+    # --- 3. a hostile result built by hand: "<script>&" in ALL fields ---
     res = _hostile_result()
     res.fmt, res.profile = "<script>&", "<b>&"
     res.errors.append("C:\\Users\\ivan\\secret.docx: <script>&")
     probs, msgs = _render_problems(res, hostile=("<script",))
     text = "\n".join(msgs)
-    _check("враждебные поля: теги сбалансированы, сообщения в лимите, сырого <script> нет", not probs, probs[:4])
-    _check("враждебные поля: значение корректно экранировано (&lt;script&gt;&amp;)", "&lt;script&gt;&amp;" in text)
-    _check("враждебные поля: путь из текста ошибки вырезан (пользователь не получит путь нашей машины)",
+    _check("hostile fields: tags balanced, messages within the limit, no raw <script>", not probs, probs[:4])
+    _check("hostile fields: the value is escaped correctly (&lt;script&gt;&amp;)", "&lt;script&gt;&amp;" in text)
+    _check("hostile fields: the path from the error text is cut out (the user won't get our "
+           "machine's path)",
            "ivan" not in text and "secret.docx" not in text, text[-300:])
 
-    # --- 4. объём: сотни записей, утроенное экранирование, суррогатные пары ---
+    # --- 4. volume: hundreds of entries, tripled escaping, surrogate pairs ---
     big = CleanResult(src="x", dst="y", fmt="pdf", profile="stealth", ok=True)
     for i in range(300):
-        big.act(Act.REMOVED, "loc %d" % i, "Поле %d" % i, "&" * 400, "<" * 400, "n" * 400)
+        big.act(Act.REMOVED, "loc %d" % i, "Field %d" % i, "&" * 400, "<" * 400, "n" * 400)
     big.critical_before, big.critical_after = 5, 0
     probs, msgs = _render_problems(big)
-    _check("300 записей из одних '&' и '<': несколько сообщений, каждое <= 4096, теги сбалансированы",
-           not probs and len(msgs) > 1, probs[:3] or "сообщений: %d" % len(msgs))
-    _check("при нарезке у сообщений есть нумерация частей [i/n]",
+    _check("300 entries of nothing but '&' and '<': several messages, each <= 4096, tags balanced",
+           not probs and len(msgs) > 1, probs[:3] or "messages: %d" % len(msgs))
+    _check("when split, the messages have part numbering [i/n]",
            len(msgs) > 1 and all(m.startswith("<b>[%d/%d]</b>" % (i + 1, len(msgs))) for i, m in enumerate(msgs)),
            [m[:20] for m in msgs[:3]])
     emoji = CleanResult(src="x", dst="y", fmt="pdf", profile="stealth", ok=True)
     for i in range(80):
-        emoji.act(Act.REMOVED, "loc", "Поле %d \U0001F600" % i, "\U0001F600" * 190, "", "\U0001F600" * 150)
+        emoji.act(Act.REMOVED, "loc", "Field %d \U0001F600" % i, "\U0001F600" * 190, "", "\U0001F600" * 150)
     emoji.critical_before, emoji.critical_after = 5, 0
     probs, msgs = _render_problems(emoji)
-    _check("эмодзи (2 UTF-16 unit на символ): каждое сообщение <= 4096 UTF-16 units, а не символов",
+    _check("emoji (2 UTF-16 units per character): each message <= 4096 UTF-16 units, not "
+           "characters",
            not probs and len(msgs) > 1, probs[:3])
-    _check("эмодзи: проверка не вакуумна -- UTF-16 длина сообщений заметно больше числа символов",
+    _check("emoji: the check is not vacuous -- the messages' UTF-16 length is noticeably larger "
+           "than the character count",
            len(msgs) > 1 and sum(_u16(m) for m in msgs) > 1.3 * sum(len(m) for m in msgs),
            (sum(_u16(m) for m in msgs), sum(len(m) for m in msgs)))
 
-    # --- 5. не результат вовсе: бот не должен упасть и не должен соврать ---
+    # --- 5. not a result at all: the bot must neither crash nor lie ---
     for junk in (None, object(), CleanResult(src="x", dst="y", fmt="", profile="")):
         probs, msgs = _render_problems(junk)
-        _check("render_telegram(%s): не падает, сообщение есть, «НЕ ПОЧИЩЕН»" % type(junk).__name__,
-               not probs and "НЕ ПОЧИЩЕН" in "\n".join(msgs), probs[:3] or msgs[:1])
+        _check("render_telegram(%s): doesn't crash, there is a message, \"NOT CLEANED\"" % type(junk).__name__,
+               not probs and "NOT CLEANED" in "\n".join(msgs), probs[:3] or msgs[:1])
 
 
 # ---------------------------------------------------------------------------
-# запуск
+# run
 # ---------------------------------------------------------------------------
 
 
@@ -2611,17 +2661,17 @@ def _run_all():
         try:
             fn()
         except AssertionError as exc:
-            _check("%s: без необработанных AssertionError" % fn.__name__, False, str(exc))
-        except Exception as exc:  # noqa: BLE001 -- тест не должен останавливать остальные
-            _check("%s: без необработанного исключения" % fn.__name__, False,
+            _check("%s: no unhandled AssertionError" % fn.__name__, False, str(exc))
+        except Exception as exc:  # noqa: BLE001 -- a test must not stop the others
+            _check("%s: no unhandled exception" % fn.__name__, False,
                    "%s: %s" % (type(exc).__name__, exc))
 
     print("=" * 78)
     total = len(_RESULTS)
     failed = [r for r in _RESULTS if not r[1]]
-    print("ИТОГО: %d проверок, %d провалено" % (total, len(failed)))
+    print("TOTAL: %d checks, %d failed" % (total, len(failed)))
     if failed:
-        print("ПРОВАЛЕННЫЕ ПРОВЕРКИ:")
+        print("FAILED CHECKS:")
         for name, _, detail in failed:
             print("  - %s%s" % (name, ("  -- " + str(detail)[:300]) if detail != "" else ""))
     return 1 if failed else 0

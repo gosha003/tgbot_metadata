@@ -1,73 +1,77 @@
 # -*- coding: utf-8 -*-
-"""Байт-точная пересборка ZIP-контейнера: docx, xlsx, pptx и ODF -- один и тот же ZIP.
+"""Byte-exact repacking of a ZIP container: docx, xlsx, pptx and ODF are all the same ZIP.
 
-Фаза 2. Только stdlib (struct, zlib, zipfile -- последний лишь для проверки выхода).
+Phase 2. Stdlib only (struct, zlib, zipfile; the latter only to verify the output).
 
     rebuild(src, dst, replace=None, drop=None, *, strip_slack=False) -> RebuildReport
     entries(src) -> list[ZipEntry]
 
-ЗАЧЕМ. Любой инструмент чистки распаковывает пакет и пакует заново, после чего у
-КАЖДОЙ записи меняется сжатый размер, порядок записей становится другим, DOS-
-таймстемпы сбрасываются, и профиль контейнера перестаёт соответствовать
-приложению из app.xml. Файл выглядит обработанным, даже если все поля вычищены.
-Здесь меняется только то, что мы попросили заменить или удалить; всё остальное --
-побайтовый срез исходника.
+WHY. Every cleaning tool unpacks the package and packs it again, after which
+EVERY entry's compressed size changes, entry order changes, DOS timestamps
+are reset, and the container profile stops matching the application in
+app.xml. The file looks processed even if every field is clean.
+Here only what we asked to replace or remove changes; everything else is a
+byte-for-byte slice of the source.
 
-ГЛАВНЫЙ ПРИНЦИП: НЕ СОБИРАТЬ ФАЙЛ ЗАНОВО, А ПРАВИТЬ ЕГО. Выход = вход, в котором
-перегенерированы только изменённые куски. Поэтому rebuild(src, dst) без replace
-и drop даёт файл, равный входу побайтно: это не частный случай с отдельной
-веткой, а тот же код, у которого просто нечего менять. sha256 совпадает.
+THE MAIN PRINCIPLE: DON'T REBUILD THE FILE, EDIT IT. Output = input with only
+the changed pieces regenerated. So rebuild(src, dst) without replace and drop
+produces a file byte-identical to the input: not a special case with its own
+branch, but the same code that simply has nothing to change. sha256 matches.
 
-ПОЧЕМУ НЕ zipfile.ZipFile(..., "w"). Публичного API «скопировать сжатые байты» у
-него нет, а всё остальное он пишет по-своему: свои version_made/external_attr,
-таймстемп берёт из ZipInfo, при потоковой записи ставит бит 3 и дескрипторы,
-local extra не переносит. Office кладёт в локальные заголовки extra 0xA220
-(Open Packaging growth hint, 36..520 байт) -- zipfile его потерял бы на каждой
-записи. Поэтому и читаем, и пишем руками; zipfile используем только как
-независимого проверяющего выхода: открывается, testzip() проходит, состав и
-порядок записей те, что мы собирались получить.
+WHY NOT zipfile.ZipFile(..., "w"). It has no public "copy compressed bytes"
+API, and it writes everything else its own way: its own
+version_made/external_attr, the timestamp from ZipInfo, bit 3 and
+descriptors when streaming, and it drops local extra. Office puts extra
+0xA220 (Open Packaging growth hint, 36..520 bytes) in local headers, and
+zipfile would lose it on every entry. So we both read and write by hand;
+zipfile serves only as an independent checker of the output: it opens,
+testzip() passes, the entries and their order are what we intended.
 
-УСТРОЙСТВО. Файл режется на сегменты по смещениям из центрального каталога:
-    [голова][сегмент записи 1][сегмент записи 2]...[каталог][хвост]
-Сегмент записи = локальный заголовок + данные + (дескриптор) + щель до следующей
-записи. Нетронутая запись копируется сегментом целиком, СЫРЫМИ СЖАТЫМИ БАЙТАМИ,
-без распаковки. Центральный каталог копируется сырыми записями, меняется только
-поле смещения (и только если запись сдвинулась). Хвост (ZIP64 EOCD, локатор,
-EOCD, комментарий) -- те же байты с исправленными счётчиком/размером/смещением.
-Заменённая запись получает новый локальный заголовок: тот же version_needed,
-флаги, метод, DOS-время, имя и local extra (в т.ч. growth hint Office), что были
-у оригинала; уровень deflate берётся из битов 1-2 флагов (Word пишет 6 =
-«самый быстрый»). Метод STORED остаётся STORED. Если у оригинала был бит 3
-(потоковый писатель: Java, Google Docs), он остаётся, и после данных пишется
-data descriptor того же формата -- заменённая запись не выбивается из соседних.
+LAYOUT. The file is cut into segments by offsets from the central directory:
+    [head][entry segment 1][entry segment 2]...[directory][tail]
+Entry segment = local header + data + (descriptor) + gap until the next
+entry. An untouched entry is copied as a whole segment, AS RAW COMPRESSED
+BYTES, without decompression. The central directory is copied as raw
+records; only the offset field changes (and only if the entry moved). The
+tail (ZIP64 EOCD, locator, EOCD, comment) is the same bytes with corrected
+count/size/offset.
+A replaced entry gets a new local header with the original's
+version_needed, flags, method, DOS time, name and local extra (including
+Office's growth hint); the deflate level comes from flag bits 1-2 (Word
+writes 6 = "superfast"). STORED stays STORED. If the original had bit 3
+(a streaming writer: Java, Google Docs), it stays, and a data descriptor of
+the same format follows the data, so the replaced entry doesn't stand out
+from its neighbors.
 
-ЩЕЛИ. «Слепые» байты вне записей -- голова до первой записи, щели между
-записями, мёртвое место между каталогом и EOCD, комментарий архива, мусор после
-EOCD -- по умолчанию КОПИРУЮТСЯ (иначе правило «без изменений = байт в байт»
-перестаёт быть безусловным). Но это классический тайник, Office его не пишет,
-и чистильщик вправе его убрать: strip_slack=True. Сколько там было --
-RebuildReport.slack_bytes и comment_len.
+GAPS. "Blind" bytes outside entries (the head before the first entry, gaps
+between entries, dead space between the directory and EOCD, the archive
+comment, junk after EOCD) are COPIED by default (otherwise "no changes =
+byte for byte" would stop being unconditional). But this is a classic
+hiding place that Office never writes, and a cleaner may remove it:
+strip_slack=True. How much there was: RebuildReport.slack_bytes and
+comment_len.
 
-ОТКАЗЫ (ok=False, dst не создан, существующий dst не тронут). Часть --
-структурная порча (нет EOCD, битый каталог, локальный заголовок расходится с
-центральным), часть -- политика, потому что чистильщик, пропустивший такое,
-соврал бы про результат:
-  * дубли имён (в том числе различающиеся только регистром): парсеры расходятся
-    в том, какая из двух записей «настоящая»; именно так прячут метаданные
-    от инспектора;
-  * path traversal в имени (../, абсолютный путь, диск, NUL);
-  * зип-бомба (пороги те же, что у core/insp_ooxml.py), шифрование, методы,
-    кроме STORED и DEFLATED (OPC других не допускает);
-  * перекрывающиеся записи, каталог поверх данных, многотомные архивы;
-  * несколько конкурирующих EOCD в конце файла (подделка в комментарии архива:
-    чистильщик прочёл бы пустой архив, Word -- настоящий);
-  * replace с именем, которого нет в пакете (опечатка не должна тихо дать «вычищено»).
-Распаковка нетронутых записей не выполняется вовсе, так что бомба-в-данных нам
-вреда не делает; пороги нужны, чтобы после нас её не распаковал чистильщик.
+REFUSALS (ok=False, dst not created, an existing dst untouched). Some are
+structural corruption (no EOCD, broken directory, local header disagreeing
+with the central one), some are policy, because a cleaner that let this
+through would lie about the result:
+  * duplicate names (including ones differing only in case): parsers
+    disagree on which of two entries is "real"; that's exactly how metadata
+    is hidden from an inspector;
+  * path traversal in a name (../, absolute path, drive, NUL);
+  * zip bomb (same thresholds as core/insp_ooxml.py), encryption, methods
+    other than STORED and DEFLATED (OPC allows no others);
+  * overlapping entries, directory over data, multi-volume archives;
+  * several competing EOCDs at the end of the file (a forgery in the archive
+    comment: a cleaner would read an empty archive, Word the real one);
+  * replace with a name that isn't in the package (a typo must not quietly
+    yield "cleaned").
+Untouched entries are never decompressed, so a bomb in the data does us no
+harm; the thresholds exist so the next cleaner after us doesn't unpack it.
 
-Только чтение входа: src открывается 'rb', выход пишется в dst + ".part" и
-переименовывается только после проверки. Приватность: логов нет, в errors --
-тексты без путей (проходят тот же скраб, что Report.err()).
+Input is read only: src is opened 'rb', the output is written to dst + ".part"
+and renamed only after verification. Privacy: no logs; errors hold texts
+without paths (they go through the same scrub as Report.err()).
 """
 
 from __future__ import annotations
@@ -79,19 +83,20 @@ import zipfile
 import zlib
 
 from .model import _ABS_PATH, PATH_STUB, clip
+from core.i18n import tr
 
-# --- лимиты -----------------------------------------------------------------
-MAX_INPUT = 512 * 1024 * 1024          # как у clean_pdf
+# --- limits -----------------------------------------------------------------
+MAX_INPUT = 512 * 1024 * 1024          # same as clean_pdf
 MAX_ENTRIES = 50_000
-MAX_CD = 64 * 1024 * 1024              # размер центрального каталога
-MAX_REPLACE = 256 * 1024 * 1024        # одна заменяемая часть
-# Пороги бомбы -- ТЕ ЖЕ, что в core/insp_ooxml.py (дублируем, а не импортируем:
-# низкоуровневый модуль не должен зависеть от инспектора, а инспектор потом
-# возьмёт entries() отсюда).
+MAX_CD = 64 * 1024 * 1024              # size of the central directory
+MAX_REPLACE = 256 * 1024 * 1024        # one part being replaced
+# Bomb thresholds are THE SAME as in core/insp_ooxml.py (duplicated, not
+# imported: a low-level module must not depend on the inspector, and the
+# inspector will take entries() from here later).
 MAX_TOTAL_UNPACKED = 512 * 1024 * 1024
 MAX_RATIO = 120
 MIN_BOMB_UNPACKED = 64 * 1024 * 1024
-MAX_ERRORS = 20                        # на враждебном входе список ошибок не раздуваем
+MAX_ERRORS = 20                        # don't inflate the error list on hostile input
 _CHUNK = 1 << 20
 
 _U16 = 0xFFFF
@@ -104,156 +109,158 @@ _SIG_Z64 = b"PK\x06\x06"
 _SIG_LOC64 = b"PK\x06\x07"
 _SIG_DESC = b"PK\x07\x08"
 
-_LH = struct.Struct("<4s5H3L2H")             # локальный заголовок, 30 байт
-_CD = struct.Struct("<4s6H3L5H2L")           # запись центрального каталога, 46 байт
-_EOCD = struct.Struct("<4s4H2LH")            # 22 байта
-_LOC64 = struct.Struct("<4sLQL")             # 20 байт
-_Z64 = struct.Struct("<4sQ2H2L4Q")           # фиксированная часть ZIP64 EOCD, 56 байт
+_LH = struct.Struct("<4s5H3L2H")             # local header, 30 bytes
+_CD = struct.Struct("<4s6H3L5H2L")           # central directory record, 46 bytes
+_EOCD = struct.Struct("<4s4H2LH")            # 22 bytes
+_LOC64 = struct.Struct("<4sLQL")             # 20 bytes
+_Z64 = struct.Struct("<4sQ2H2L4Q")           # fixed part of the ZIP64 EOCD, 56 bytes
 
-# Уровень zlib по битам 1-2 флагов deflate (APPNOTE 4.4.4): нормальный / максимальный /
-# быстрый / самый быстрый. Word пишет 6.
+# zlib level by deflate flag bits 1-2 (APPNOTE 4.4.4): normal / maximum /
+# fast / superfast. Word writes 6.
 _LEVEL = {0: 6, 2: 9, 4: 3, 6: 1}
 
 
 # ============================================================================
-#  Публичные типы
+#  Public types
 # ============================================================================
 
 
 @dataclasses.dataclass(frozen=True)
 class ZipEntry:
-    """Опись одной записи контейнера. Всё -- как записано в центральном каталоге."""
+    """Description of one container entry. Everything as recorded in the central directory."""
 
     name: str
-    date_time: tuple          # (год, месяц, день, час, мин, сек): DOS-время как есть
+    date_time: tuple          # (year, month, day, hour, min, sec): DOS time as is
     compress_type: int        # 0 STORED, 8 DEFLATED
     compress_size: int
     file_size: int
     crc: int
-    order: int                # индекс в центральном каталоге (так их видит Word)
+    order: int                # index in the central directory (that's how Word sees them)
     flag_bits: int = 0
     header_offset: int = 0
 
 
 @dataclasses.dataclass
 class RebuildReport:
-    """Итог пересборки. ok=True означает: выход записан И открывается zipfile,
-    testzip() проходит, состав и порядок записей совпали с ожидаемыми.
+    """Rebuild summary. ok=True means: the output was written AND opens with
+    zipfile, testzip() passes, entries and their order match expectations.
 
-    Счётчики -- числа записей. На ok=False нулевые (кроме src_entries,
-    slack_bytes и comment_len, если исходник удалось разобрать): выход не выдан.
+    Counters are entry counts. On ok=False they're zero (except src_entries,
+    slack_bytes and comment_len if the source could be parsed): no output.
     """
 
-    copied_raw: int = 0       # скопировано сырыми сжатыми байтами
-    recompressed: int = 0     # заменено (пережато)
-    dropped: int = 0          # удалено
+    copied_raw: int = 0       # copied as raw compressed bytes
+    recompressed: int = 0     # replaced (recompressed)
+    dropped: int = 0          # removed
     src_entries: int = 0
     dst_entries: int = 0
-    slack_bytes: int = 0      # байты вне записей в исходнике (голова, щели, хвост), без комментария
-    comment_len: int = 0      # комментарий архива в исходнике
+    slack_bytes: int = 0      # bytes outside entries in the source (head, gaps, tail), excluding the comment
+    comment_len: int = 0      # archive comment in the source
     errors: list = dataclasses.field(default_factory=list)
     ok: bool = False
 
     def err(self, message):
-        """Как Report.err(): абсолютные пути вырезаются, потому что текст уходит в чат."""
+        """Like Report.err(): absolute paths are stripped because the text goes to a chat."""
         if len(self.errors) < MAX_ERRORS:
-            self.errors.append(clip(_ABS_PATH.sub(PATH_STUB, str(message)), 600))
+            self.errors.append(clip(_ABS_PATH.sub(tr(PATH_STUB), str(message)), 600))
 
 
 # ============================================================================
-#  Разбор контейнера
+#  Container parsing
 # ============================================================================
 
 
 class _Bad(Exception):
-    """Структурная порча или отказ по политике. Текст по-русски и без путей."""
+    """Structural corruption or a policy refusal. Text without paths."""
 
 
 class _Refused(Exception):
-    """Отказ, причины которого уже записаны в report.errors."""
+    """A refusal whose reasons are already recorded in report.errors."""
 
 
 @dataclasses.dataclass
 class _Ent:
-    idx: int                  # порядок в центральном каталоге
+    idx: int                  # order in the central directory
     name: str
     nameb: bytes
-    rec: bytes                # сырая запись центрального каталога
+    rec: bytes                # raw central directory record
     flags: int
     method: int
     mtime: int
     mdate: int
     crc: int
-    csize: int                # истинные (с учётом ZIP64) размеры и смещение
+    csize: int                # true (ZIP64-aware) sizes and offset
     usize: int
     off: int
-    off_slot: int = -1        # где в rec лежит 8-байтовое смещение ZIP64, если оно там
+    off_slot: int = -1        # where in rec the 8-byte ZIP64 offset sits, if it's there
     lflags: int = 0
     data_start: int = 0
     data_end: int = 0
-    own_end: int = 0          # конец заголовка + данных + дескриптора
-    dsig: bool = False        # у дескриптора есть подпись PK\x07\x08
-    dw: int = 0               # ширина размеров в дескрипторе (4 или 8); 0 -- дескриптора нет
-    seg_end: int = 0          # начало следующей записи (или каталога)
+    own_end: int = 0          # end of header + data + descriptor
+    dsig: bool = False        # the descriptor has the PK\x07\x08 signature
+    dw: int = 0               # width of the sizes in the descriptor (4 or 8); 0 means no descriptor
+    seg_end: int = 0          # start of the next entry (or the directory)
 
 
 @dataclasses.dataclass
 class _Box:
     size: int
-    ents: list                # в порядке каталога
+    ents: list                # in directory order
     cd_off: int
     cd_size: int
     eocd_pos: int
     clen: int
-    z64_pos: int              # -1, если ZIP64 нет
+    z64_pos: int              # -1 if there's no ZIP64
     z64_len: int
     loc_pos: int
-    first_off: int            # конец головы
+    first_off: int            # end of the head
     slack: int
 
 
 def _find_eocd(f, size):
     if size < _EOCD.size:
-        raise _Bad("файл короче минимального ZIP: это не ZIP")
+        raise _Bad(tr("the file is shorter than the smallest ZIP: not a ZIP"))
     n = min(size, _EOCD.size + _U16)
     f.seek(size - n)
     tail = f.read(n)
     if len(tail) != n:
-        raise _Bad("файл прочитан не полностью")
+        raise _Bad(tr("the file was not read completely"))
     cands = []
     i = tail.find(_SIG_EOCD)
     while i >= 0:
         cands.append(i)
         i = tail.find(_SIG_EOCD, i + 1)
     if not cands:
-        raise _Bad("не найден конец архива (EOCD): не ZIP или файл обрезан")
+        raise _Bad(tr("end of archive (EOCD) not found: not a ZIP, or the file is truncated"))
 
-    def stop(i):                                  # где кончается EOCD вместе с комментарием
+    def stop(i):                                  # where the EOCD ends, comment included
         return i + _EOCD.size + int.from_bytes(tail[i + 20:i + 22], "little")
 
-    # Подделка EOCD в комментарии архива: разные парсеры выберут разный EOCD и
-    # прочтут разный архив (чистильщик увидел бы пустой, Word -- настоящий).
-    # Берём ровно тот EOCD, что кончается на конце файла, и только если он
-    # последняя сигнатура, как у zipfile. Вложенный ZIP внутри записи (своя
-    # сигнатура до внешнего каталога) этому не мешает: он не доходит до конца файла.
+    # An EOCD forged in the archive comment: different parsers pick different
+    # EOCDs and read different archives (a cleaner would see an empty one, Word
+    # the real one). We take exactly the EOCD that ends at the end of the file,
+    # and only if it's the last signature, as zipfile does. A nested ZIP inside
+    # an entry (its own signature before the outer directory) doesn't interfere:
+    # it doesn't reach the end of the file.
     exact = [i for i in cands if i + _EOCD.size <= len(tail) and stop(i) == len(tail)]
     if len(exact) > 1 or (exact and exact[0] != cands[-1]) or (not exact and len(cands) > 1):
-        raise _Bad("в конце файла несколько сигнатур EOCD: парсеры прочтут разный архив")
-    i = exact[0] if exact else cands[-1]          # без exact -- мусор после EOCD
+        raise _Bad(tr("several EOCD signatures at the end of the file: parsers would read "
+                      "different archives"))
+    i = exact[0] if exact else cands[-1]          # without exact: junk after the EOCD
     if i + _EOCD.size > len(tail) or stop(i) > len(tail):
-        raise _Bad("EOCD обрезан: комментарий архива длиннее остатка файла")
+        raise _Bad(tr("truncated EOCD: the archive comment is longer than the rest of the file"))
     return size - n + i, tail[i:i + _EOCD.size]
 
 
 def _z64_extra(extra, usize, csize, off):
-    """Истинные размеры и смещение с учётом ZIP64-extra (id 1) записи каталога.
-    Возвращает (usize, csize, off, слот смещения в extra или -1)."""
+    """True sizes and offset, taking the directory record's ZIP64 extra (id 1) into account.
+    Returns (usize, csize, off, offset slot in extra or -1)."""
     q = 0
     while q + 4 <= len(extra):
         hid, hs = struct.unpack_from("<HH", extra, q)
         body, nxt = q + 4, q + 4 + hs
         if nxt > len(extra):
-            raise _Bad("битое extra-поле записи")
+            raise _Bad(tr("broken extra field in an entry"))
         if hid == 1:
             vals = [usize, csize, off]
             slot = -1
@@ -261,7 +268,7 @@ def _z64_extra(extra, usize, csize, off):
             for k in range(3):
                 if vals[k] == _U32:
                     if p + 8 > nxt:
-                        raise _Bad("битое ZIP64-поле записи")
+                        raise _Bad(tr("broken ZIP64 field in an entry"))
                     vals[k] = int.from_bytes(extra[p:p + 8], "little")
                     if k == 2:
                         slot = p
@@ -272,12 +279,12 @@ def _z64_extra(extra, usize, csize, off):
 
 
 def _z64_values(extra):
-    """Значения ZIP64-extra (id 1) как 8-байтовые числа; [], если поля нет."""
+    """ZIP64 extra (id 1) values as 8-byte numbers; [] if there's no such field."""
     q = 0
     while q + 4 <= len(extra):
         hid, hs = struct.unpack_from("<HH", extra, q)
         if q + 4 + hs > len(extra):
-            raise _Bad("битое extra-поле записи")
+            raise _Bad(tr("broken extra field in an entry"))
         if hid == 1:
             return [int.from_bytes(extra[p:p + 8], "little") for p in range(q + 4, q + 4 + hs - hs % 8, 8)]
         q += 4 + hs
@@ -285,13 +292,13 @@ def _z64_values(extra):
 
 
 def _strip_z64(extra):
-    """extra без ZIP64-поля: у заменённой записи размеры пишем честными 32-битными."""
+    """extra without the ZIP64 field: a replaced entry gets honest 32-bit sizes."""
     out = bytearray()
     q = 0
     while q + 4 <= len(extra):
         hid, hs = struct.unpack_from("<HH", extra, q)
         if q + 4 + hs > len(extra):
-            raise _Bad("битое extra-поле записи")
+            raise _Bad(tr("broken extra field in an entry"))
         if hid != 1:
             out += extra[q:q + 4 + hs]
         q += 4 + hs
@@ -300,15 +307,16 @@ def _strip_z64(extra):
 
 
 def _descr_len(f, pos, limit, crc, csize, usize):
-    """Формат data descriptor после данных (бит 3): (длина, есть_подпись, ширина).
-    Вариантов четыре: с подписью PK\\x07\\x08 или без, размеры 4 или 8 байт. Признак --
-    совпадение со значениями каталога; None, если ни один не подошёл."""
+    """Format of the data descriptor after the data (bit 3): (length, has_signature, width).
+    Four variants: with or without the PK\\x07\\x08 signature, 4- or 8-byte sizes.
+    Decided by matching the directory values; None if none fits."""
     f.seek(pos)
     d = f.read(max(0, min(24, limit - pos)))
     for sig in (True, False):
-        # Сначала 8: у малых размеров верхние половины нулевые и узкий вариант совпал
-        # бы случайно. Ошибка в эту сторону безопасна (лишние нули учтутся как часть
-        # дескриптора), в обратную -- strip_slack отрезал бы кусок настоящего.
+        # 8 first: for small sizes the upper halves are zero and the narrow variant
+        # would match by accident. An error in this direction is safe (extra zeros are
+        # counted as part of the descriptor); in the other direction strip_slack would
+        # cut off a piece of the real thing.
         for w in (8, 4):
             n = (4 if sig else 0) + 4 + 2 * w
             if len(d) < n or (sig and d[:4] != _SIG_DESC):
@@ -323,9 +331,9 @@ def _descr_len(f, pos, limit, crc, csize, usize):
 
 
 def _scan(f, size):
-    """Структурный разбор. Бросает _Bad. Ничего не пишет, ничего не распаковывает."""
+    """Structural parsing. Raises _Bad. Writes nothing, decompresses nothing."""
     if size > MAX_INPUT:
-        raise _Bad("файл больше %d МБ" % (MAX_INPUT >> 20))
+        raise _Bad(tr("the file is larger than %d MB") % (MAX_INPUT >> 20))
     eocd_pos, eocd = _find_eocd(f, size)
     _, disk, cd_disk, n_disk, n_tot, cd_size, cd_off, clen = _EOCD.unpack(eocd)
 
@@ -337,56 +345,56 @@ def _scan(f, size):
         if loc[:4] == _SIG_LOC64:
             _, ldisk, z_off, ltot = _LOC64.unpack(loc)
             if ldisk != 0 or ltot > 1:
-                raise _Bad("многотомный архив не поддерживается")
+                raise _Bad(tr("multi-volume archives are not supported"))
             loc_pos = eocd_pos - _LOC64.size
             if z_off + _Z64.size > loc_pos:
-                raise _Bad("битый локатор ZIP64 EOCD")
+                raise _Bad(tr("broken ZIP64 EOCD locator"))
             f.seek(z_off)
             zr = f.read(_Z64.size)
             if len(zr) < _Z64.size or zr[:4] != _SIG_Z64:
-                raise _Bad("битая запись ZIP64 EOCD")
+                raise _Bad(tr("broken ZIP64 EOCD record"))
             _, rsize, _, _, disk, cd_disk, n_disk, n_tot, cd_size, cd_off = _Z64.unpack(zr)
             z64_pos, z64_len = z_off, 12 + rsize
             if rsize < 44 or z64_pos + z64_len > loc_pos:
-                raise _Bad("ZIP64 EOCD налезает на локатор")
+                raise _Bad(tr("the ZIP64 EOCD overlaps the locator"))
     if z64_pos < 0 and (n_tot == _U16 or cd_size == _U32 or cd_off == _U32):
-        raise _Bad("в EOCD указан ZIP64, но записи ZIP64 EOCD нет")
+        raise _Bad(tr("the EOCD says ZIP64, but there's no ZIP64 EOCD record"))
     if disk != 0 or cd_disk != 0 or n_disk != n_tot:
-        raise _Bad("многотомный архив не поддерживается")
+        raise _Bad(tr("multi-volume archives are not supported"))
     if n_tot > MAX_ENTRIES:
-        raise _Bad("записей в пакете %d, предел %d" % (n_tot, MAX_ENTRIES))
+        raise _Bad(tr("the package has %d entries, the limit is %d") % (n_tot, MAX_ENTRIES))
     if cd_size > MAX_CD:
-        raise _Bad("центральный каталог больше %d МБ" % (MAX_CD >> 20))
+        raise _Bad(tr("the central directory is larger than %d MB") % (MAX_CD >> 20))
     cd_end = cd_off + cd_size
     a_end = z64_pos if z64_pos >= 0 else eocd_pos
     if cd_end > a_end:
-        raise _Bad("центральный каталог не укладывается до конца архива "
-                   "(данные перед ZIP со сдвинутыми смещениями или порча)")
+        raise _Bad(tr("the central directory doesn't fit before the end of the archive (data "
+                      "prepended to the ZIP with shifted offsets, or corruption)"))
 
     f.seek(cd_off)
     buf = f.read(cd_size)
     if len(buf) != cd_size:
-        raise _Bad("центральный каталог оборван")
+        raise _Bad(tr("the central directory is cut off"))
 
     ents = []
     pos = 0
     for idx in range(n_tot):
         if pos + _CD.size > len(buf) or buf[pos:pos + 4] != _SIG_CD:
-            raise _Bad("битая запись центрального каталога")
+            raise _Bad(tr("broken central directory record"))
         (_, _, _, flags, method, mtime, mdate, crc, csize, usize,
          nlen, elen, clen_, disk_, _, _, off) = _CD.unpack_from(buf, pos)
         end = pos + _CD.size + nlen + elen + clen_
         if end > len(buf):
-            raise _Bad("запись центрального каталога выходит за его границы")
+            raise _Bad(tr("a central directory record runs past its bounds"))
         nameb = buf[pos + _CD.size:pos + _CD.size + nlen]
         extra = buf[pos + _CD.size + nlen:pos + _CD.size + nlen + elen]
         if disk_ != 0:
-            raise _Bad("многотомный архив не поддерживается")
+            raise _Bad(tr("multi-volume archives are not supported"))
         usize, csize, off, slot = _z64_extra(extra, usize, csize, off)
         try:
             name = nameb.decode("utf-8" if flags & 0x800 else "cp437")
         except UnicodeDecodeError:
-            raise _Bad("имя записи не декодируется") from None
+            raise _Bad(tr("an entry name can't be decoded")) from None
         e = _Ent(idx, name, nameb, bytes(buf[pos:end]), flags, method, mtime, mdate,
                  crc, csize, usize, off)
         if slot >= 0:
@@ -394,22 +402,22 @@ def _scan(f, size):
         ents.append(e)
         pos = end
     if pos != len(buf):
-        raise _Bad("в центральном каталоге лишние байты после последней записи")
+        raise _Bad(tr("extra bytes in the central directory after the last record"))
 
-    # Локальные заголовки: имя и метод обязаны совпасть с каталогом, иначе разные
-    # парсеры увидят разные файлы.
+    # Local headers: name and method must match the directory, otherwise
+    # different parsers see different files.
     for e in ents:
         if e.off + _LH.size > cd_off:
-            raise _Bad("локальный заголовок записи лежит за пределами данных")
+            raise _Bad(tr("an entry's local header lies outside the data"))
         f.seek(e.off)
         h = f.read(_LH.size)
         if len(h) != _LH.size or h[:4] != _SIG_LOCAL:
-            raise _Bad("битый локальный заголовок записи")
+            raise _Bad(tr("broken local header of an entry"))
         _, _, lflags, lmethod, _, _, _, _, _, lnl, lel = _LH.unpack(h)
         if f.read(lnl) != e.nameb:
-            raise _Bad("имя в локальном заголовке не совпадает с центральным каталогом")
+            raise _Bad(tr("the name in the local header doesn't match the central directory"))
         if lmethod != e.method:
-            raise _Bad("метод сжатия в локальном заголовке не совпадает с каталогом")
+            raise _Bad(tr("the compression method in the local header doesn't match the directory"))
         e.lflags = lflags
         e.data_start = e.off + _LH.size + lnl + lel
         e.data_end = e.data_start + e.csize
@@ -417,17 +425,17 @@ def _scan(f, size):
     phys = sorted(ents, key=lambda x: x.off)
     for a, b in zip(phys, phys[1:]):
         if a.off == b.off:
-            raise _Bad("две записи каталога указывают на одни данные")
+            raise _Bad(tr("two directory records point to the same data"))
     slack = 0
     for k, e in enumerate(phys):
         e.seg_end = phys[k + 1].off if k + 1 < len(phys) else cd_off
         if e.data_end > e.seg_end:
-            raise _Bad("записи перекрываются или данные выходят за границы")
+            raise _Bad(tr("entries overlap or data runs past the bounds"))
         e.own_end = e.data_end
         if e.lflags & 8:
             d = _descr_len(f, e.data_end, e.seg_end, e.crc, e.csize, e.usize)
             if d is None:
-                raise _Bad("не распознан data descriptor записи")
+                raise _Bad(tr("an entry's data descriptor was not recognized"))
             e.own_end += d[0]
             e.dsig, e.dw = d[1], d[2]
         slack += e.seg_end - e.own_end
@@ -442,7 +450,7 @@ def _scan(f, size):
 
 
 def _policy(box):
-    """Отказы по политике (см. docstring модуля). Список сообщений."""
+    """Policy refusals (see the module docstring). A list of messages."""
     bad = []
 
     def add(msg):
@@ -452,33 +460,34 @@ def _policy(box):
     seen = {}
     for e in box.ents:
         if e.flags & 0x41:
-            add("запись зашифрована")
+            add(tr("the entry is encrypted"))
         if e.method not in (0, 8):
-            add("метод сжатия %d не допускается в OOXML/ODF (только STORED и DEFLATED)" % e.method)
+            add(tr("compression method %d is not allowed in OOXML/ODF (only STORED and DEFLATED)") % e.method)
         n = e.name.replace("\\", "/")
         if ("\x00" in n or n.startswith("/") or (len(n) > 1 and n[1] == ":")
                 or ".." in n.split("/")):
-            add("недопустимое имя записи (выход за каталог или абсолютный путь): %s"
+            add(tr("invalid entry name (escapes the folder or absolute path): %s")
                 % clip(e.name, 80))
         key = e.name.casefold()
         if key in seen:
-            add("дублирующееся имя записи: %s" % clip(e.name, 80))
+            add(tr("duplicate entry name: %s") % clip(e.name, 80))
         seen[key] = e
     unc = sum(e.usize for e in box.ents)
     cmp_ = sum(e.csize for e in box.ents)
     if unc > MAX_TOTAL_UNPACKED or (unc > MIN_BOMB_UNPACKED and unc / max(cmp_, 1) > MAX_RATIO):
-        add("подозрение на zip-бомбу: распакованный объём %d байт при сжатом %d" % (unc, cmp_))
+        add(tr("suspected zip bomb: %d bytes uncompressed from %d compressed") % (unc, cmp_))
     return bad
 
 
 def entries(src) -> list:
-    """Опись контейнера в порядке центрального каталога. НЕ бросает: на файле,
-    который не разбирается как ZIP, возвращает []. Политику отказов (дубли, бомба,
-    traversal) не применяет -- опись полезна и для таких файлов; рубит их rebuild()."""
+    """Container listing in central directory order. Never raises: for a file that
+    doesn't parse as ZIP it returns []. Doesn't apply the refusal policy
+    (duplicates, bombs, traversal): the listing is useful for such files too;
+    rebuild() is what rejects them."""
     try:
         with open(os.fspath(src), "rb") as f:
             box = _scan(f, os.fstat(f.fileno()).st_size)
-    except Exception:  # noqa: BLE001 -- контракт: не бросаем
+    except Exception:  # noqa: BLE001 -- contract: never raise
         return []
     return [ZipEntry(e.name, _dos_time(e.mdate, e.mtime), e.method, e.csize, e.usize,
                      e.crc, e.idx, e.flags, e.off) for e in box.ents]
@@ -489,27 +498,27 @@ def _dos_time(d, t):
 
 
 # ============================================================================
-#  Запись
+#  Writing
 # ============================================================================
 
 
 def _copy(f, g, start, end):
-    """Срез [start, end) входа -> выход. Возвращает число байт."""
+    """Slice [start, end) of the input -> output. Returns the number of bytes."""
     if end < start:
-        raise _Bad("внутренняя ошибка: отрицательный отрезок")
+        raise _Bad(tr("internal error: negative span"))
     f.seek(start)
     left = end - start
     while left:
         b = f.read(min(left, _CHUNK))
         if not b:
-            raise _Bad("файл оборван при чтении")
+            raise _Bad(tr("the file was cut off while reading"))
         g.write(b)
         left -= len(b)
     return end - start
 
 
 def _pack(e, data):
-    """Данные заменяемой записи в её же методе сжатия."""
+    """Data of a replaced entry, in the entry's own compression method."""
     if e.method == 0:
         return data
     c = zlib.compressobj(_LEVEL[e.flags & 6], zlib.DEFLATED, -15)
@@ -517,11 +526,12 @@ def _pack(e, data):
 
 
 def _new_local(f, e, crc, csize, usize):
-    """Локальный заголовок заменённой записи: поля оригинала (флаги, версия, время,
-    имя, local extra -- в т.ч. growth hint Office 0xA220), кроме crc/размеров и
-    ZIP64-extra. У потокового писателя (бит 3) там заглушки, настоящие значения --
-    в дескрипторе: тогда заголовок остаётся как был, а бит 3 и дескриптор
-    сохраняются, чтобы заменённая запись не выбивалась из соседних."""
+    """Local header of a replaced entry: the original's fields (flags, version,
+    time, name, local extra including Office's growth hint 0xA220), except
+    crc/sizes and the ZIP64 extra. A streaming writer (bit 3) puts placeholders
+    there and the real values in the descriptor: then the header stays as it
+    was, and bit 3 and the descriptor are kept so the replaced entry doesn't
+    stand out from its neighbors."""
     f.seek(e.off)
     h = bytearray(f.read(_LH.size))
     lnl, lel = struct.unpack_from("<2H", h, 26)
@@ -530,12 +540,12 @@ def _new_local(f, e, crc, csize, usize):
         crc0, cs0, us0 = struct.unpack_from("<3L", h, 14)
         if _U32 in (cs0, us0):
             if any(_z64_values(rest[lnl:])):
-                raise _Bad("замена записи с битом 3 и настоящими ZIP64-размерами "
-                           "в локальном заголовке не поддерживается")
-            return bytes(h) + rest                  # ZIP64-заглушки потокового писателя
+                raise _Bad(tr("replacing an entry with bit 3 and real ZIP64 sizes in the local "
+                              "header is not supported"))
+            return bytes(h) + rest                  # ZIP64 placeholders of a streaming writer
         if (crc0, cs0, us0) == (0, 0, 0):
-            return bytes(h) + rest                  # обычные заглушки
-        # писатель продублировал настоящие значения в заголовке: обновим их ниже
+            return bytes(h) + rest                  # ordinary placeholders
+        # the writer duplicated the real values in the header: update them below
     extra = _strip_z64(rest[lnl:])
     struct.pack_into("<3L", h, 14, crc, csize, usize)
     struct.pack_into("<H", h, 28, len(extra))
@@ -543,7 +553,7 @@ def _new_local(f, e, crc, csize, usize):
 
 
 def _descr(e, crc, csize, usize):
-    """Новый data descriptor в том же формате, что у оригинала."""
+    """A new data descriptor in the same format as the original's."""
     w = "<Q" if e.dw == 8 else "<L"
     return ((_SIG_DESC if e.dsig else b"") + struct.pack("<L", crc)
             + struct.pack(w, csize) + struct.pack(w, usize))
@@ -554,7 +564,7 @@ def _cd_replaced(e, off, crc, csize, usize):
     nlen, elen = struct.unpack_from("<2H", rec, 28)
     extra = _strip_z64(rec[_CD.size + nlen:_CD.size + nlen + elen])
     if off >= _U32:
-        raise _Bad("смещение записи превышает 4 ГБ")
+        raise _Bad(tr("the entry offset exceeds 4 GB"))
     h = bytearray(rec[:_CD.size])
     struct.pack_into("<3L", h, 16, crc, csize, usize)
     struct.pack_into("<H", h, 30, len(extra))
@@ -564,17 +574,17 @@ def _cd_replaced(e, off, crc, csize, usize):
 
 def _cd_moved(e, off):
     b = bytearray(e.rec)
-    if e.off_slot >= 0:                       # смещение живёт в ZIP64-extra
+    if e.off_slot >= 0:                       # the offset lives in the ZIP64 extra
         b[e.off_slot:e.off_slot + 8] = off.to_bytes(8, "little")
     elif off >= _U32 or struct.unpack_from("<L", b, 42)[0] == _U32:
-        raise _Bad("смещение записи превышает 4 ГБ")
+        raise _Bad(tr("the entry offset exceeds 4 GB"))
     else:
         struct.pack_into("<L", b, 42, off)
     return bytes(b)
 
 
 def _put(buf, fmt, at, new, marker):
-    """Поле хвоста: значение-маркер ZIP64 (0xFFFF/0xFFFFFFFF) не трогаем."""
+    """A tail field: a ZIP64 marker value (0xFFFF/0xFFFFFFFF) is left alone."""
     if struct.unpack_from(fmt, buf, at)[0] != marker:
         struct.pack_into(fmt, buf, at, new)
 
@@ -585,7 +595,7 @@ def _write(f, g, box, replace, drop, strip, rep):
     if not strip:
         pos += _copy(f, g, 0, box.first_off)
     newoff = {}
-    meta = {}                                  # idx -> (crc, csize, usize) заменённых
+    meta = {}                                  # idx -> (crc, csize, usize) of replaced entries
     for e in ents:
         if e.name in drop:
             rep.dropped += 1
@@ -595,7 +605,7 @@ def _write(f, g, box, replace, drop, strip, rep):
             data = replace[e.name]
             body = _pack(e, data)
             if len(body) >= _U32:
-                raise _Bad("заменяемая часть слишком велика")
+                raise _Bad(tr("the part being replaced is too large"))
             crc = zlib.crc32(data) & _U32
             meta[e.idx] = (crc, len(body), len(data))
             hdr = _new_local(f, e, crc, len(body), len(data))
@@ -612,7 +622,7 @@ def _write(f, g, box, replace, drop, strip, rep):
             rep.copied_raw += 1
 
     cd_off = pos
-    for e in box.ents:                         # порядок каталога -- как в исходнике
+    for e in box.ents:                         # directory order as in the source
         if e.idx not in newoff:
             continue
         if e.idx in meta:
@@ -653,25 +663,25 @@ def _write(f, g, box, replace, drop, strip, rep):
         struct.pack_into("<H", eocd, 20, 0)
     g.write(eocd)
     if not strip:
-        _copy(f, g, box.eocd_pos + _EOCD.size, box.size)   # комментарий + мусор после него
+        _copy(f, g, box.eocd_pos + _EOCD.size, box.size)   # comment + junk after it
     return [e.name for e in box.ents if e.idx in newoff]
 
 
 def _verify(path, names, replace):
-    """Независимая проверка выхода стандартным zipfile."""
+    """Independent check of the output with the standard zipfile."""
     try:
         with zipfile.ZipFile(path) as zf:
             if [i.orig_filename for i in zf.infolist()] != names:
-                raise _Bad("состав или порядок записей выхода не совпал с ожидаемым")
+                raise _Bad(tr("the output's entries or their order don't match expectations"))
             if zf.testzip() is not None:
-                raise _Bad("запись выхода не проходит проверку CRC")
+                raise _Bad(tr("an output entry fails the CRC check"))
             for name, data in replace.items():
                 if zf.read(name) != data:
-                    raise _Bad("замена записана неверно")
+                    raise _Bad(tr("the replacement was written incorrectly"))
     except _Bad:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise _Bad("выход не открывается стандартным zipfile: %s" % type(exc).__name__) from None
+        raise _Bad(tr("the output won't open with the standard zipfile: %s") % type(exc).__name__) from None
 
 
 def _same_file(a, b):
@@ -682,11 +692,12 @@ def _same_file(a, b):
 
 
 def rebuild(src, dst, replace=None, drop=None, *, strip_slack=False) -> RebuildReport:
-    """src -> dst. replace {имя: bytes} -- записи пережимаются; drop {имена} -- их в
-    выходе нет; всё остальное -- сырые сжатые байты. Без replace и drop выход равен
-    входу побайтно. НЕ бросает исключений. ok=False: dst не создан, прежний dst не
-    тронут, причина в errors. strip_slack=True -- не переносить голову, щели, мусор
-    после EOCD и комментарий архива (см. docstring модуля)."""
+    """src -> dst. replace {name: bytes}: these entries are recompressed;
+    drop {names}: these aren't in the output; everything else is raw compressed
+    bytes. Without replace and drop the output equals the input byte for byte.
+    Never raises. ok=False: dst not created, a previous dst untouched, the
+    reason in errors. strip_slack=True: don't carry over the head, gaps, junk
+    after EOCD and the archive comment (see the module docstring)."""
     rep = RebuildReport()
     part = None
     try:
@@ -695,16 +706,16 @@ def rebuild(src, dst, replace=None, drop=None, *, strip_slack=False) -> RebuildR
         drop = set(drop or ())
         for k, v in replace.items():
             if not isinstance(k, str) or not isinstance(v, (bytes, bytearray, memoryview)):
-                raise _Bad("replace: нужен словарь {имя части: bytes}")
+                raise _Bad(tr("replace: a {part name: bytes} dict is required"))
             if len(v) > MAX_REPLACE:
-                raise _Bad("заменяемая часть больше %d МБ" % (MAX_REPLACE >> 20))
+                raise _Bad(tr("the part being replaced is larger than %d MB") % (MAX_REPLACE >> 20))
         replace = {k: bytes(v) for k, v in replace.items()}
         if any(not isinstance(k, str) for k in drop):
-            raise _Bad("drop: нужно множество имён частей")
+            raise _Bad(tr("drop: a set of part names is required"))
         if replace.keys() & drop:
-            raise _Bad("одна и та же часть и в replace, и в drop")
+            raise _Bad(tr("the same part is in both replace and drop"))
         if _same_file(s, d):
-            raise _Bad("выход совпадает со входом: вход не модифицируется никогда")
+            raise _Bad(tr("the output matches the input: the input is never modified"))
         with open(s, "rb") as f:
             box = _scan(f, os.fstat(f.fileno()).st_size)
             rep.src_entries = len(box.ents)
@@ -712,7 +723,7 @@ def rebuild(src, dst, replace=None, drop=None, *, strip_slack=False) -> RebuildR
             rep.comment_len = box.clen
             problems = _policy(box)
             have = {e.name for e in box.ents}
-            problems += ["замена несуществующей части: %s" % clip(k, 80)
+            problems += [tr("replacing a part that doesn't exist: %s") % clip(k, 80)
                          for k in replace if k not in have]
             if problems:
                 for p in problems:
@@ -730,11 +741,11 @@ def rebuild(src, dst, replace=None, drop=None, *, strip_slack=False) -> RebuildR
         pass
     except _Bad as exc:
         rep.err(exc)
-    except Exception as exc:  # noqa: BLE001 -- контракт: наружу не бросаем
-        # strerror, а не str(exc): в тексте OSError лежит имя файла.
+    except Exception as exc:  # noqa: BLE001 -- contract: never raise
+        # strerror, not str(exc): the OSError text contains the file name.
         why = getattr(exc, "strerror", None) if isinstance(exc, OSError) else None
-        rep.err("ошибка ввода-вывода: %s" % why if why else
-                "внутренняя ошибка: %s" % type(exc).__name__)
+        rep.err(tr("I/O error: %s") % why if why else
+                tr("internal error: %s") % type(exc).__name__)
     finally:
         if part is not None:
             try:
@@ -744,18 +755,18 @@ def rebuild(src, dst, replace=None, drop=None, *, strip_slack=False) -> RebuildR
     if not rep.ok:
         rep.copied_raw = rep.recompressed = rep.dropped = rep.dst_entries = 0
         if not rep.errors:
-            rep.err("пересборка не удалась")
+            rep.err(tr("the rebuild failed"))
     return rep
 
 
 # ============================================================================
-#  Самопроверка и CLI:  python -m core.zipfix            -- синтетика
-#                       python -m core.zipfix файл...    -- метрики по реальным файлам
+#  Self-test and CLI:  python -m core.zipfix            -- synthetic data
+#                      python -m core.zipfix file...    -- metrics on real files
 # ============================================================================
 
 
 def _check_file(path, say):
-    """Метрики пересборки одного реального файла. Содержимое и имена не печатаются."""
+    """Rebuild metrics for one real file. Contents and names are not printed."""
     import hashlib
     import tempfile
 
@@ -776,13 +787,13 @@ def _check_file(path, say):
                 tz = zf.testzip() is None
         except Exception:  # noqa: BLE001
             tz = False
-        say("  без изменений: ok=%s sha256 %s, записей %d, сырьём %d, пережато %d, testzip %s, "
-            "таймстемпы+порядок+метод %s, щелей %d байт, комментарий %d байт"
-            % (r.ok, "СОВПАЛ" if same else "НЕ СОВПАЛ", r.src_entries, r.copied_raw,
-               r.recompressed, "ok" if tz else "ПРОВАЛ", "совпали" if same_meta else "НЕ СОВПАЛИ",
+        say("  unchanged: ok=%s sha256 %s, entries %d, raw %d, recompressed %d, testzip %s, "
+            "timestamps+order+method %s, gaps %d bytes, comment %d bytes"
+            % (r.ok, "MATCH" if same else "MISMATCH", r.src_entries, r.copied_raw,
+               r.recompressed, "ok" if tz else "FAIL", "match" if same_meta else "MISMATCH",
                r.slack_bytes, r.comment_len))
         ok &= same and tz and same_meta and r.copied_raw == r.src_entries
-        # Замена одной XML-части: все остальные обязаны читаться байт в байт.
+        # Replacing one XML part: every other part must read back byte for byte.
         xml = [e for e in src if e.name.endswith(".xml") and e.name != "[Content_Types].xml"
                and e.file_size > 0]
         if xml:
@@ -796,14 +807,14 @@ def _check_file(path, say):
                 tz2 = zf.testzip() is None and zf.read(tgt) == new
             meta2 = [(e.name, e.date_time, e.compress_type, e.flag_bits) for e in entries(dst)]
             same2 = meta2 == [(e.name, e.date_time, e.compress_type, e.flag_bits) for e in src]
-            say("  замена 1 части: ok=%s, сырьём %d, пережато %d, testzip+замена %s, "
-                "остальные части байт в байт %s, таймстемпы+порядок+метод %s"
-                % (r2.ok, r2.copied_raw, r2.recompressed, "ok" if tz2 else "ПРОВАЛ",
-                   "да" if rest else "НЕТ", "совпали" if same2 else "НЕ СОВПАЛИ"))
+            say("  replace 1 part: ok=%s, raw %d, recompressed %d, testzip+replacement %s, other "
+                "parts byte for byte %s, timestamps+order+method %s"
+                % (r2.ok, r2.copied_raw, r2.recompressed, "ok" if tz2 else "FAIL",
+                   "yes" if rest else "NO", "match" if same2 else "MISMATCH"))
             ok &= r2.ok and tz2 and rest and same2
         r3 = rebuild(path, dst, drop={src[-1].name}) if len(src) > 1 else None
         if r3:
-            say("  удаление последней записи: ok=%s, сырьём %d, удалено %d, записей на выходе %d"
+            say("  remove the last entry: ok=%s, raw %d, removed %d, output entries %d"
                 % (r3.ok, r3.copied_raw, r3.dropped, r3.dst_entries))
             ok &= r3.ok and r3.dropped == 1 and r3.dst_entries == len(src) - 1
     return ok
@@ -818,7 +829,7 @@ def _crc_zeros(n):
 
 
 def _mk_raw(name, body, usize, crc):
-    """Минимальный ZIP с одной DEFLATED-записью и заданными (в т.ч. лживыми) размерами."""
+    """A minimal ZIP with one DEFLATED entry and given (possibly lying) sizes."""
     nb = name.encode()
     loc = struct.pack("<4s5H3L2H", _SIG_LOCAL, 20, 0, 8, 0, 0x21, crc, len(body), usize, len(nb), 0) + nb
     cd = struct.pack("<4s6H3L5H2L", _SIG_CD, 20, 20, 0, 8, 0, 0x21, crc, len(body), usize,
@@ -828,7 +839,7 @@ def _mk_raw(name, body, usize, crc):
 
 
 def _selftest():
-    """Синтетика: тождественность, замена, удаление, ZIP64, дескрипторы, щели, патологии, фазз."""
+    """Synthetic data: identity, replacement, removal, ZIP64, descriptors, gaps, pathologies, fuzzing."""
     import hashlib
     import io
     import random
@@ -842,9 +853,9 @@ def _selftest():
         stat[0] += 1
         if not cond:
             stat[1] += 1
-            print("ПРОВАЛ: %s %s" % (name, detail))
+            print("FAIL: %s %s" % (name, detail))
 
-    class NoSeek(io.BytesIO):                  # zipfile сам перейдёт на бит 3 и дескрипторы
+    class NoSeek(io.BytesIO):                  # zipfile switches to bit 3 and descriptors by itself
         def seek(self, *a, **k):
             raise OSError("no seek")
 
@@ -858,7 +869,7 @@ def _selftest():
                 zf.writestr(zi, data)
         return bio.getvalue()
 
-    def set_flags6(raw):                       # как Word: «самый быстрый» deflate
+    def set_flags6(raw):                       # like Word: "superfast" deflate
         b = bytearray(raw)
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             infos = zf.infolist()
@@ -872,7 +883,7 @@ def _selftest():
         return bytes(b)
 
     def inject(raw, head=b"", gap=b"", mid=b"", comment=b"", trail=b""):
-        """Независимый от rebuild способ завести щели: смещения пересчитывает сам."""
+        """A way to create gaps independent of rebuild: it recomputes offsets itself."""
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             infos = sorted(zf.infolist(), key=lambda i: i.header_offset)
         eocd = raw.rfind(_SIG_EOCD)
@@ -894,7 +905,7 @@ def _selftest():
         struct.pack_into("<H", e, 20, len(comment))
         return bytes(out + cd + mid + e + comment + trail)
 
-    def reorder_cd(raw):                        # меняем местами 2-ю и 6-ю записи только в каталоге
+    def reorder_cd(raw):                        # swap the 2nd and 6th entries in the directory only
         eocd = raw.rfind(_SIG_EOCD)
         cd_off = struct.unpack_from("<L", raw, eocd + 16)[0]
         recs, pos = [], cd_off
@@ -922,7 +933,7 @@ def _selftest():
             fh.write(b)
         return P(n)
 
-    def raw_of(zpath):                          # {имя: локальный заголовок + данные}
+    def raw_of(zpath):                          # {name: local header + data}
         with open(zpath, "rb") as f:
             box = _scan(f, os.fstat(f.fileno()).st_size)
             out = {}
@@ -943,18 +954,18 @@ def _selftest():
         try:
             r = rebuild(src, dst, **kw)
         except Exception as exc:  # noqa: BLE001
-            chk("%s: не бросает" % name, False, repr(exc))
+            chk("%s: doesn't raise" % name, False, repr(exc))
             return
-        chk("%s: ok=False и есть errors" % name, (not r.ok) and bool(r.errors), (r.ok, r.errors))
-        chk("%s: вход не изменён" % name, sha(src) == h0)
-        chk("%s: dst и .part не созданы" % name,
+        chk("%s: ok=False and errors present" % name, (not r.ok) and bool(r.errors), (r.ok, r.errors))
+        chk("%s: input unchanged" % name, sha(src) == h0)
+        chk("%s: dst and .part not created" % name,
             not os.path.exists(dst) and not os.path.exists(dst + ".part"))
-        chk("%s: счётчики обнулены" % name,
+        chk("%s: counters zeroed" % name,
             (r.copied_raw, r.recompressed, r.dropped, r.dst_entries) == (0, 0, 0, 0))
 
     try:
         lim = zipfile.ZIP64_LIMIT
-        zipfile.ZIP64_LIMIT = 50                # настоящий ZIP64: размеры/смещения в extra, EOCD64
+        zipfile.ZIP64_LIMIT = 50                # real ZIP64: sizes/offsets in extra, EOCD64
         try:
             raw64, raw64d = mk(base), mk(base, seekable=False)
         finally:
@@ -964,34 +975,34 @@ def _selftest():
         junk = inject(plain, **gaps)
         cases = {
             "deflate+stored+dir+empty": plain,
-            "флаги Word (6)": set_flags6(plain),
-            "бит 3, дескрипторы": mk(base, seekable=False),
+            "Word flags (6)": set_flags6(plain),
+            "bit 3, descriptors": mk(base, seekable=False),
             "ZIP64": raw64,
-            "ZIP64 + бит 3": raw64d,
-            "комментарий архива": plain[:-2] + struct.pack("<H", 11) + b"hello world",
-            "щели, голова, мусор после EOCD": junk,
-            "extra в обоих заголовках": mk(base, extra=struct.pack("<HH", 0xA220, 36) + b"\x28\xa0\x20\x00" + b"\x00" * 32),
-            "порядок каталога != физический": reorder_cd(plain),
-            "вложенный ZIP внутри записи (stored)": mk(base + [("embed.zip", plain, 0, D0)]),
-            "пустой архив": mk([]),
+            "ZIP64 + bit 3": raw64d,
+            "archive comment": plain[:-2] + struct.pack("<H", 11) + b"hello world",
+            "gaps, head, junk after EOCD": junk,
+            "extra in both headers": mk(base, extra=struct.pack("<HH", 0xA220, 36) + b"\x28\xa0\x20\x00" + b"\x00" * 32),
+            "directory order != physical order": reorder_cd(plain),
+            "nested ZIP inside an entry (stored)": mk(base + [("embed.zip", plain, 0, D0)]),
+            "empty archive": mk([]),
         }
         for k, raw in cases.items():
             src = wr("s.zip", raw)
             n = len(zipfile.ZipFile(src).infolist())
             r = rebuild(src, P("o.zip"))
-            chk("[%s] без изменений: ok" % k, r.ok, r.errors)
-            chk("[%s] sha256 совпал" % k, r.ok and sha(src) == sha(P("o.zip")))
-            chk("[%s] всё сырьём" % k, r.copied_raw == n == r.src_entries == r.dst_entries, vars(r))
+            chk("[%s] unchanged: ok" % k, r.ok, r.errors)
+            chk("[%s] sha256 matches" % k, r.ok and sha(src) == sha(P("o.zip")))
+            chk("[%s] everything raw" % k, r.copied_raw == n == r.src_entries == r.dst_entries, vars(r))
             if not n:
                 continue
             old = raw_of(src)
             for tag, rep, drp, strip in (
-                    ("замена мал.", {"docProps/core.xml": b"<new/>"}, None, False),
-                    ("замена больш.", {"word/document.xml": blob * 40}, None, False),
-                    ("замена пустой", {"word/media/i.bin": b""}, None, False),
-                    ("замена + удаление", {"docProps/app.xml": b"<x/>"}, {"word/document.xml"}, False),
-                    ("замена, strip", {"docProps/core.xml": b"<new/>"}, None, True),
-                    ("всё удалено", None, {e.name for e in entries(src)}, False)):
+                    ("small replacement", {"docProps/core.xml": b"<new/>"}, None, False),
+                    ("large replacement", {"word/document.xml": blob * 40}, None, False),
+                    ("empty replacement", {"word/media/i.bin": b""}, None, False),
+                    ("replacement + removal", {"docProps/app.xml": b"<x/>"}, {"word/document.xml"}, False),
+                    ("replacement, strip", {"docProps/core.xml": b"<new/>"}, None, True),
+                    ("everything removed", None, {e.name for e in entries(src)}, False)):
                 r = rebuild(src, P("o.zip"), replace=rep, drop=drp, strip_slack=strip)
                 chk("[%s] %s: ok" % (k, tag), r.ok, r.errors)
                 if not r.ok:
@@ -999,30 +1010,30 @@ def _selftest():
                 with zipfile.ZipFile(P("o.zip")) as zf, zipfile.ZipFile(src) as zs:
                     chk("[%s] %s: testzip" % (k, tag), zf.testzip() is None)
                     gone = set(drp or ())
-                    chk("[%s] %s: состав и порядок" % (k, tag),
+                    chk("[%s] %s: entries and order" % (k, tag),
                         [i.filename for i in zf.infolist()] ==
                         [i.filename for i in zs.infolist() if i.filename not in gone])
                     for i in zf.infolist():
                         want = (rep or {}).get(i.filename)
                         want = zs.read(i.filename) if want is None else want
-                        chk("[%s] %s: часть %s читается" % (k, tag, i.filename),
+                        chk("[%s] %s: part %s reads" % (k, tag, i.filename),
                             zf.read(i.filename) == want)
-                chk("[%s] %s: таймстемпы/метод/флаги/порядок" % (k, tag),
+                chk("[%s] %s: timestamps/method/flags/order" % (k, tag),
                     prof(P("o.zip")) == [p for p in prof(src) if p[0] not in (drp or ())])
                 new = raw_of(P("o.zip"))
-                chk("[%s] %s: нетронутые записи байт в байт" % (k, tag),
+                chk("[%s] %s: untouched entries byte for byte" % (k, tag),
                     all(new[nm] == old[nm] for nm in new if nm not in (rep or {})))
                 with open(src, "rb") as f1, open(P("o.zip"), "rb") as f2:
                     b1 = {e.name: e for e in _scan(f1, os.fstat(f1.fileno()).st_size).ents}
-                    b2 = {e.name: e for e in _scan(f2, os.fstat(f2.fileno()).st_size).ents}   # проверит и дескрипторы
-                chk("[%s] %s: бит 3 и формат дескриптора как у оригинала" % (k, tag),
+                    b2 = {e.name: e for e in _scan(f2, os.fstat(f2.fileno()).st_size).ents}   # also checks the descriptors
+                chk("[%s] %s: bit 3 and descriptor format as in the original" % (k, tag),
                     all((b1[n_].lflags & 8, b1[n_].flags, b1[n_].dsig, b1[n_].dw) ==
                         (b2[n_].lflags & 8, b2[n_].flags, b2[n_].dsig, b2[n_].dw) for n_ in b2))
-                chk("[%s] %s: счётчики" % (k, tag),
+                chk("[%s] %s: counters" % (k, tag),
                     (r.recompressed, r.dropped, r.copied_raw + r.recompressed) ==
                     (len(rep or {}), len(drp or ()), r.dst_entries))
 
-        # local extra заменённой записи сохраняется, метод и уровень -- по флагам оригинала
+        # a replaced entry's local extra is kept; method and level follow the original's flags
         hint = struct.pack("<HH", 0xA220, 36) + b"\x28\xa0\x20\x00" + b"\x00" * 32
         src = wr("h.zip", mk([("a.xml", xml, 8, D0), ("b.xml", xml, 0, D0)], extra=hint))
         r = rebuild(src, P("o.zip"), replace={"a.xml": b"<z/>", "b.xml": b"<y/>"})
@@ -1031,90 +1042,90 @@ def _selftest():
             box = _scan(f, os.fstat(f.fileno()).st_size)
             f.seek(box.ents[0].off)
             h = f.read(box.ents[0].data_start - box.ents[0].off)
-        chk("growth hint сохранён в локальном заголовке заменённой записи", hint in h)
-        chk("growth hint сохранён в каталоге", all(hint in e.rec for e in box.ents))
-        chk("методы сохранены (DEFLATED остался, STORED остался)",
+        chk("growth hint kept in the replaced entry's local header", hint in h)
+        chk("growth hint kept in the directory", all(hint in e.rec for e in box.ents))
+        chk("methods kept (DEFLATED stayed, STORED stayed)",
             [e.method for e in box.ents] == [8, 0])
         data = bytes(rnd.getrandbits(3) for _ in range(20000))
         sizes = {fl: len(_pack(_Ent(0, "x", b"x", b"", fl, 8, 0, 0, 0, 0, 0, 0), data))
                  for fl in (0, 2, 4, 6)}
-        chk("уровень по флагам: максимальный не хуже самого быстрого", sizes[2] <= sizes[6], sizes)
+        chk("level by flags: maximum is no worse than superfast", sizes[2] <= sizes[6], sizes)
 
-        # щели: strip_slack возвращает чистую раскладку; мёртвая зона перед EOCD zipfile не читает
+        # gaps: strip_slack returns a clean layout; zipfile doesn't read the dead zone before EOCD
         src = wr("j.zip", junk)
         r = rebuild(src, P("o.zip"), strip_slack=True)
         chk("strip_slack: ok", r.ok, r.errors)
-        chk("strip_slack: выход == чистый исходник до инъекции",
+        chk("strip_slack: output == the clean source before injection",
             r.ok and open(P("o.zip"), "rb").read() == plain)
-        chk("slack_bytes и comment_len посчитаны верно",
+        chk("slack_bytes and comment_len computed correctly",
             (r.slack_bytes, r.comment_len) == (20 + 6 * len(base) + 5, 3), (r.slack_bytes, r.comment_len))
         src = wr("m.zip", inject(plain, mid=b"DEAD"))
         r = rebuild(src, P("o.zip"))
-        chk("мёртвая зона перед EOCD: без strip отказ (zipfile не откроет выход)", not r.ok and bool(r.errors))
+        chk("dead zone before EOCD: refused without strip (zipfile wouldn't open the output)", not r.ok and bool(r.errors))
         r = rebuild(src, P("o.zip"), strip_slack=True)
-        chk("мёртвая зона перед EOCD: со strip чистый выход",
+        chk("dead zone before EOCD: clean output with strip",
             r.ok and open(P("o.zip"), "rb").read() == plain, r.errors)
 
-        # патологии: везде ok=False, errors, вход не изменён, dst не создан
-        bad("пустой файл", b"")
-        bad("мусор", b"x" * 100)
-        bad("PK-сигнатура, не ZIP", b"PK\x03\x04" + b"junk" * 50)
-        bad("PK EOCD-сигнатура, не ZIP", b"PK\x05\x06" + b"\xff" * 40)
-        bad("только PK", b"PK")
-        fake = b"PK\x05\x06" + b"\x00" * 18          # EOCD «пустого архива» внутри комментария
-        bad("поддельный EOCD в конце комментария", plain[:-2] + struct.pack("<H", 22) + fake)
-        bad("поддельный EOCD в середине комментария", plain[:-2] + struct.pack("<H", 24) + fake + b"zz")
-        bad("настоящий EOCD + мусор с поддельным", plain + fake + b"zz")
+        # pathologies: always ok=False, errors, input unchanged, dst not created
+        bad("empty file", b"")
+        bad("junk", b"x" * 100)
+        bad("PK signature, not a ZIP", b"PK\x03\x04" + b"junk" * 50)
+        bad("PK EOCD signature, not a ZIP", b"PK\x05\x06" + b"\xff" * 40)
+        bad("just PK", b"PK")
+        fake = b"PK\x05\x06" + b"\x00" * 18          # an "empty archive" EOCD inside the comment
+        bad("forged EOCD at the end of the comment", plain[:-2] + struct.pack("<H", 22) + fake)
+        bad("forged EOCD in the middle of the comment", plain[:-2] + struct.pack("<H", 24) + fake + b"zz")
+        bad("real EOCD + junk with a forged one", plain + fake + b"zz")
         for cut in (22, 60, len(plain) // 2, len(plain) - 1, len(plain) - 22):
-            bad("обрезан на %d" % cut, plain[:cut])
+            bad("truncated at %d" % cut, plain[:cut])
         bad("traversal ../../x", mk([("../../x", b"1", 8, D0)]))
-        bad("traversal в глубине", mk([("a/../../x", b"1", 8, D0)]))
-        bad("traversal, обратные слэши", mk([("..\\..\\x", b"1", 8, D0)]))
-        bad("абсолютный путь", mk([("/etc/x", b"1", 8, D0)]))
-        bad("диск", mk([("C:/x", b"1", 8, D0)]))
+        bad("deep traversal", mk([("a/../../x", b"1", 8, D0)]))
+        bad("traversal, backslashes", mk([("..\\..\\x", b"1", 8, D0)]))
+        bad("absolute path", mk([("/etc/x", b"1", 8, D0)]))
+        bad("drive letter", mk([("C:/x", b"1", 8, D0)]))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            bad("дубль имён", mk([("a.xml", b"1", 8, D0), ("a.xml", b"2", 8, D0)]))
-            bad("дубль, отличие регистра", mk([("a.xml", b"1", 8, D0), ("A.XML", b"2", 8, D0)]))
-        bad("метод bzip2", mk([("a.xml", b"1" * 99, zipfile.ZIP_BZIP2, D0)]))
+            bad("duplicate names", mk([("a.xml", b"1", 8, D0), ("a.xml", b"2", 8, D0)]))
+            bad("duplicate, case differs", mk([("a.xml", b"1", 8, D0), ("A.XML", b"2", 8, D0)]))
+        bad("bzip2 method", mk([("a.xml", b"1" * 99, zipfile.ZIP_BZIP2, D0)]))
         enc = bytearray(plain)
         struct.pack_into("<H", enc, struct.unpack_from("<L", enc, enc.rfind(_SIG_EOCD) + 16)[0] + 8, 1)
-        bad("флаг шифрования", bytes(enc))
-        bad("replace несуществующей части", plain, replace={"нет.xml": b"1"})
-        bad("replace и drop одной части", plain,
+        bad("encryption flag", bytes(enc))
+        bad("replace a part that doesn't exist", plain, replace={"missing.xml": b"1"})
+        bad("replace and drop of the same part", plain,
             replace={"docProps/app.xml": b"1"}, drop={"docProps/app.xml"})
-        bad("replace: не bytes", plain, replace={"docProps/app.xml": "строка"})
+        bad("replace: not bytes", plain, replace={"docProps/app.xml": "string"})
         src = wr("same.zip", plain)
         r = rebuild(src, src)
-        chk("вход == выход: отказ и вход цел", (not r.ok) and open(src, "rb").read() == plain)
-        # зип-бомба: 70 МБ нулей жмутся в ~70 КБ; распаковки при пересборке нет вовсе
+        chk("input == output: refused and input intact", (not r.ok) and open(src, "rb").read() == plain)
+        # zip bomb: 70 MB of zeros compress to ~70 KB; the rebuild doesn't decompress at all
         co = zlib.compressobj(9, zlib.DEFLATED, -15)
         body = b"".join(co.compress(b"\x00" * (1 << 20)) for _ in range(70)) + co.flush()
-        bad("зип-бомба (70 МБ из %d КБ)" % (len(body) >> 10),
+        bad("zip bomb (70 MB from %d KB)" % (len(body) >> 10),
             _mk_raw("a.xml", body, 70 << 20, _crc_zeros(70 << 20)))
         b = bytearray(plain)
         b[0:4] = b"XXXX"
-        bad("битый локальный заголовок", bytes(b))
+        bad("broken local header", bytes(b))
         b = bytearray(plain)
         b[struct.unpack_from("<L", b, b.rfind(_SIG_EOCD) + 16)[0] + 46] ^= 0x20
-        bad("имя в каталоге != имени в локальном заголовке", bytes(b))
+        bad("name in the directory != name in the local header", bytes(b))
         b = bytearray(plain)
         for at in (8, 10):
             struct.pack_into("<H", b, b.rfind(_SIG_EOCD) + at, len(base) + 5)
-        bad("в EOCD записей больше, чем в каталоге", bytes(b))
+        bad("EOCD lists more entries than the directory", bytes(b))
         b = bytearray(plain)
         struct.pack_into("<L", b, b.rfind(_SIG_EOCD) + 16, 3)
-        bad("смещение каталога указывает в никуда", bytes(b))
+        bad("the directory offset points nowhere", bytes(b))
         keep = wr("keep.zip", b"old content")
         r = rebuild(wr("p2.zip", b"junk" * 20), keep)
-        chk("отказ не трогает существующий dst", (not r.ok) and open(keep, "rb").read() == b"old content")
-        r = rebuild(P("нет_такого.zip"), P("q.zip"))
-        chk("нет входного файла: ok=False, без исключения, без пути в тексте",
+        chk("a refusal doesn't touch an existing dst", (not r.ok) and open(keep, "rb").read() == b"old content")
+        r = rebuild(P("no_such_file.zip"), P("q.zip"))
+        chk("no input file: ok=False, no exception, no path in the text",
             (not r.ok) and r.errors and td not in " ".join(r.errors), r.errors)
-        r = rebuild(wr("p3.zip", plain), os.path.join(td, "нет_каталога", "o.zip"))
-        chk("нельзя записать выход: ok=False без исключения", not r.ok and bool(r.errors))
-        chk("entries() на мусоре и на отсутствующем файле: []",
-            entries(wr("g.zip", b"PK\x03\x04 junk")) == [] and entries(P("нет")) == [])
+        r = rebuild(wr("p3.zip", plain), os.path.join(td, "no_such_dir", "o.zip"))
+        chk("output can't be written: ok=False without an exception", not r.ok and bool(r.errors))
+        chk("entries() on junk and on a missing file: []",
+            entries(wr("g.zip", b"PK\x03\x04 junk")) == [] and entries(P("missing")) == [])
         src = wr("e.zip", plain)
         with zipfile.ZipFile(src) as zf:
             want = [(i.filename, i.date_time, i.compress_type, i.compress_size, i.file_size, i.CRC,
@@ -1124,7 +1135,7 @@ def _selftest():
               e.flag_bits, e.header_offset) for e in entries(src)] == want)
         chk("entries(): order", [e.order for e in entries(src)] == list(range(len(want))))
 
-        # фазз: порча валидного архива. Не бросать, вход цел, ok => выход валиден, .part не остаётся
+        # fuzzing: corrupting a valid archive. Don't raise, input intact, ok => valid output, no .part left
         pool = [plain, raw64, raw64d, junk]
         for it in range(300):
             raw = bytearray(rnd.choice(pool))
@@ -1143,22 +1154,22 @@ def _selftest():
                 entries(src)
                 r = rebuild(src, P("fo.zip"), replace={"docProps/core.xml": b"<n/>"} if it % 2 else None)
             except Exception as exc:  # noqa: BLE001
-                chk("фазз %d: не бросает" % it, False, repr(exc))
+                chk("fuzz %d: doesn't raise" % it, False, repr(exc))
                 continue
-            chk("фазз %d: вход цел" % it, sha(src) == h0)
+            chk("fuzz %d: input intact" % it, sha(src) == h0)
             if r.ok:
                 try:
                     with zipfile.ZipFile(P("fo.zip")) as zf:
                         good = zf.testzip() is None
                 except Exception:  # noqa: BLE001
                     good = False
-                chk("фазз %d: ok => выход валиден" % it, good)
-            chk("фазз %d: .part не осталось" % it, not os.path.exists(P("fo.zip.part")))
+                chk("fuzz %d: ok => valid output" % it, good)
+            chk("fuzz %d: no .part left" % it, not os.path.exists(P("fo.zip.part")))
             if os.path.exists(P("fo.zip")):
                 os.remove(P("fo.zip"))
     finally:
         shutil.rmtree(td, ignore_errors=True)
-    print("ИТОГО: %d проверок, %d провалено" % tuple(stat))
+    print("TOTAL: %d checks, %d failed" % tuple(stat))
     return stat[1] == 0
 
 
@@ -1168,11 +1179,11 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         good = True
         for n, p in enumerate(sys.argv[1:], 1):
-            print("файл %d:" % n)
+            print("file %d:" % n)
             try:
                 good &= _check_file(p, print)
             except Exception as exc:  # noqa: BLE001
                 good = False
-                print("  ПРОВАЛ проверки: %s" % type(exc).__name__)
+                print("  check FAILED: %s" % type(exc).__name__)
         sys.exit(0 if good else 1)
     sys.exit(0 if _selftest() else 1)

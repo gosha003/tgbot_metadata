@@ -1,58 +1,62 @@
 # -*- coding: utf-8 -*-
-"""Чистка растровых картинок БЕЗ перекодирования: JPEG, PNG, WebP, GIF.
+"""Cleaning raster images WITHOUT re-encoding: JPEG, PNG, WebP, GIF.
 
-Фаза 1. Только stdlib (struct, zlib, binascii, hashlib, re) -- ни Pillow, ни
-обязательного exiftool.
+Phase 1. Stdlib only (struct, zlib, binascii, hashlib, re): no Pillow, no
+required exiftool.
 
-ГЛАВНЫЙ ПРИНЦИП: НЕ ПЕРЕКОДИРОВАТЬ. Картинка пересобирается как КОНТЕЙНЕР:
-сжатые данные (энтропийный поток JPEG, IDAT PNG, VP8/VP8L WebP, LZW GIF)
-копируются байт в байт. Перекодирование потеряло бы качество и заменило бы
-таблицы квантования JPEG -- а они сами фингерпринтят энкодер: вместо отпечатка
-камеры получился бы отпечаток нашей библиотеки. Это хуже, чем не чистить.
+THE MAIN PRINCIPLE: DON'T RE-ENCODE. The image is rebuilt as a CONTAINER: the
+compressed data (JPEG entropy stream, PNG IDAT, WebP VP8/VP8L, GIF LZW) is
+copied byte for byte. Re-encoding would lose quality and replace the JPEG
+quantization tables, which fingerprint the encoder themselves: instead of the
+camera's fingerprint the file would carry our library's. That's worse than
+not cleaning.
 
-Проверка результата -- не наша собственная логика, а повторный прогон
-инспектора (inspect_file(dst).critical == 0). Здесь же, в verify_image(),
-доказывается, что файл не испорчен: структура валидна, размеры те же, сжатые
-данные совпали бит в бит, ориентация сохранена.
+The result is verified not by our own logic but by a second run of the
+inspector (inspect_file(dst).critical == 0). verify_image() proves here that
+the file isn't damaged: the structure is valid, dimensions are the same, the
+compressed data matches bit for bit, the orientation is preserved.
 
-РЕШЕНИЯ (каждое осознанное):
+DECISIONS (each deliberate):
 
-* ОРИЕНТАЦИЯ. Телефон кладёт кадр в файл повёрнутым, а правильный поворот
-  задаёт EXIF Orientation (0x0112). Снести весь APP1 -- значит получить
-  картинку на боку. Физический поворот требует перекодирования (запрещено).
-  Выбрано (а)+(в): если Orientation в 2..8, пишем МИНИМАЛЬНЫЙ EXIF -- один IFD,
-  один тег, 36 байт сегмента, порядок байтов как в исходнике; всё остальное
-  (GPS, серийники, даты, MakerNote, миниатюра) уходит. Orientation = 1 или его
-  нет -- EXIF не пишем вообще (1 и так значение по умолчанию). То же для PNG
-  (чанк eXIf) и WebP (чанк EXIF).
-* ICC-ПРОФИЛЬ -- STRUCTURAL: без него цвета едут. STEALTH сохраняет, PARANOID
-  убирает с предупреждением (имя профиля часто названо по монитору/принтеру).
-  keep={"icc"} оставляет профиль и в PARANOID.
-* JFIF (APP0) оставляем в обоих профилях: плотность пикселей -- STRUCTURAL, а
-  отсутствие и EXIF, и JFIF само по себе заметно. Но вшитую миниатюру JFIF
-  отрезаем (Xthumbnail=Ythumbnail=0): она могла быть сделана до ретуши.
-* Adobe APP14 убираем, КРОМЕ случая, когда без него цвета ломаются: 4-компонентный
-  (CMYK/YCCK) или 3-компонентный с transform=0 (RGB в JPEG). Тогда это уже не
-  метаданные, а параметр декодирования -- сохраняем 12 байт и помечаем KEPT.
-* Таблицы квантования (DQT) убрать нельзя -- Act.UNREMOVABLE.
-* Данные ПОСЛЕ конца изображения (после EOI/IEND/RIFF/GIF-trailer) выбрасываем:
-  классический тайник, и инспектор считает их ENVIRONMENT. Побочно уходят
-  MPF-кадры, видео Motion Photo и gain map Ultra HDR -- это честная цена.
-* TIFF и HEIC: честный отказ (ok=False). Метаданные TIFF лежат в самих IFD
-  вперемешку со ссылками на данные, HEIF -- в iloc-элементах; пересборка без
-  специального кода рискует испортить файл. Отказ лучше порчи.
-* Профили: для картинок STEALTH и PARANOID одинаково убирают ВСЕ контейнеры
-  метаданных, включая PROVENANCE (даты, Make/Model, Software): по условию задачи
-  даты и серийники обязаны исчезнуть, а выборочная пересборка EXIF потребовала
-  бы переписывать смещения IFD. Отличие профилей -- ICC. Файл без EXIF для
-  картинки -- рядовое состояние (так делают мессенджеры), цена невелика.
-  REGENERATE для картинок не имеет смысла и трактуется как PARANOID.
+* ORIENTATION. A phone stores the frame rotated in the file, and the correct
+  rotation is given by EXIF Orientation (0x0112). Dropping the whole APP1
+  would leave the picture on its side. Physical rotation requires
+  re-encoding (forbidden). Chosen (a)+(c): if Orientation is 2..8, write a
+  MINIMAL EXIF: one IFD, one tag, a 36-byte segment, byte order as in the
+  source; everything else (GPS, serials, dates, MakerNote, thumbnail) goes.
+  Orientation = 1 or missing: no EXIF at all (1 is the default anyway). Same
+  for PNG (the eXIf chunk) and WebP (the EXIF chunk).
+* The ICC PROFILE is STRUCTURAL: colors shift without it. STEALTH keeps it,
+  PARANOID removes it with a warning (the profile name is often named after
+  the monitor/printer). keep={"icc"} keeps the profile in PARANOID too.
+* JFIF (APP0) stays in both profiles: pixel density is STRUCTURAL, and
+  having neither EXIF nor JFIF stands out by itself. But the embedded JFIF
+  thumbnail is cut off (Xthumbnail=Ythumbnail=0): it may predate retouching.
+* Adobe APP14 is removed, EXCEPT when colors break without it: 4-component
+  (CMYK/YCCK) or 3-component with transform=0 (RGB in JPEG). Then it isn't
+  metadata but a decoding parameter: the 12 bytes are kept and marked KEPT.
+* Quantization tables (DQT) can't be removed: Act.UNREMOVABLE.
+* Data AFTER the end of the image (after EOI/IEND/RIFF/GIF trailer) is
+  dropped: a classic hiding place, and the inspector counts it as
+  ENVIRONMENT. MPF frames, Motion Photo video and the Ultra HDR gain map go
+  along with it; that's the honest price.
+* TIFF and HEIC: honest refusal (ok=False). TIFF metadata lives in the IFDs
+  themselves, mixed with references to the data; HEIF's in iloc items;
+  rebuilding without dedicated code risks damaging the file. Refusing is
+  better than damage.
+* Profiles: for images STEALTH and PARANOID both remove ALL metadata
+  containers, PROVENANCE included (dates, Make/Model, Software): by the
+  requirements dates and serials must disappear, and selectively rebuilding
+  EXIF would mean rewriting IFD offsets. The profiles differ in ICC. An image
+  without EXIF is an ordinary state (messengers do this), so the cost is low.
+  REGENERATE makes no sense for images and is treated as PARANOID.
 
-Никаких исключений наружу: каждая секция в try/except, проблема -- res.err().
-Вход не модифицируется никогда: пишем только в dst, sha256 входа сверяется
-до и после. Логов нет: имена файлов и содержимое находок не печатаются.
+Nothing is raised: every section is in try/except, problems go to res.err().
+The input is never modified: only dst is written, the input's sha256 is
+compared before and after. No logs: file names and finding contents are
+never printed.
 
-Публичный API:
+Public API:
     clean_image(src, dst, profile=Profile.STEALTH, keep=None) -> CleanResult
     verify_image(src, dst) -> dict
 """
@@ -70,34 +74,36 @@ from collections import Counter
 from core import sniff
 from core.cleanmodel import Act, CleanResult, Profile
 from core.model import clip
+from core.i18n import N_, tr
 
 SUPPORTED = ("jpeg", "png", "webp", "gif")
 
-# --- пределы: на вход приходят битые и намеренно кривые файлы ---------------
-MAX_FILE = 50 * 1024 * 1024      # больше в память не берём (как и инспектор)
-MAX_SEGMENTS = 4096              # маркеров JPEG
-MAX_CHUNKS = 100_000             # чанков PNG/WebP/блоков GIF (IDAT по 8 КБ -- тысячи)
-MAX_RAW = 256 * 1024 * 1024      # потолок распаковки IDAT при проверке (бомбы)
+# --- limits: broken and deliberately malformed files come in ---------------
+MAX_FILE = 50 * 1024 * 1024      # never load more into memory (same as the inspector)
+MAX_SEGMENTS = 4096              # JPEG markers
+MAX_CHUNKS = 100_000             # PNG/WebP chunks, GIF blocks (8 KB IDATs: thousands)
+MAX_RAW = 256 * 1024 * 1024      # IDAT decompression ceiling during verification (bombs)
 MAX_IFDS = 16
 MAX_ENTRIES = 1000
-MAX_NAMED = 40                   # поимённых действий на один EXIF
+MAX_NAMED = 40                   # named actions per EXIF
 
-# Поворот/отражение по коду EXIF Orientation. 1 -- норма, отдельно не описываем.
+# Rotation/mirroring by EXIF Orientation code. 1 is normal and isn't described.
 _ORIENT = {
-    2: "зеркально по горизонтали", 3: "поворот на 180°", 4: "зеркально по вертикали",
-    5: "зеркало и поворот на 270°", 6: "поворот на 90° по часовой стрелке",
-    7: "зеркало и поворот на 90°", 8: "поворот на 270° по часовой (90° против)",
+    2: N_("mirrored horizontally"), 3: N_("rotated 180°"), 4: N_("mirrored vertically"),
+    5: N_("mirrored and rotated 270°"), 6: N_("rotated 90° clockwise"),
+    7: N_("mirrored and rotated 90°"), 8: N_("rotated 270° clockwise (90° counterclockwise)"),
 }
 
 C2PA_NOTE = (
-    "Криптографически подписанный манифест происхождения (C2PA / Content Credentials) удалён. "
-    "Сам срез ДЕТЕКТИРУЕМ: получатель видит, что подпись была и её убрали; при наличии "
-    "soft-binding или водяного знака происхождение восстанавливается и без этого блока"
+    N_("A cryptographically signed provenance manifest (C2PA / Content Credentials) was removed. "
+       "The removal itself is DETECTABLE: the recipient sees that a signature existed and was "
+       "stripped; with a soft binding or a watermark, provenance can be recovered even without "
+       "this block")
 )
 
 
 # ===========================================================================
-# мелочи
+# small helpers
 # ===========================================================================
 
 def _sha(blob) -> str:
@@ -113,7 +119,7 @@ def _file_sha(path) -> str:
 
 
 def _same_path(a, b) -> bool:
-    """dst не должен совпасть с src: вход не перезаписываем никогда."""
+    """dst must not equal src: the input is never overwritten."""
     try:
         if os.path.exists(b) and os.path.samefile(a, b):
             return True
@@ -123,12 +129,12 @@ def _same_path(a, b) -> bool:
 
 
 def _ident(pay) -> str:
-    """Метка сегмента (строка до NUL) для отчёта: по ней видно, кто его записал."""
+    """A segment's tag (the string up to NUL) for the report: it shows who wrote it."""
     return clip(bytes(pay[:24]).split(b"\0")[0].decode("latin-1"), 40)
 
 
 # ===========================================================================
-# EXIF: лёгкий разбор (ориентация + что вообще лежало) и минимальная пересборка
+# EXIF: light parsing (orientation + what was there at all) and a minimal rebuild
 # ===========================================================================
 
 _TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8,
@@ -136,7 +142,7 @@ _TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8,
 _SUB_IFD = {0x8769: "ExifIFD", 0x8825: "GPS", 0xA005: "Interop", 0x014A: "SubIFD"}
 _XP = (0x9C9B, 0x9C9C, 0x9C9D, 0x9C9E, 0x9C9F)
 
-# Теги, которые показываем поимённо (значение попадает в before).
+# Tags shown by name (the value goes into before).
 _EXIF_NAMES = {
     0x010E: "ImageDescription", 0x010F: "Make", 0x0110: "Model", 0x0131: "Software",
     0x0132: "DateTime", 0x013B: "Artist", 0x013C: "HostComputer", 0x8298: "Copyright",
@@ -154,29 +160,29 @@ def _exif_text(tag, typ, raw) -> str:
         return ""
     if tag in _XP:
         return bytes(raw).decode("utf-16-le", "replace").rstrip("\0")
-    if tag == 0x9286:                      # UserComment: первые 8 байт -- кодировка
+    if tag == 0x9286:                      # UserComment: the first 8 bytes are the encoding
         return bytes(raw[8:]).decode("utf-8", "replace").strip("\0 ")
     if typ == 2:
         return bytes(raw).split(b"\0")[0].decode("utf-8", "replace")
-    return "<%d байт>" % len(raw)
+    return tr("<%d bytes>") % len(raw)
 
 
 def _exif_scan(blob) -> dict:
-    """Лёгкий обход TIFF/EXIF. Не бросает, обход ограничен (EXIF умеет зацикливаться).
+    """Light TIFF/EXIF walk. Never raises; the walk is bounded (EXIF can loop).
 
-    -> {order, orient, named[(имя, значение)], gps, maker, thumb, other, bad}
+    -> {order, orient, named[(name, value)], gps, maker, thumb, other, bad}
     """
     out = {"order": None, "orient": None, "named": [], "gps": 0, "maker": 0,
            "thumb": 0, "other": 0, "bad": ""}
     blob = bytes(blob)
     if len(blob) < 8 or blob[:2] not in (b"II", b"MM"):
-        out["bad"] = "нет заголовка TIFF"
+        out["bad"] = tr("no TIFF header")
         return out
     en = "<" if blob[:2] == b"II" else ">"
     out["order"] = blob[:2]
     try:
         if struct.unpack_from(en + "H", blob, 2)[0] != 42:
-            out["bad"] = "неверная сигнатура TIFF"
+            out["bad"] = tr("invalid TIFF signature")
             return out
         queue = [(struct.unpack_from(en + "I", blob, 4)[0], "IFD0")]
         seen = set()
@@ -224,60 +230,63 @@ def _exif_scan(blob) -> dict:
                 if nxt:
                     queue.append((nxt, "IFD%d" % (int(name[3:]) + 1)))
     except (struct.error, ValueError, IndexError) as exc:
-        out["bad"] = "EXIF оборван (%s)" % type(exc).__name__
+        out["bad"] = tr("EXIF cut off (%s)") % type(exc).__name__
     return out
 
 
 def _min_tiff(orient, order) -> bytes:
-    """Минимальный TIFF-поток: один IFD0 с единственным тегом Orientation (26 байт)."""
+    """Minimal TIFF stream: one IFD0 with the single Orientation tag (26 bytes)."""
     e = "<" if order == b"II" else ">"
     return (order + struct.pack(e + "HI", 42, 8) + struct.pack(e + "H", 1)
             + struct.pack(e + "HHIHH", 0x0112, 3, 1, orient, 0) + struct.pack(e + "I", 0))
 
 
 def _min_app1(orient, order) -> bytes:
-    """Сегмент APP1 JPEG с минимальным EXIF: 36 байт вместе с маркером (поле длины = 34)."""
+    """A JPEG APP1 segment with a minimal EXIF: 36 bytes including the marker (length field = 34)."""
     body = b"Exif\0\0" + _min_tiff(orient, order)
     return b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body
 
 
 def _exif_acts(res, scan, loc, size, kept_orient) -> None:
-    """Построчный отчёт: что было в EXIF и что осталось (только Orientation)."""
+    """Line-by-line report: what was in the EXIF and what remains (only Orientation)."""
     if scan["bad"]:
-        res.act(Act.REMOVED, loc, "EXIF (не разобран)", "%d байт" % size,
-                note="Блок не разобрался (%s) и удалён целиком; ориентацию восстановить "
-                     "нельзя" % scan["bad"])
+        res.act(Act.REMOVED, loc, tr("EXIF (not parsed)"), tr("%d bytes") % size,
+                note=tr("The block couldn't be parsed (%s) and was removed entirely; the "
+                        "orientation can't be restored") % scan["bad"])
         return
     for label, value in scan["named"][:MAX_NAMED]:
         res.act(Act.REMOVED, loc, "EXIF " + label, value)
     hidden = max(0, len(scan["named"]) - MAX_NAMED)
     if scan["gps"]:
-        res.act(Act.REMOVED, loc, "GPS", "%d тег(ов)" % scan["gps"],
-                note="Координаты, высота, время и метки GPS: по ним находят человека, а не файл")
+        res.act(Act.REMOVED, loc, "GPS", tr("%d tag(s)") % scan["gps"],
+                note=tr("GPS coordinates, altitude, time and tags: they locate a person, not a "
+                        "file"))
     if scan["maker"]:
-        res.act(Act.REMOVED, loc, "MakerNote", "%d байт" % scan["maker"],
-                note="Проприетарный блок камеры: серийник экземпляра, счётчик затвора, настройки")
+        res.act(Act.REMOVED, loc, "MakerNote", tr("%d bytes") % scan["maker"],
+                note=tr("Proprietary camera block: the unit's serial number, shutter count, "
+                        "settings"))
     if scan["thumb"]:
-        res.act(Act.REMOVED, loc, "Встроенная миниатюра",
-                "%d байт" % scan["thumb"] if scan["thumb"] > 1 else "есть",
-                note="Миниатюра могла быть сделана ДО ретуши и кропа")
+        res.act(Act.REMOVED, loc, tr("Embedded thumbnail"),
+                tr("%d bytes") % scan["thumb"] if scan["thumb"] > 1 else tr("present"),
+                note=tr("The thumbnail may have been made BEFORE retouching and cropping"))
     if scan["other"] or hidden:
-        res.act(Act.REMOVED, loc, "Прочие теги EXIF", "%d шт" % (scan["other"] + hidden),
-                note="Параметры съёмки и геометрия: вместе фингерпринтят конкретную камеру")
+        res.act(Act.REMOVED, loc, tr("Other EXIF tags"), tr("%d pcs") % (scan["other"] + hidden),
+                note=tr("Shooting parameters and geometry: together they fingerprint a specific "
+                        "camera"))
     o = scan["orient"]
     if kept_orient:
-        res.act(Act.KEPT, loc, "Orientation (ориентация кадра)", str(o),
-                "%d (единственный тег минимального EXIF)" % o,
-                note="STRUCTURAL: снимок лежит в файле повёрнутым (%s). Без этого тега "
-                     "картинка отобразится на боку. Физический поворот потребовал бы "
-                     "перекодирования, поэтому оставлен один тег, остальное удалено" % _ORIENT[o])
+        res.act(Act.KEPT, loc, tr("Orientation (frame orientation)"), str(o),
+                tr("%d (the only tag of the minimal EXIF)") % o,
+                note=tr("STRUCTURAL: the shot is stored rotated (%s). Without this tag the "
+                        "picture would display on its side. Physical rotation would require "
+                        "re-encoding, so one tag is kept and the rest removed") % tr(_ORIENT[o]))
     elif o == 1:
         res.act(Act.REMOVED, loc, "Orientation", "1",
-                note="Значение по умолчанию: без тега картинка отображается так же")
+                note=tr("Default value: the picture displays the same without the tag"))
     elif o in _ORIENT:
         res.act(Act.REMOVED, loc, "Orientation", str(o),
-                note="Тег не сохранён: этот EXIF-блок просмотрщики не используют (стоит после "
-                     "данных изображения, повторяет уже сохранённый или лежит в WebP без VP8X)")
+                note=tr("Tag not kept: viewers don't use this EXIF block (it comes after the "
+                        "image data, repeats one already kept, or sits in a WebP without VP8X)"))
 
 
 # ===========================================================================
@@ -285,34 +294,34 @@ def _exif_acts(res, scan, loc, size, kept_orient) -> None:
 # ===========================================================================
 
 _SOF = frozenset(m for m in range(0xC0, 0xD0) if m not in (0xC4, 0xC8, 0xCC))
-# Всё, что нужно декодеру: SOFn, DHT, DAC, DQT, DRI, DNL, SOS, JPEG-LS, TEM.
+# Everything the decoder needs: SOFn, DHT, DAC, DQT, DRI, DNL, SOS, JPEG-LS, TEM.
 _JPEG_IMG = frozenset(range(0xC0, 0xD0)) | {0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xF7, 0xF8, 0x01}
-# Конец энтропийных данных: FF, за которым не 00 (стаффинг), не RSTn и не FF (fill).
+# End of entropy-coded data: FF followed by neither 00 (stuffing), RSTn nor FF (fill).
 _SCAN_END = re.compile(rb"\xff(?=[^\x00\xd0-\xd7\xff])")
 
 
 def _jpeg_walk(data):
-    """Проход по маркерам. -> (segs, end, err); segs=[(маркер, start, stop)].
+    """Walk the markers. -> (segs, end, err); segs=[(marker, start, stop)].
 
-    У SOS stop включает энтропийные данные до следующего маркера. end -- смещение
-    сразу за EOI. Данные после первого EOI в segs не входят.
+    For SOS, stop includes the entropy-coded data up to the next marker. end is the
+    offset right after EOI. Data after the first EOI is not in segs.
     """
     n = len(data)
     if data[:2] != b"\xff\xd8":
-        return [], None, "нет маркера SOI"
+        return [], None, tr("no SOI marker")
     segs = [(0xD8, 0, 2)]
     pos = 2
     while True:
         if len(segs) > MAX_SEGMENTS:
-            return segs, None, "больше %d сегментов" % MAX_SEGMENTS
+            return segs, None, tr("more than %d segments") % MAX_SEGMENTS
         if pos >= n:
-            return segs, None, "файл оборван: нет маркера EOI"
+            return segs, None, tr("the file is cut off: no EOI marker")
         if data[pos] != 0xFF:
-            return segs, None, "на смещении %d ожидался маркер, найдено 0x%02X" % (pos, data[pos])
-        while pos + 1 < n and data[pos + 1] == 0xFF:      # fill-байты
+            return segs, None, tr("a marker was expected at offset %d, found 0x%02X") % (pos, data[pos])
+        while pos + 1 < n and data[pos + 1] == 0xFF:      # fill bytes
             pos += 1
         if pos + 1 >= n:
-            return segs, None, "поток обрывается на маркере"
+            return segs, None, tr("the stream ends on a marker")
         m = data[pos + 1]
         if m == 0xD9:
             segs.append((0xD9, pos, pos + 2))
@@ -322,15 +331,15 @@ def _jpeg_walk(data):
             pos += 2
             continue
         if 0xD0 <= m <= 0xD8:
-            return segs, None, "неожиданный маркер 0x%02X вне энтропийных данных" % m
+            return segs, None, tr("unexpected marker 0x%02X outside entropy-coded data") % m
         if pos + 4 > n:
-            return segs, None, "маркер 0x%02X без длины (файл обрезан)" % m
+            return segs, None, tr("marker 0x%02X without a length (the file is truncated)") % m
         length = struct.unpack_from(">H", data, pos + 2)[0]
         if length < 2:
-            return segs, None, "маркер 0x%02X объявляет длину %d" % (m, length)
+            return segs, None, tr("marker 0x%02X declares length %d") % (m, length)
         stop = pos + 2 + length
         if stop > n:
-            return segs, None, "сегмент 0x%02X обрезан (нужно %d байт, есть %d)" % (
+            return segs, None, tr("segment 0x%02X is truncated (%d bytes needed, %d available)") % (
                 m, length, n - pos - 2)
         if m == 0xDA:
             hit = _SCAN_END.search(data, stop)
@@ -340,7 +349,7 @@ def _jpeg_walk(data):
 
 
 def _jpeg_info(data, segs):
-    """(ширина, высота, число компонентов) из первого SOF или None."""
+    """(width, height, number of components) from the first SOF, or None."""
     for m, a, b in segs:
         if m in _SOF and b - a >= 10:
             _, h, w, nf = struct.unpack_from(">BHHB", data, a + 4)
@@ -357,7 +366,7 @@ def _count_dqt(pay) -> int:
 
 
 def _jfif_text(pay) -> str:
-    return "версия %d.%02d, плотность %dx%d, единицы %d" % (
+    return tr("version %d.%02d, density %dx%d, units %d") % (
         pay[5], pay[6], struct.unpack_from(">H", pay, 8)[0],
         struct.unpack_from(">H", pay, 10)[0], pay[7])
 
@@ -368,11 +377,11 @@ def _clean_jpeg(data, res, keep_icc):
         res.err("JPEG: " + err)
         return None
     if not any(m == 0xDA for m, _, _ in segs):
-        res.err("JPEG: нет данных изображения (SOS), чистить нечего")
+        res.err(tr("JPEG: no image data (SOS), nothing to clean"))
         return None
     info = _jpeg_info(data, segs)
     out, dqt, img_bytes = [], 0, 0
-    icc, c2pa = [0, 0], [0, 0]            # [частей, байт]
+    icc, c2pa = [0, 0], [0, 0]            # [parts, bytes]
     exif_kept = jfif_done = in_scans = False
     for m, a, b in segs:
         raw = data[a:b]
@@ -390,21 +399,22 @@ def _clean_jpeg(data, res, keep_icc):
                 jfif_done = True
                 new = pay[:12] + b"\0\0"
                 out.append(b"\xff\xe0" + struct.pack(">H", 16) + new)
-                res.act(Act.KEPT, "APP0:JFIF", "JFIF-заголовок", _jfif_text(pay),
+                res.act(Act.KEPT, "APP0:JFIF", tr("JFIF header"), _jfif_text(pay),
                         _jfif_text(new),
-                        note="STRUCTURAL: плотность пикселей нужна для размера при печати, а "
-                             "отсутствие и EXIF, и JFIF само заметно. Оставлен осознанно")
+                        note=tr("STRUCTURAL: pixel density sets the printed size, and having "
+                                "neither EXIF nor JFIF stands out by itself. Kept deliberately"))
                 if len(pay) > 14:
-                    res.act(Act.REMOVED, "APP0:JFIF", "Вшитая миниатюра JFIF",
-                            "%d байт" % (len(pay) - 14),
-                            note="Миниатюра могла быть сделана до ретуши и кропа")
+                    res.act(Act.REMOVED, "APP0:JFIF", tr("Embedded JFIF thumbnail"),
+                            tr("%d bytes") % (len(pay) - 14),
+                            note=tr("The thumbnail may have been made before retouching and "
+                                    "cropping"))
             else:
-                res.act(Act.REMOVED, "APP0", "Прочий сегмент APP0 (%s)" % _ident(pay),
-                        "%d байт" % len(pay), note="JFXX-миниатюра или чужой блок")
+                res.act(Act.REMOVED, "APP0", tr("Other APP0 segment (%s)") % _ident(pay),
+                        tr("%d bytes") % len(pay), note=tr("JFXX thumbnail or a foreign block"))
         elif m == 0xE1:
             if pay[:6] == b"Exif\0\0":
                 scan = _exif_scan(pay[6:])
-                # EXIF после первого SOS просмотрщики не читают: ориентацию оттуда не берём
+                # Viewers don't read EXIF after the first SOS: orientation isn't taken from there
                 keep_o = (not exif_kept) and (not in_scans) and scan["orient"] in _ORIENT
                 if keep_o:
                     out.append(_min_app1(scan["orient"], scan["order"]))
@@ -412,12 +422,12 @@ def _clean_jpeg(data, res, keep_icc):
                 _exif_acts(res, scan, "APP1:Exif", len(pay), keep_o)
             elif pay.startswith((b"http://ns.adobe.com/xap/1.0/\0",
                                  b"http://ns.adobe.com/xmp/extension/")):
-                res.act(Act.REMOVED, "APP1:XMP", "XMP-пакет", "%d байт" % len(pay),
-                        note="XMP дублирует EXIF и IPTC, несёт GUID документа (xmpMM) "
-                             "и историю правок")
+                res.act(Act.REMOVED, "APP1:XMP", tr("XMP packet"), tr("%d bytes") % len(pay),
+                        note=tr("XMP duplicates EXIF and IPTC and carries the document GUID "
+                                "(xmpMM) and edit history"))
             else:
-                res.act(Act.REMOVED, "APP1", "Неопознанный APP1 (%s)" % _ident(pay),
-                        "%d байт" % len(pay))
+                res.act(Act.REMOVED, "APP1", tr("Unrecognized APP1 (%s)") % _ident(pay),
+                        tr("%d bytes") % len(pay))
         elif m == 0xE2:
             if pay[:12] == b"ICC_PROFILE\0":
                 icc[0] += 1
@@ -425,82 +435,85 @@ def _clean_jpeg(data, res, keep_icc):
                 if keep_icc:
                     out.append(raw)
             elif pay[:4] == b"MPF\0":
-                res.act(Act.REMOVED, "APP2:MPF", "Multi-Picture Format", "%d байт" % len(pay),
-                        note="Индекс нескольких кадров в одном файле; сами кадры лежат за EOI "
-                             "и уходят вместе с хвостом")
+                res.act(Act.REMOVED, "APP2:MPF", "Multi-Picture Format", tr("%d bytes") % len(pay),
+                        note=tr("An index of several frames in one file; the frames themselves "
+                                "sit after EOI and go with the tail"))
             else:
-                res.act(Act.REMOVED, "APP2", "Неопознанный APP2 (%s)" % _ident(pay),
-                        "%d байт" % len(pay))
+                res.act(Act.REMOVED, "APP2", tr("Unrecognized APP2 (%s)") % _ident(pay),
+                        tr("%d bytes") % len(pay))
         elif m == 0xEB:
             low = bytes(pay[:4096])
             if any(t in low for t in (b"jumb", b"c2pa", b"jumd")):
                 c2pa[0] += 1
                 c2pa[1] += len(pay)
             else:
-                res.act(Act.REMOVED, "APP11", "JUMBF-контейнер без меток C2PA",
-                        "%d байт" % len(pay))
+                res.act(Act.REMOVED, "APP11", tr("JUMBF container without C2PA labels"),
+                        tr("%d bytes") % len(pay))
         elif m == 0xED:
-            res.act(Act.REMOVED, "APP13:Photoshop", "Photoshop IRB / IPTC", "%d байт" % len(pay),
-                    note="IPTC-IIM (подпись, ключевые слова, авторство, адрес), миниатюра "
-                         "Photoshop и XMP-копия")
+            res.act(Act.REMOVED, "APP13:Photoshop", "Photoshop IRB / IPTC", tr("%d bytes") % len(pay),
+                    note=tr("IPTC-IIM (caption, keywords, authorship, address), Photoshop "
+                            "thumbnail and an XMP copy"))
         elif m == 0xEE:
             transform = pay[11] if pay[:5] == b"Adobe" and len(pay) >= 12 else None
             need = bool(info) and transform is not None and (
                 info[2] == 4 or (info[2] == 3 and transform == 0))
             if need:
                 out.append(b"\xff\xee" + struct.pack(">H", 14) + pay[:12])
-                res.act(Act.KEPT, "APP14:Adobe", "Маркер Adobe (transform=%d)" % transform,
-                        "%d байт" % len(pay), "12 байт",
-                        note="Это не метаданные, а параметр декодирования: без маркера декодер "
-                             "угадывает модель по умолчанию (%s) и цвета исказятся. "
-                             "Версия и флаги не несут идентичности"
-                             % ("YCCK прочтётся как CMYK, инверсия Adobe потеряется"
-                                if info[2] == 4 else "RGB в JPEG прочтётся как YCbCr"))
+                res.act(Act.KEPT, "APP14:Adobe", tr("Adobe marker (transform=%d)") % transform,
+                        tr("%d bytes") % len(pay), tr("12 bytes"),
+                        note=tr("This isn't metadata but a decoding parameter: without the "
+                                "marker the decoder guesses the default model (%s) and colors "
+                                "get distorted. Version and flags carry no identity")
+                             % (tr("YCCK would be read as CMYK and the Adobe inversion would be "
+                                   "lost")
+                                if info[2] == 4 else tr("RGB in JPEG would be read as YCbCr")))
             else:
-                res.act(Act.REMOVED, "APP14:Adobe", "Маркер Adobe", "%d байт" % len(pay),
-                        note="Говорит, что файл прошёл через софт Adobe. Для YCbCr по умолчанию "
-                             "цвета не изменятся")
+                res.act(Act.REMOVED, "APP14:Adobe", tr("Adobe marker"), tr("%d bytes") % len(pay),
+                        note=tr("Says the file went through Adobe software. For default YCbCr "
+                                "the colors won't change"))
         elif m == 0xFE:
-            res.act(Act.REMOVED, "COM", "Комментарий JPEG",
+            res.act(Act.REMOVED, "COM", tr("JPEG comment"),
                     bytes(pay).decode("utf-8", "replace").strip("\0"),
-                    note="Кодировщики пишут сюда имя и версию, люди -- что угодно")
+                    note=tr("Encoders write their name and version here, people write anything"))
         elif 0xE3 <= m <= 0xEF:
-            res.act(Act.REMOVED, "APP%d" % (m - 0xE0), "Нестандартный сегмент (%s)" % _ident(pay),
-                    "%d байт" % len(pay), note="Приложение записало свой блок произвольного вида")
+            res.act(Act.REMOVED, "APP%d" % (m - 0xE0), tr("Non-standard segment (%s)") % _ident(pay),
+                    tr("%d bytes") % len(pay), note=tr("An application wrote its own block of "
+                                                  "arbitrary form"))
         else:
-            res.act(Act.REMOVED, "0x%02X" % m, "Неизвестный маркер", "%d байт" % len(pay),
-                    note="Резервный или приватный маркер: декодеру не нужен")
+            res.act(Act.REMOVED, "0x%02X" % m, tr("Unknown marker"), tr("%d bytes") % len(pay),
+                    note=tr("A reserved or private marker: the decoder doesn't need it"))
     if c2pa[0]:
-        res.act(Act.REMOVED, "APP11:JUMBF", "Манифест C2PA / Content Credentials",
-                "%d сегм., %d байт" % tuple(c2pa), note=C2PA_NOTE)
+        res.act(Act.REMOVED, "APP11:JUMBF", tr("C2PA / Content Credentials manifest"),
+                tr("%d segm., %d bytes") % tuple(c2pa), note=tr(C2PA_NOTE))
     if icc[0]:
         if keep_icc:
-            res.act(Act.KEPT, "APP2:ICC_PROFILE", "ICC-профиль",
-                    "%d част., %d байт" % tuple(icc), "без изменений",
-                    note="STRUCTURAL: нужен для правильной цветопередачи. Имя профиля иногда "
-                         "названо по монитору или принтеру -- оставлено осознанно; для полной "
-                         "чистоты используйте PARANOID")
+            res.act(Act.KEPT, "APP2:ICC_PROFILE", tr("ICC profile"),
+                    tr("%d parts, %d bytes") % tuple(icc), tr("unchanged"),
+                    note=tr("STRUCTURAL: needed for correct color rendering. The profile name is "
+                            "sometimes named after a monitor or printer; kept deliberately; use "
+                            "PARANOID for full cleanliness"))
         else:
-            res.act(Act.REMOVED, "APP2:ICC_PROFILE", "ICC-профиль",
-                    "%d част., %d байт" % tuple(icc),
-                    note="ВНИМАНИЕ: цвета могут измениться -- без профиля просмотрщик "
-                         "считает картинку sRGB. Имя профиля называло устройство")
+            res.act(Act.REMOVED, "APP2:ICC_PROFILE", tr("ICC profile"),
+                    tr("%d parts, %d bytes") % tuple(icc),
+                    note=tr("WARNING: colors may change -- without a profile the viewer assumes "
+                            "sRGB. The profile name named the device"))
     if dqt:
-        res.act(Act.UNREMOVABLE, "DQT", "Таблицы квантования", "%d шт" % dqt, "без изменений",
-                note="Убрать нельзя без перекодирования с потерей качества. Таблицы "
-                     "фингерпринтят энкодер, но замена их нашими дала бы отпечаток нашей "
-                     "библиотеки -- хуже исходного")
-    res.act(Act.KEPT, "JPEG:image", "Данные изображения",
-            "%dx%d" % info[:2] if info else "SOF не найден",
-            "%d байт, байт в байт" % img_bytes,
-            note="SOF, DHT, DQT, DRI и энтропийные данные сканов скопированы без "
-                 "перекодирования" + ("" if info else
-                 ". В исходнике нет SOF: изображение не декодировалось и до чистки, "
-                 "размеры не проверялись"))
+        res.act(Act.UNREMOVABLE, "DQT", tr("Quantization tables"), tr("%d pcs") % dqt, tr("unchanged"),
+                note=tr("Can't be removed without lossy re-encoding. The tables fingerprint the "
+                        "encoder, but replacing them with ours would leave our library's "
+                        "fingerprint, which is worse than the original"))
+    res.act(Act.KEPT, "JPEG:image", tr("Image data"),
+            "%dx%d" % info[:2] if info else tr("SOF not found"),
+            tr("%d bytes, byte for byte") % img_bytes,
+            note=tr("SOF, DHT, DQT, DRI and the entropy-coded scan data were copied without "
+                    "re-encoding") + ("" if info else
+                 tr(". The source has no SOF: the image didn't decode before cleaning either; "
+                    "dimensions weren't checked")))
     if end < len(data):
-        res.act(Act.REMOVED, "JPEG:trailer", "Данные после EOI", "%d байт" % (len(data) - end),
-                note="Классический тайник: декодеры хвост игнорируют. Могли быть кадры MPF, "
-                     "видео Motion Photo, gain map Ultra HDR, архив или чужой документ")
+        res.act(Act.REMOVED, "JPEG:trailer", tr("Data after EOI"), tr("%d bytes") % (len(data) - end),
+                note=tr("A classic hiding place: decoders ignore the tail. It may hold MPF "
+                        "frames, Motion Photo video, an Ultra HDR gain map, an archive or "
+                        "someone else's document"))
     return b"".join(out)
 
 
@@ -509,49 +522,50 @@ def _clean_jpeg(data, res, keep_icc):
 # ===========================================================================
 
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
-# Данные изображения: без них файл не откроется. tRNS -- это альфа-канал.
+# Image data: the file won't open without it. tRNS is the alpha channel.
 _PNG_PIXELS = frozenset({b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND", b"acTL", b"fcTL", b"fdAT"})
-# Параметры отображения: фон, значимые биты, HDR-метки.
+# Display parameters: background, significant bits, HDR tags.
 _PNG_DISPLAY = frozenset({b"bKGD", b"sBIT", b"hIST", b"cICP", b"mDCv", b"cLLi"})
-# STRUCTURAL: сохраняем в обоих профилях (iCCP решается отдельно, по профилю).
-_PNG_STRUCT = {b"gAMA": "Гамма", b"cHRM": "Хроматичность", b"sRGB": "Цветовое пространство sRGB",
-               b"pHYs": "Плотность пикселей"}
+# STRUCTURAL: kept in both profiles (iCCP is decided separately, by profile).
+_PNG_STRUCT = {b"gAMA": N_("Gamma"), b"cHRM": N_("Chromaticity"), b"sRGB": N_("sRGB color space"),
+               b"pHYs": N_("Pixel density")}
 _PNG_COLOR_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 
 
 def _png_chunk(ctype, body) -> bytes:
-    """Собрать чанк, CRC считается заново."""
+    """Assemble a chunk; the CRC is recomputed."""
     return (struct.pack(">I", len(body)) + ctype + bytes(body)
             + struct.pack(">I", binascii.crc32(ctype + bytes(body)) & 0xFFFFFFFF))
 
 
 def _png_walk(data):
-    """Проход по чанкам со сверкой CRC. -> (chunks, end, err).
+    """Walk the chunks, checking CRCs. -> (chunks, end, err).
 
-    chunks=[(тип, start, stop)], start..stop -- весь чанк (длина, тип, тело, CRC).
+    chunks=[(type, start, stop)], start..stop is the whole chunk (length, type, body, CRC).
     """
     if data[:8] != _PNG_SIG:
-        return [], 0, "нет сигнатуры PNG"
+        return [], 0, tr("no PNG signature")
     mv = memoryview(data)
     n, pos, chunks = len(data), 8, []
     while True:
         if len(chunks) >= MAX_CHUNKS:
-            return chunks, pos, "больше %d чанков" % MAX_CHUNKS
+            return chunks, pos, tr("more than %d chunks") % MAX_CHUNKS
         if pos + 12 > n:
-            return chunks, pos, "файл оборван: нет чанка IEND"
+            return chunks, pos, tr("the file is cut off: no IEND chunk")
         length = struct.unpack_from(">I", data, pos)[0]
         ctype = bytes(mv[pos + 4:pos + 8])
         if not all(65 <= c <= 90 or 97 <= c <= 122 for c in ctype):
-            return chunks, pos, "некорректный тип чанка на смещении %d" % pos
+            return chunks, pos, tr("invalid chunk type at offset %d") % pos
         name = ctype.decode("ascii")
         stop = pos + 12 + length
         if stop > n:
-            return chunks, pos, "чанк %s обрезан (нужно %d байт, есть %d)" % (name, length, n - pos - 12)
+            return chunks, pos, tr("chunk %s is truncated (%d bytes needed, %d available)") % (name, length, n - pos - 12)
         crc = struct.unpack_from(">I", data, stop - 4)[0]
         if binascii.crc32(mv[pos + 4:stop - 4]) & 0xFFFFFFFF != crc:
-            return chunks, pos, "неверная CRC чанка %s: файл повреждён или правился вручную" % name
+            return chunks, pos, tr("invalid CRC of chunk %s: the file is damaged or was edited "
+                                   "by hand") % name
         if not chunks and (ctype != b"IHDR" or length != 13):
-            return chunks, pos, "первым чанком должен идти IHDR длиной 13"
+            return chunks, pos, tr("the first chunk must be IHDR of length 13")
         chunks.append((ctype, pos, stop))
         pos = stop
         if ctype == b"IEND":
@@ -559,10 +573,10 @@ def _png_walk(data):
 
 
 def _png_decodes(data, chunks):
-    """Поток IDAT распаковывается целиком, данных не меньше, чем объявляет IHDR.
+    """The IDAT stream decompresses completely, with no less data than IHDR declares.
 
-    Распаковка потоковая и с потолком MAX_RAW: бомба в IDAT не съест память.
-    -> (ok, причина)
+    Decompression is streaming with a MAX_RAW ceiling: a bomb in IDAT won't eat memory.
+    -> (ok, reason)
     """
     a = chunks[0][1]
     w, h, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", data[a + 8:a + 21])
@@ -585,31 +599,31 @@ def _png_decodes(data, chunks):
             if capped or d.eof:
                 break
     except zlib.error as exc:
-        return False, "поток IDAT не распаковывается (%s)" % exc
+        return False, tr("the IDAT stream doesn't decompress (%s)") % exc
     if capped:
         return True, ""
     if not d.eof:
-        return False, "поток IDAT оборван: изображение обрезано"
+        return False, tr("the IDAT stream is cut off: the image is truncated")
     ch = _PNG_COLOR_CHANNELS.get(color)
     if interlace == 0 and ch:
         need = h * (1 + (w * ch * depth + 7) // 8)
         if total < need:
-            return False, "в IDAT %d байт, а IHDR требует %d: изображение обрезано" % (total, need)
+            return False, tr("IDAT has %d bytes but IHDR requires %d: the image is truncated") % (total, need)
     return True, ""
 
 
 def _png_brief(t, body) -> str:
     try:
         if t == b"gAMA":
-            return "гамма %.5f" % (struct.unpack(">I", body[:4])[0] / 100000)
+            return tr("gamma %.5f") % (struct.unpack(">I", body[:4])[0] / 100000)
         if t == b"sRGB":
             return "intent %d" % body[0]
         if t == b"pHYs":
             x, y, u = struct.unpack(">IIB", body[:9])
-            return "%d x %d, единицы %d" % (x, y, u)
+            return tr("%d x %d, units %d") % (x, y, u)
     except (struct.error, IndexError):
         pass
-    return "%d байт" % len(body)
+    return tr("%d bytes") % len(body)
 
 
 def _png_text_act(res, ctype, body) -> None:
@@ -619,18 +633,18 @@ def _png_text_act(res, ctype, body) -> None:
     if ctype == b"tEXt":
         val = rest.decode("latin-1")
     elif ctype == b"zTXt":
-        val = "<сжато, %d байт; не распаковываем: защита от бомб>" % len(rest)
-    elif rest[:1] == b"\0":                           # iTXt без сжатия
+        val = tr("<compressed, %d bytes; not decompressed: bomb protection>") % len(rest)
+    elif rest[:1] == b"\0":                           # uncompressed iTXt
         tail = rest[2:].partition(b"\0")[2].partition(b"\0")[2]
         val = tail.decode("utf-8", "replace")
     else:
-        val = "<сжато, %d байт>" % len(rest)
+        val = tr("<compressed, %d bytes>") % len(rest)
     xmp = ctype == b"iTXt" and "xmp" in key.lower()
     res.act(Act.REMOVED, "PNG:" + name,
-            ("XMP-пакет (iTXt «%s»)" if xmp else "Текстовый чанк " + name + " «%s»") % key, val,
-            note="XMP: GUID документа, авторство, история правок" if xmp else
-                 "Пишут и люди, и генераторы: сюда же складывают промпты, параметры "
-                 "моделей и путь к исходнику")
+            (tr("XMP packet (iTXt \"%s\")") if xmp else tr("Text chunk ") + name + " «%s»") % key, val,
+            note=tr("XMP: document GUID, authorship, edit history") if xmp else
+                 tr("Written by people and generators alike: prompts, model parameters and the "
+                    "source path end up here too"))
 
 
 def _clean_png(data, res, keep_icc):
@@ -639,7 +653,7 @@ def _clean_png(data, res, keep_icc):
         res.err("PNG: " + err)
         return None
     if not any(t == b"IDAT" for t, _, _ in chunks):
-        res.err("PNG: нет данных изображения (IDAT), чистить нечего")
+        res.err(tr("PNG: no image data (IDAT), nothing to clean"))
         return None
     out, pix, disp, exif_kept = [_PNG_SIG], Counter(), [], False
     for t, a, b in chunks:
@@ -653,24 +667,23 @@ def _clean_png(data, res, keep_icc):
             disp.append(name)
         elif t in _PNG_STRUCT:
             out.append(_png_chunk(t, body))
-            res.act(Act.KEPT, "PNG:" + name, _PNG_STRUCT[t], _png_brief(t, body),
-                    "без изменений",
-                    note="STRUCTURAL: влияет на цвет или размер при печати, сохраняется "
-                         "в любом профиле")
+            res.act(Act.KEPT, "PNG:" + name, tr(_PNG_STRUCT[t]), _png_brief(t, body),
+                    tr("unchanged"),
+                    note=tr("STRUCTURAL: affects color or printed size, kept in every profile"))
         elif t == b"iCCP":
             pname = clip(bytes(body).split(b"\0", 1)[0].decode("latin-1"), 80)
             if keep_icc:
                 out.append(_png_chunk(t, body))
-                res.act(Act.KEPT, "PNG:iCCP", "ICC-профиль", "«%s», %d байт" % (pname, len(body)),
-                        "без изменений",
-                        note="STRUCTURAL: нужен для правильной цветопередачи. Имя профиля "
-                             "иногда названо по монитору или сканеру -- оставлено осознанно; "
-                             "для полной чистоты используйте PARANOID")
+                res.act(Act.KEPT, "PNG:iCCP", tr("ICC profile"), tr("\"%s\", %d bytes") % (pname, len(body)),
+                        tr("unchanged"),
+                        note=tr("STRUCTURAL: needed for correct color rendering. The profile "
+                                "name is sometimes named after a monitor or scanner; kept "
+                                "deliberately; use PARANOID for full cleanliness"))
             else:
-                res.act(Act.REMOVED, "PNG:iCCP", "ICC-профиль",
-                        "«%s», %d байт" % (pname, len(body)),
-                        note="ВНИМАНИЕ: цвета могут измениться -- без профиля просмотрщик "
-                             "опирается на gAMA/sRGB или считает картинку sRGB")
+                res.act(Act.REMOVED, "PNG:iCCP", tr("ICC profile"),
+                        tr("\"%s\", %d bytes") % (pname, len(body)),
+                        note=tr("WARNING: colors may change -- without a profile the viewer "
+                                "relies on gAMA/sRGB or assumes sRGB"))
         elif t == b"eXIf":
             scan = _exif_scan(body)
             keep_o = (not exif_kept) and scan["orient"] in _ORIENT
@@ -684,37 +697,37 @@ def _clean_png(data, res, keep_icc):
             try:
                 when = "%04d-%02d-%02d %02d:%02d:%02d UTC" % struct.unpack(">HBBBBB", body[:7])
             except struct.error:
-                when = "%d байт" % len(body)
-            res.act(Act.REMOVED, "PNG:tIME", "Время последней правки", when,
-                    note="Момент последнего изменения картинки")
+                when = tr("%d bytes") % len(body)
+            res.act(Act.REMOVED, "PNG:tIME", tr("Time of the last edit"), when,
+                    note=tr("When the picture was last modified"))
         elif t == b"caBX":
-            res.act(Act.REMOVED, "PNG:caBX", "Манифест C2PA / Content Credentials",
-                    "%d байт" % len(body), note=C2PA_NOTE)
+            res.act(Act.REMOVED, "PNG:caBX", tr("C2PA / Content Credentials manifest"),
+                    tr("%d bytes") % len(body), note=tr(C2PA_NOTE))
         elif t == b"dSIG":
-            res.act(Act.REMOVED, "PNG:dSIG", "Цифровая подпись", "%d байт" % len(body),
-                    note="Подпись покрывала содержимое файла: чистка её ломает, а сам факт "
-                         "подписи виден получателю")
+            res.act(Act.REMOVED, "PNG:dSIG", tr("Digital signature"), tr("%d bytes") % len(body),
+                    note=tr("The signature covered the file's content: cleaning breaks it, and "
+                            "the recipient can see that it was signed"))
         elif t[:1].isupper():
             out.append(_png_chunk(t, body))
-            res.act(Act.KEPT, "PNG:" + name, "Неизвестный критический чанк",
-                    "%d байт" % len(body), "без изменений",
-                    note="Критический чанк обязан понимать декодер: убрать его значит "
-                         "испортить файл")
+            res.act(Act.KEPT, "PNG:" + name, tr("Unknown critical chunk"),
+                    tr("%d bytes") % len(body), tr("unchanged"),
+                    note=tr("A decoder must understand a critical chunk: removing it would "
+                            "damage the file"))
         else:
-            res.act(Act.REMOVED, "PNG:" + name, "Неизвестный вспомогательный чанк",
-                    "%d байт" % len(body),
-                    note="Приватный чанк конкретного приложения, содержимое произвольное")
-    res.act(Act.KEPT, "PNG:image", "Данные изображения",
+            res.act(Act.REMOVED, "PNG:" + name, tr("Unknown ancillary chunk"),
+                    tr("%d bytes") % len(body),
+                    note=tr("A specific application's private chunk with arbitrary content"))
+    res.act(Act.KEPT, "PNG:image", tr("Image data"),
             ", ".join(k + ("×%d" % v if v > 1 else "") for k, v in pix.items()),
-            "байт в байт", note="Пиксельные данные, палитра и прозрачность скопированы без "
-                                "перекодирования; CRC пересчитаны")
+            tr("byte for byte"), note=tr("Pixel data, palette and transparency copied without "
+                                   "re-encoding; CRCs recomputed"))
     if disp:
-        res.act(Act.KEPT, "PNG:display", "Параметры отображения", ", ".join(disp),
-                "без изменений", note="STRUCTURAL: фон, значимые биты и HDR-метки влияют на "
-                                      "показ картинки")
+        res.act(Act.KEPT, "PNG:display", tr("Display parameters"), ", ".join(disp),
+                tr("unchanged"), note=tr("STRUCTURAL: background, significant bits and HDR tags "
+                                         "affect how the picture is shown"))
     if end < len(data):
-        res.act(Act.REMOVED, "PNG:trailer", "Данные после IEND", "%d байт" % (len(data) - end),
-                note="Классический тайник: декодеры хвост игнорируют")
+        res.act(Act.REMOVED, "PNG:trailer", tr("Data after IEND"), tr("%d bytes") % (len(data) - end),
+                note=tr("A classic hiding place: decoders ignore the tail"))
     return b"".join(out)
 
 
@@ -723,7 +736,7 @@ def _clean_png(data, res, keep_icc):
 # ===========================================================================
 
 _WEBP_IMG = frozenset({b"VP8 ", b"VP8L", b"ALPH", b"ANIM", b"ANMF"})
-_VP8X_FLAGS = ((0x20, "ICC"), (0x10, "альфа"), (0x08, "EXIF"), (0x04, "XMP"), (0x02, "анимация"))
+_VP8X_FLAGS = ((0x20, "ICC"), (0x10, N_("alpha")), (0x08, "EXIF"), (0x04, "XMP"), (0x02, N_("animation")))
 
 
 def _riff(fourcc, body) -> bytes:
@@ -731,22 +744,22 @@ def _riff(fourcc, body) -> bytes:
 
 
 def _webp_walk(data):
-    """RIFF-контейнер. -> (chunks, end, err); chunks=[(fourcc, start, stop)] -- тело чанка."""
+    """RIFF container. -> (chunks, end, err); chunks=[(fourcc, start, stop)] is the chunk body."""
     n = len(data)
     if n < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
-        return [], 0, "нет заголовка RIFF/WEBP"
+        return [], 0, tr("no RIFF/WEBP header")
     total = struct.unpack_from("<I", data, 4)[0] + 8
     if total > n:
-        return [], 0, "RIFF объявляет %d байт, в файле %d: файл обрезан" % (total, n)
+        return [], 0, tr("RIFF declares %d bytes, the file has %d: the file is truncated") % (total, n)
     pos, chunks = 12, []
     while pos < total:
         if len(chunks) >= MAX_CHUNKS:
-            return chunks, total, "больше %d чанков" % MAX_CHUNKS
+            return chunks, total, tr("more than %d chunks") % MAX_CHUNKS
         if pos + 8 > total:
-            return chunks, total, "хвост RIFF короче заголовка чанка"
+            return chunks, total, tr("the RIFF tail is shorter than a chunk header")
         size = struct.unpack_from("<I", data, pos + 4)[0]
         if pos + 8 + size > total:
-            return chunks, total, "чанк выходит за пределы RIFF"
+            return chunks, total, tr("a chunk runs past the end of RIFF")
         chunks.append((bytes(data[pos:pos + 4]), pos + 8, pos + 8 + size))
         pos += 8 + size + (size & 1)
     return chunks, total, None
@@ -769,7 +782,7 @@ def _webp_dims(data, chunks):
 
 
 def _flag_names(flags) -> str:
-    return ", ".join(n for bit, n in _VP8X_FLAGS if flags & bit) or "нет"
+    return ", ".join(tr(n) for bit, n in _VP8X_FLAGS if flags & bit) or tr("none")
 
 
 def _clean_webp(data, res, keep_icc):
@@ -779,14 +792,14 @@ def _clean_webp(data, res, keep_icc):
         return None
     kinds = {f for f, _, _ in chunks}
     if not kinds & {b"VP8 ", b"VP8L", b"ANMF"}:
-        res.err("WebP: нет данных изображения, чистить нечего")
+        res.err(tr("WebP: no image data, nothing to clean"))
         return None
     vp8x = next((c for c in chunks if c[0] == b"VP8X"), None)
     if vp8x and vp8x[2] - vp8x[1] < 10:
-        res.err("WebP: чанк VP8X обрезан")
+        res.err(tr("WebP: the VP8X chunk is truncated"))
         return None
-    # ориентация: первый EXIF с корректным тегом; пишем её только при наличии VP8X
-    # (без VP8X EXIF-чанк в файле вообще недопустим)
+    # orientation: the first EXIF with a valid tag; it's written only if VP8X is present
+    # (without VP8X an EXIF chunk isn't allowed in the file at all)
     orient = scan = prefix = None
     for f, a, b in chunks:
         if f == b"EXIF":
@@ -807,26 +820,26 @@ def _clean_webp(data, res, keep_icc):
             new = (flags & 0x13) | (0x20 if icc_present else 0) | (0x08 if keep_o else 0)
             parts.append(_riff(f, bytes([new]) + body[1:10]))
             if new != flags:
-                res.act(Act.NORMALIZED, "WebP:VP8X", "Флаги контейнера",
+                res.act(Act.NORMALIZED, "WebP:VP8X", tr("Container flags"),
                         "0x%02X: %s" % (flags, _flag_names(flags)),
                         "0x%02X: %s" % (new, _flag_names(new)),
-                        note="Флаги приведены в соответствие с оставшимися чанками: иначе "
-                             "остался бы признак грубой чистки (флаг есть, чанка нет)")
+                        note=tr("The flags now match the remaining chunks: otherwise a sign of "
+                                "crude cleaning would remain (a flag without its chunk)"))
         elif f in _WEBP_IMG:
             parts.append(_riff(f, body))
             pix[name.strip()] += 1
         elif f == b"ICCP" and vp8x:
             if keep_icc:
                 parts.append(_riff(f, body))
-                res.act(Act.KEPT, "WebP:ICCP", "ICC-профиль", "%d байт" % len(body),
-                        "без изменений",
-                        note="STRUCTURAL: нужен для правильной цветопередачи. Имя профиля "
-                             "иногда названо по устройству -- оставлено осознанно; для полной "
-                             "чистоты используйте PARANOID")
+                res.act(Act.KEPT, "WebP:ICCP", tr("ICC profile"), tr("%d bytes") % len(body),
+                        tr("unchanged"),
+                        note=tr("STRUCTURAL: needed for correct color rendering. The profile "
+                                "name is sometimes named after the device; kept deliberately; "
+                                "use PARANOID for full cleanliness"))
             else:
-                res.act(Act.REMOVED, "WebP:ICCP", "ICC-профиль", "%d байт" % len(body),
-                        note="ВНИМАНИЕ: цвета могут измениться -- без профиля просмотрщик "
-                             "считает картинку sRGB")
+                res.act(Act.REMOVED, "WebP:ICCP", tr("ICC profile"), tr("%d bytes") % len(body),
+                        note=tr("WARNING: colors may change -- without a profile the viewer "
+                                "assumes sRGB"))
         elif f == b"EXIF":
             sc = _exif_scan(body[6:] if body[:6] == b"Exif\0\0" else body)
             first = keep_o and not exif_done and sc is not None and sc["orient"] == orient
@@ -836,18 +849,18 @@ def _clean_webp(data, res, keep_icc):
                                    + _min_tiff(orient, scan["order"])))
             _exif_acts(res, sc, "WebP:EXIF", len(body), first)
         elif f == b"XMP ":
-            res.act(Act.REMOVED, "WebP:XMP", "XMP-пакет", "%d байт" % len(body),
-                    note="XMP: GUID документа, авторство, история правок")
+            res.act(Act.REMOVED, "WebP:XMP", tr("XMP packet"), tr("%d bytes") % len(body),
+                    note=tr("XMP: document GUID, authorship, edit history"))
         else:
-            res.act(Act.REMOVED, "WebP:" + name.strip(), "Неизвестный чанк", "%d байт" % len(body),
-                    note="Чанк, который декодеру не нужен: приватные данные приложения")
-    res.act(Act.KEPT, "WebP:image", "Данные изображения",
+            res.act(Act.REMOVED, "WebP:" + name.strip(), tr("Unknown chunk"), tr("%d bytes") % len(body),
+                    note=tr("A chunk the decoder doesn't need: an application's private data"))
+    res.act(Act.KEPT, "WebP:image", tr("Image data"),
             ", ".join(k + ("×%d" % v if v > 1 else "") for k, v in pix.items()),
-            "байт в байт", note="Сжатые данные кадров скопированы без перекодирования")
+            tr("byte for byte"), note=tr("The compressed frame data was copied without re-encoding"))
     body = b"WEBP" + b"".join(parts)
     if end < len(data):
-        res.act(Act.REMOVED, "WebP:trailer", "Данные после RIFF", "%d байт" % (len(data) - end),
-                note="Классический тайник: декодеры хвост игнорируют")
+        res.act(Act.REMOVED, "WebP:trailer", tr("Data after RIFF"), tr("%d bytes") % (len(data) - end),
+                note=tr("A classic hiding place: decoders ignore the tail"))
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
@@ -856,12 +869,12 @@ def _clean_webp(data, res, keep_icc):
 # ===========================================================================
 
 _GIF_XMP_MAGIC = b"\x01\xff\xfe\xfd\xfc"
-_GIF_LOOP = (b"NETSCAPE2.0", b"ANIMEXTS1.0")       # число повторов анимации: STRUCTURAL
+_GIF_LOOP = (b"NETSCAPE2.0", b"ANIMEXTS1.0")       # animation repeat count: STRUCTURAL
 _GIF_IMG = frozenset({"hdr", "gce", "img", "pt", "loop"})
 
 
 def _gif_sub(data, q):
-    """Конец цепочки sub-блоков (за нулевым терминатором) или None, если оборвана."""
+    """End of a sub-block chain (past the zero terminator), or None if it's cut off."""
     n = len(data)
     while q < n:
         size = data[q]
@@ -872,46 +885,46 @@ def _gif_sub(data, q):
 
 
 def _gif_walk(data):
-    """-> (items, end, err); items=[(вид, start, stop)].
+    """-> (items, end, err); items=[(kind, start, stop)].
 
-    Виды: hdr, gce, img, pt, loop, icc, comment, xmp, app, ext, end.
+    Kinds: hdr, gce, img, pt, loop, icc, comment, xmp, app, ext, end.
     """
     n = len(data)
     if n < 13 or data[:6] not in (b"GIF87a", b"GIF89a"):
-        return [], 0, "нет сигнатуры GIF"
+        return [], 0, tr("no GIF signature")
     pos = 13 + ((3 << ((data[10] & 7) + 1)) if data[10] & 0x80 else 0)
     if pos > n:
-        return [], 0, "обрезана глобальная палитра"
+        return [], 0, tr("the global palette is truncated")
     items = [("hdr", 0, pos)]
     while True:
         if len(items) >= MAX_CHUNKS:
-            return items, pos, "больше %d блоков" % MAX_CHUNKS
+            return items, pos, tr("more than %d blocks") % MAX_CHUNKS
         if pos >= n:
-            return items, pos, "файл оборван: нет завершающего байта 0x3B"
+            return items, pos, tr("the file is cut off: no trailing 0x3B byte")
         t = data[pos]
         if t == 0x3B:
             items.append(("end", pos, pos + 1))
             return items, pos + 1, None
         if t == 0x2C:
             if pos + 10 > n:
-                return items, pos, "дескриптор изображения обрезан"
+                return items, pos, tr("the image descriptor is truncated")
             packed, q = data[pos + 9], pos + 10
             if packed & 0x80:
                 q += 3 << ((packed & 7) + 1)
             q = _gif_sub(data, q + 1)                      # +1 -- LZW min code size
             if q is None:
-                return items, pos, "данные изображения оборваны"
+                return items, pos, tr("the image data is cut off")
             items.append(("img", pos, q))
             pos = q
             continue
         if t != 0x21:
-            return items, pos, "неизвестный блок 0x%02X на смещении %d" % (t, pos)
+            return items, pos, tr("unknown block 0x%02X at offset %d") % (t, pos)
         if pos + 2 > n:
-            return items, pos, "расширение обрезано"
+            return items, pos, tr("the extension is truncated")
         label, kind, q = data[pos + 1], "ext", None
         if label == 0xFF:
             if pos + 3 > n or pos + 3 + data[pos + 2] > n:
-                return items, pos, "Application Extension обрезан"
+                return items, pos, tr("Application Extension is truncated")
             head = pos + 3 + data[pos + 2]
             appid = bytes(data[pos + 3:head])
             if appid[:8] == b"XMP Data":
@@ -926,7 +939,7 @@ def _gif_walk(data):
             kind = {0xF9: "gce", 0xFE: "comment", 0x01: "pt"}.get(label, "ext")
             q = _gif_sub(data, pos + 2)
         if q is None:
-            return items, pos, "расширение 0x%02X оборвано" % label
+            return items, pos, tr("extension 0x%02X is cut off") % label
         items.append((kind, pos, q))
         pos = q
 
@@ -947,7 +960,7 @@ def _clean_gif(data, res, keep_icc):
         return None
     frames = sum(1 for k, _, _ in items if k == "img")
     if not frames:
-        res.err("GIF: нет кадров, чистить нечего")
+        res.err(tr("GIF: no frames, nothing to clean"))
         return None
     out, loops = [], 0
     for kind, a, b in items:
@@ -958,46 +971,48 @@ def _clean_gif(data, res, keep_icc):
         elif kind == "icc":
             if keep_icc:
                 out.append(raw)
-                res.act(Act.KEPT, "GIF:ICC", "ICC-профиль", "%d байт" % len(raw), "без изменений",
-                        note="STRUCTURAL: нужен для правильной цветопередачи")
+                res.act(Act.KEPT, "GIF:ICC", tr("ICC profile"), tr("%d bytes") % len(raw), tr("unchanged"),
+                        note=tr("STRUCTURAL: needed for correct color rendering"))
             else:
-                res.act(Act.REMOVED, "GIF:ICC", "ICC-профиль", "%d байт" % len(raw),
-                        note="ВНИМАНИЕ: цвета могут измениться")
+                res.act(Act.REMOVED, "GIF:ICC", tr("ICC profile"), tr("%d bytes") % len(raw),
+                        note=tr("WARNING: colors may change"))
         elif kind == "comment":
-            res.act(Act.REMOVED, "GIF:Comment", "Комментарий GIF", _gif_text(raw),
-                    note="Сюда пишут имя конвертера, а иногда и автора")
+            res.act(Act.REMOVED, "GIF:Comment", tr("GIF comment"), _gif_text(raw),
+                    note=tr("Converters write their name here, and sometimes the author's"))
         elif kind == "xmp":
-            res.act(Act.REMOVED, "GIF:XMP", "XMP-пакет", "%d байт" % len(raw),
-                    note="XMP: авторство, GUID документа, история правок")
+            res.act(Act.REMOVED, "GIF:XMP", tr("XMP packet"), tr("%d bytes") % len(raw),
+                    note=tr("XMP: authorship, document GUID, edit history"))
         elif kind == "app":
             appid = bytes(raw[3:3 + raw[2]]) if len(raw) > 2 else b""
             res.act(Act.REMOVED, "GIF:Application", "Application Extension (%s)"
-                    % clip(appid.decode("latin-1"), 24), "%d байт" % len(raw),
-                    note="Блок конкретной программы: имя приложения само говорит, чем сделан файл")
+                    % clip(appid.decode("latin-1"), 24), tr("%d bytes") % len(raw),
+                    note=tr("A specific program's block: the application name alone says what "
+                            "made the file"))
         else:
-            res.act(Act.REMOVED, "GIF:ext", "Неизвестное расширение 0x%02X" % raw[1],
-                    "%d байт" % len(raw), note="Декодеру не нужно: приватные данные приложения")
+            res.act(Act.REMOVED, "GIF:ext", tr("Unknown extension 0x%02X") % raw[1],
+                    tr("%d bytes") % len(raw), note=tr("The decoder doesn't need it: an application's "
+                                                  "private data"))
     w, h = struct.unpack_from("<HH", data, 6)
-    res.act(Act.KEPT, "GIF:image", "Данные изображения", "%dx%d, кадров %d" % (w, h, frames),
-            "байт в байт",
-            note="LZW-данные, палитры и управление кадрами скопированы без перекодирования"
-                 + ("; расширение зацикливания анимации оставлено (STRUCTURAL): без него "
-                    "анимация проиграется один раз" if loops else ""))
+    res.act(Act.KEPT, "GIF:image", tr("Image data"), tr("%dx%d, %d frames") % (w, h, frames),
+            tr("byte for byte"),
+            note=tr("LZW data, palettes and frame control copied without re-encoding")
+                 + (tr("; the animation loop extension was kept (STRUCTURAL): without it the "
+                       "animation plays once") if loops else ""))
     if end < len(data):
-        res.act(Act.REMOVED, "GIF:trailer", "Данные после trailer", "%d байт" % (len(data) - end),
-                note="Классический тайник: декодеры хвост игнорируют")
+        res.act(Act.REMOVED, "GIF:trailer", tr("Data after the trailer"), tr("%d bytes") % (len(data) - end),
+                note=tr("A classic hiding place: decoders ignore the tail"))
     return b"".join(out)
 
 
 # ===========================================================================
-# проверка результата: не испорчен ли файл (независимо от того, кто его собрал)
+# verifying the result: is the file damaged (regardless of who built it)
 # ===========================================================================
 
 _WALK = {"jpeg": _jpeg_walk, "png": _png_walk, "webp": _webp_walk, "gif": _gif_walk}
 
 
 def _stream(fmt, d, parts) -> bytes:
-    """«Поток изображения»: всё, что нужно декодеру, в исходном порядке и байт в байт."""
+    """"Image stream": everything the decoder needs, in the original order, byte for byte."""
     if fmt == "jpeg":
         return b"".join(d[x:y] for m, x, y in parts if m in _JPEG_IMG)
     if fmt == "png":
@@ -1022,11 +1037,11 @@ def _dims(fmt, d, parts):
 
 
 def _orient(fmt, d, parts):
-    """Первый EXIF Orientation в файле (или None)."""
+    """The first EXIF Orientation in the file (or None)."""
     try:
         for t, a, b in parts:
             if fmt == "jpeg" and t == 0xDA:
-                break                                  # после SOS EXIF не читают
+                break                                  # EXIF isn't read after SOS
             if fmt == "jpeg" and t == 0xE1 and d[a + 4:a + 10] == b"Exif\0\0":
                 blob = d[a + 10:b]
             elif fmt == "png" and t == b"eXIf":
@@ -1039,21 +1054,21 @@ def _orient(fmt, d, parts):
             o = _exif_scan(blob)["orient"]
             if o is not None:
                 return o
-    except Exception:                                  # noqa: BLE001 -- проверка не падает
+    except Exception:                                  # noqa: BLE001 -- verification doesn't crash
         pass
     return None
 
 
 def _dst_problems(fmt, d, parts, end) -> list:
-    """Структурная валидность результата своим парсером."""
+    """Structural validity of the result, checked with our own parser."""
     errs = []
     if end != len(d):
-        errs.append("после конца изображения остались данные (%d байт)" % (len(d) - end))
+        errs.append(tr("data remains after the end of the image (%d bytes)") % (len(d) - end))
     if fmt == "jpeg" and not any(m == 0xDA for m, _, _ in parts):
-        errs.append("нет SOS")
+        errs.append(tr("no SOS"))
     if fmt == "png":
         if not any(t == b"IDAT" for t, _, _ in parts):
-            errs.append("нет IDAT")
+            errs.append(tr("no IDAT"))
         else:
             ok, why = _png_decodes(d, parts)
             if not ok:
@@ -1064,7 +1079,7 @@ def _dst_problems(fmt, d, parts, end) -> list:
         if vp8x is not None and len(vp8x) >= 10:
             for bit, fourcc in ((0x08, b"EXIF"), (0x04, b"XMP "), (0x20, b"ICCP")):
                 if bool(vp8x[0] & bit) != (fourcc in kinds):
-                    errs.append("флаги VP8X не совпадают с чанками (%s)" % fourcc.decode().strip())
+                    errs.append(tr("VP8X flags don't match the chunks (%s)") % fourcc.decode().strip())
     return errs
 
 
@@ -1075,18 +1090,18 @@ def _verify(fmt, a, b) -> dict:
          "orient_ok": False, "errors": []}
     walk = _WALK.get(fmt)
     if walk is None:
-        v["errors"].append("формат %s проверка не поддерживает" % fmt)
+        v["errors"].append(tr("verification doesn't support format %s") % fmt)
         return v
     pa, ea, era = walk(a)
     pb, eb, erb = walk(b)
     if era:
-        v["errors"].append("исходник: " + era)
+        v["errors"].append(tr("source: ") + era)
     if erb:
-        v["errors"].append("результат: " + erb)
+        v["errors"].append(tr("result: ") + erb)
     if era or erb:
         return v
     probs = _dst_problems(fmt, b, pb, eb)
-    v["errors"] += ["результат: " + p for p in probs]
+    v["errors"] += [tr("result: ") + p for p in probs]
     v["valid"] = not probs
     v["dims_src"], v["dims_dst"] = _dims(fmt, a, pa), _dims(fmt, b, pb)
     v["dims_same"] = v["dims_src"] == v["dims_dst"]
@@ -1102,20 +1117,21 @@ def _verify(fmt, a, b) -> dict:
     norm = lambda o: o if o in _ORIENT else None            # noqa: E731
     v["orient_ok"] = norm(v["orient_src"]) == norm(v["orient_dst"])
     if not v["dims_same"]:
-        v["errors"].append("размеры изменились: %s -> %s" % (v["dims_src"], v["dims_dst"]))
+        v["errors"].append(tr("dimensions changed: %s -> %s") % (v["dims_src"], v["dims_dst"]))
     if not v["image_same"]:
-        v["errors"].append("сжатые данные изображения изменились: файл перекодирован или повреждён")
+        v["errors"].append(tr("the compressed image data changed: the file was re-encoded or "
+                              "damaged"))
     if not v["orient_ok"]:
-        v["errors"].append("ориентация потеряна: %s -> %s" % (v["orient_src"], v["orient_dst"]))
+        v["errors"].append(tr("orientation lost: %s -> %s") % (v["orient_src"], v["orient_dst"]))
     v["ok"] = v["valid"] and v["dims_same"] and v["image_same"] and v["orient_ok"]
     return v
 
 
 def verify_image(src, dst) -> dict:
-    """Доказательство, что чистка не испортила файл. Читает оба файла, ничего не пишет.
+    """Proof that cleaning didn't damage the file. Reads both files, writes nothing.
 
     -> {ok, fmt, valid, dims_src, dims_dst, dims_same, image_same, image_bytes,
-        image_sha256, scan_same (JPEG: блок SOS..EOI целиком бит в бит),
+        image_sha256, scan_same (JPEG: the whole SOS..EOI block bit for bit),
         scan_bytes, orient_src, orient_dst, orient_ok, errors}
     """
     v = {"ok": False, "errors": []}
@@ -1126,30 +1142,31 @@ def verify_image(src, dst) -> dict:
             b = fh.read(MAX_FILE + 1)
         fa, fb = sniff.sniff(src), sniff.sniff(dst)
         if fa != fb:
-            v["errors"].append("формат изменился: %s -> %s" % (fa, fb))
+            v["errors"].append(tr("format changed: %s -> %s") % (fa, fb))
             return v
         return _verify(fa, a, b)
     except Exception as exc:                           # noqa: BLE001
-        v["errors"].append("проверка не выполнена: %s" % type(exc).__name__)
+        v["errors"].append(tr("verification not performed: %s") % type(exc).__name__)
         return v
 
 
 # ===========================================================================
-# публичная точка входа
+# public entry point
 # ===========================================================================
 
 _CLEANERS = {"jpeg": _clean_jpeg, "png": _clean_png, "webp": _clean_webp, "gif": _clean_gif}
 
 _REFUSE = {
-    "tiff": "TIFF пока не поддержан чисткой: метаданные лежат в самих IFD вместе со ссылками "
-            "на данные, пересборка без специального кода рискует испортить файл",
-    "heic": "HEIF/HEIC пока не поддержан чисткой: метаданные лежат в элементах iloc, "
-            "пересборка без специального кода рискует испортить файл",
+    "tiff": N_("TIFF cleaning isn't supported yet: the metadata lives in the IFDs themselves "
+               "together with references to the data, and rebuilding without dedicated code "
+               "risks damaging the file"),
+    "heic": N_("HEIF/HEIC cleaning isn't supported yet: the metadata lives in iloc items, and "
+               "rebuilding without dedicated code risks damaging the file"),
 }
 _UNREADABLE = {
-    "cloud": "файл является облачным плейсхолдером: откройте его в проводнике или выберите "
-             "«Всегда хранить на этом устройстве»",
-    "missing": "файл не найден", "dir": "это каталог, а не файл", "denied": "нет прав на чтение",
+    "cloud": N_("the file is a cloud placeholder: open it in Explorer or choose \"Always keep on "
+                "this device\""),
+    "missing": N_("file not found"), "dir": N_("this is a directory, not a file"), "denied": N_("no read permission"),
 }
 
 
@@ -1157,44 +1174,44 @@ def _run(res, state, src, dst, profile, keep) -> None:
     try:
         profile = Profile(profile)
     except ValueError:
-        res.err("неизвестный профиль чистки: %s" % res.profile)
+        res.err(tr("unknown cleaning profile: %s") % res.profile)
         return
     res.profile = profile.value
     names = [keep] if isinstance(keep, str) else (keep or [])
     keep = {str(k).lower() for k in names}
-    # PARANOID и REGENERATE убирают всё; ICC остаётся только в STEALTH или по keep={"icc"}
+    # PARANOID and REGENERATE remove everything; ICC stays only in STEALTH or with keep={"icc"}
     keep_icc = profile is Profile.STEALTH or "icc" in keep
 
     if _same_path(src, dst):
-        res.err("выходной путь совпадает с входным: входной файл не перезаписывается никогда")
+        res.err(tr("the output path matches the input path: the input file is never overwritten"))
         return
     fmt = sniff.sniff(src)
     res.fmt = fmt
     if fmt == "unreadable":
         reason, code = sniff.unreadable_reason(src)
-        res.err("%s (errno %s)" % (_UNREADABLE.get(reason, "файл не читается"), code))
+        res.err("%s (errno %s)" % (tr(_UNREADABLE.get(reason, "the file can't be read")), code))
         return
     if fmt in _REFUSE:
-        res.err(_REFUSE[fmt])
+        res.err(tr(_REFUSE[fmt]))
         return
     if fmt not in _CLEANERS:
-        res.err("не растровое изображение (формат %s): чистка картинок не применима" % fmt
-                if fmt != "unknown" else "файл пустой или формат не опознан")
+        res.err(tr("not a raster image (format %s): image cleaning doesn't apply") % fmt
+                if fmt != "unknown" else tr("the file is empty or the format wasn't recognized"))
         return
     try:
         if os.path.getsize(src) > MAX_FILE:
-            res.err("файл больше %d МБ: не берём в память" % (MAX_FILE // 1048576))
+            res.err(tr("the file is larger than %d MB: not loaded into memory") % (MAX_FILE // 1048576))
             return
         with open(src, "rb") as fh:
             data = fh.read(MAX_FILE + 1)
     except OSError as exc:
-        res.err("файл не читается (errno %s)" % exc.errno)
+        res.err(tr("the file can't be read (errno %s)") % exc.errno)
         return
     sha_before = _sha(data)
 
     out = _CLEANERS[fmt](data, res, keep_icc)
     if out is None:
-        return                                      # причина уже в res.errors
+        return                                      # the reason is already in res.errors
 
     try:
         with open(dst, "wb") as fh:
@@ -1203,48 +1220,49 @@ def _run(res, state, src, dst, profile, keep) -> None:
         with open(dst, "rb") as fh:
             back = fh.read(MAX_FILE + 1)
     except OSError as exc:
-        res.err("не удалось записать выходной файл (errno %s)" % exc.errno)
+        res.err(tr("could not write the output file (errno %s)") % exc.errno)
         return
     if back != out:
-        res.err("выходной файл на диске не совпал с собранным")
+        res.err(tr("the output file on disk doesn't match what was built"))
         return
-    v = _verify(fmt, data, back)                     # проверяем то, что реально лежит на диске
+    v = _verify(fmt, data, back)                     # verify what's actually on disk
     if not v["ok"]:
-        for e in v["errors"] or ["проверка результата не пройдена"]:
+        for e in v["errors"] or [tr("verification of the result failed")]:
             res.err(e)
         return
     try:
         if _file_sha(src) != sha_before:
-            res.err("входной файл изменился во время работы: результат ненадёжен")
+            res.err(tr("the input file changed during processing: the result is unreliable"))
             return
     except OSError as exc:
-        res.err("входной файл не перечитался (errno %s)" % exc.errno)
+        res.err(tr("the input file couldn't be re-read (errno %s)") % exc.errno)
         return
     res.ok = True
 
 
 def clean_image(src, dst, profile=Profile.STEALTH, keep=None) -> CleanResult:
-    """Очистить картинку без перекодирования. Исключений наружу не бросает.
+    """Clean an image without re-encoding. Never raises.
 
-    src -- вход (не модифицируется никогда), dst -- куда писать результат.
-    profile -- Profile.STEALTH (дефолт) или PARANOID; REGENERATE для картинок
-    трактуется как PARANOID. Разница профилей -- ICC-профиль: STEALTH его
-    сохраняет, PARANOID убирает с предупреждением.
-    keep -- набор имён, которые надо сохранить; понимается {"icc"} (оставить
-    ICC-профиль и в PARANOID), остальное игнорируется.
+    src is the input (never modified), dst is where to write the result.
+    profile is Profile.STEALTH (default) or PARANOID; REGENERATE is treated as
+    PARANOID for images. The profiles differ in the ICC profile: STEALTH keeps
+    it, PARANOID removes it with a warning.
+    keep is a set of names to keep; {"icc"} is understood (keep the ICC profile
+    in PARANOID too), the rest is ignored.
 
-    ok=True означает: dst записан, структура валидна (проверено своим парсером),
-    размеры те же, сжатые данные совпали байт в байт, ориентация сохранена.
-    При ok=False dst не остаётся на диске, actions пуст, причина -- в errors.
+    ok=True means: dst was written, the structure is valid (checked with our own
+    parser), dimensions are the same, the compressed data matches byte for byte,
+    the orientation is preserved. With ok=False dst doesn't remain on disk,
+    actions is empty, the reason is in errors.
     """
     res = CleanResult(src=str(src), dst=str(dst), fmt="unknown",
                       profile=str(getattr(profile, "value", profile)))
     state = {"wrote": False}
     try:
         _run(res, state, os.fspath(src), os.fspath(dst), profile, keep)
-    except Exception as exc:                           # noqa: BLE001 -- битый файл не валит бота
+    except Exception as exc:                           # noqa: BLE001 -- a broken file doesn't crash the bot
         res.ok = False
-        res.err("внутренняя ошибка чистки: %s: %s" % (type(exc).__name__, exc))
+        res.err(tr("internal cleaning error: %s: %s") % (type(exc).__name__, exc))
     if not res.ok:
         res.actions.clear()
         if state["wrote"]:
@@ -1257,15 +1275,15 @@ def clean_image(src, dst, profile=Profile.STEALTH, keep=None) -> CleanResult:
 
 
 # ===========================================================================
-# самопроверка: PYTHONIOENCODING=utf-8 python -m core.clean_image
+# self-test: PYTHONIOENCODING=utf-8 python -m core.clean_image
 # ===========================================================================
 
 def _selftest() -> int:
-    """Собирает файлы из байтов, чистит, и доказывает результат ИНСПЕКТОРОМ-оракулом.
+    """Builds files from bytes, cleans them, and proves the result with the INSPECTOR as the oracle.
 
-    По каждой фикстуре и профилю: critical/sensitive до и после, ориентация, размеры,
-    энтропийный блок бит в бит, валидность выхода, sha256 входа до и после.
-    Любой провал -- код возврата 1.
+    For every fixture and profile: critical/sensitive before and after, orientation,
+    dimensions, the entropy-coded block bit for bit, output validity, the input's
+    sha256 before and after. Any failure means exit code 1.
     """
     import random
     import shutil
@@ -1279,10 +1297,10 @@ def _selftest() -> int:
     def check(name, cond, detail=""):
         if not cond:
             fails.append(name)
-        print("    [%s] %s%s" % ("ok" if cond else "ПРОВАЛ", name,
+        print("    [%s] %s%s" % ("ok" if cond else "FAIL", name,
                                   (" -- %s" % (detail,)) if detail and not cond else ""))
 
-    # ----- сборка фикстур ---------------------------------------------------
+    # ----- building fixtures ---------------------------------------------------
 
     def seg(m, payload):
         return b"\xff" + bytes([m]) + struct.pack(">H", len(payload) + 2) + payload
@@ -1290,15 +1308,15 @@ def _selftest() -> int:
     def entropy(n=300):
         out = bytearray()
         for i in range(n):
-            out.append(rng.randrange(0, 255))               # без 0xFF: маркеры ставим сами
+            out.append(rng.randrange(0, 255))               # no 0xFF: we place markers ourselves
             if i % 37 == 5:
-                out += b"\xff\x00"                          # стаффинг
+                out += b"\xff\x00"                          # stuffing
             if i % 120 == 119:
                 out += bytes([0xFF, 0xD0 + (i // 120) % 8])  # RSTn
         return bytes(out)
 
     def tiff(order, ifds):
-        """ifds: {имя: [(tag, тип, значение|имя_IFD)]}; count считается сам."""
+        """ifds: {name: [(tag, type, value|IFD_name)]}; count is computed automatically."""
         e = "<" if order == b"II" else ">"
         size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1}
         names = list(ifds)
@@ -1447,7 +1465,7 @@ def _selftest() -> int:
                       riff(b"EXIF", exif_phone(3, b"II")), riff(b"XMP ", xmp_text)],
                      tail=b"secret tail")
     webp_prefixed = webp([vp8x(0x08), vp8, riff(b"EXIF", b"Exif\0\0" + exif_phone(6, b"MM"))])
-    webp_flag_only = webp([vp8x(0x0C), vp8])                   # флаги есть, чанков нет
+    webp_flag_only = webp([vp8x(0x0C), vp8])                   # flags present, chunks missing
 
     def sub(b):
         return b"".join(bytes([len(b[i:i + 255])]) + b[i:i + 255] for i in range(0, len(b), 255)) + b"\0"
@@ -1460,7 +1478,7 @@ def _selftest() -> int:
                 + b"\x2c" + struct.pack("<HHHHB", 0, 0, 2, 2, 0) + b"\x02" + sub(b"\x44\x01")
                 + b"\x3b" + b"PK\x03\x04tail")
 
-    cases = {   # имя -> байты
+    cases = {   # name -> bytes
         "jpeg_phone_orient6.jpg": jpeg([jfif(True), exif_seg(6), xmp_seg] + icc_segs(PROFILE)
                                        + [seg(0xED, irb()), com_seg], tail=b"PK\x03\x04secret archive"),
         "jpeg_phone_little_endian_orient8.jpg": jpeg([exif_seg(8, b"II")] + icc_segs(PROFILE)),
@@ -1490,7 +1508,7 @@ def _selftest() -> int:
         return p
 
     try:
-        # --- фикстуры проекта (tests/fixtures.py): как есть -----------------
+        # --- project fixtures (tests/fixtures.py), as is -----------------
         try:
             from tests import fixtures as F
             fx = {}
@@ -1499,7 +1517,7 @@ def _selftest() -> int:
                 fx[os.path.basename(p)] = p
             broken = F.make_broken(tmp)
         except Exception as exc:                          # noqa: BLE001
-            print("!! фикстуры tests/fixtures.py недоступны: %s" % type(exc).__name__)
+            print("!! tests/fixtures.py fixtures are unavailable: %s" % type(exc).__name__)
             fx, broken = {}, {}
 
         paths = {n: put(n, b) for n, b in cases.items()}
@@ -1507,8 +1525,8 @@ def _selftest() -> int:
 
         results = {}
         print("=" * 100)
-        print("ЧИСТКА: critical/sensitive до -> после (инспектор-оракул), ориентация, размеры, "
-              "энтропийный блок, валидность, sha256 входа")
+        print("CLEANING: critical/sensitive before -> after (inspector as oracle), orientation, "
+              "dimensions, entropy block, validity, input sha256")
         print("=" * 100)
         for name, src in paths.items():
             sha0 = _file_sha(src)
@@ -1520,37 +1538,37 @@ def _selftest() -> int:
                 after = inspect_file(dst) if res.ok else None
                 v = verify_image(src, dst) if res.ok else {}
                 results[(name, prof)] = (res, before, after, v, dst)
-                print("%-38s %-8s ok=%-5s crit %2d -> %-2s sens %2d -> %-2s orient %s->%s dims %s=%s "
-                      "image_same=%s scan_same=%s(%s Б) valid=%s sha_in=%s"
+                print("%-38s %-8s ok=%-5s crit %2d -> %-2s sens %2d -> %-2s orient %s->%s dims "
+                      "%s=%s image_same=%s scan_same=%s(%s B) valid=%s sha_in=%s"
                       % (name, prof.value, res.ok, before.critical,
                          after.critical if after else "-", before.sensitive,
                          after.sensitive if after else "-", v.get("orient_src"), v.get("orient_dst"),
                          v.get("dims_src"), v.get("dims_dst"), v.get("image_same"),
                          v.get("scan_same"), v.get("scan_bytes"), v.get("valid"),
-                         "совпал" if sha0 == sha1 else "ИЗМЕНИЛСЯ"))
+                         "match" if sha0 == sha1 else "CHANGED"))
                 for e in res.errors:
                     print("      ! " + e)
-                check("%s/%s: вход не тронут (sha256 до == после)" % (name, prof.value), sha0 == sha1)
+                check("%s/%s: input untouched (sha256 before == after)" % (name, prof.value), sha0 == sha1)
                 check("%s/%s: ok=True" % (name, prof.value), res.ok, res.errors)
                 if res.ok:
-                    check("%s/%s: critical после == 0" % (name, prof.value), after.critical == 0,
+                    check("%s/%s: critical after == 0" % (name, prof.value), after.critical == 0,
                           [(f.location, f.label) for f in after.findings
                            if f.risk.value in ("identity", "environment")])
-                    check("%s/%s: размеры, сжатые данные и ориентация целы" % (name, prof.value),
+                    check("%s/%s: dimensions, compressed data and orientation intact" % (name, prof.value),
                           v["ok"], v["errors"])
-                    # идемпотентность: повторная чистка своего же результата ничего не меняет
+                    # idempotency: re-cleaning our own result changes nothing
                     again = os.path.join(outdir, "again_" + os.path.basename(dst))
                     r2 = clean_image(dst, again, prof)
-                    check("%s/%s: повторная чистка идемпотентна" % (name, prof.value),
+                    check("%s/%s: re-cleaning is idempotent" % (name, prof.value),
                           r2.ok and open(again, "rb").read() == open(dst, "rb").read(), r2.errors)
 
-        # --- точечные утверждения ------------------------------------------
+        # --- targeted assertions ------------------------------------------
         print("-" * 100)
-        print("ТОЧЕЧНЫЕ ПРОВЕРКИ")
+        print("TARGETED CHECKS")
         leak_labels = {"Artist", "BodySerialNumber", "LensSerialNumber", "MakerNote", "DateTime",
                        "DateTimeOriginal", "Make", "Model", "Software", "UserComment",
-                       "Координаты (десятичные)", "Встроенная миниатюра", "Комментарий JPEG",
-                       "Author", "Comment", "dc:creator", "xmp:CreatorTool", "Комментарий"}
+                       "Coordinates (decimal)", "Embedded thumbnail", "JPEG comment",
+                       "Author", "Comment", "dc:creator", "xmp:CreatorTool", "Comment"}
 
         def read(p):
             with open(p, "rb") as fh:
@@ -1568,97 +1586,98 @@ def _selftest() -> int:
 
         for prof in (Profile.STEALTH, Profile.PARANOID):
             tag = prof.value
-            print("  --- профиль %s" % tag)
+            print("  --- profile %s" % tag)
             res, before, after, v, dst = results[("jpeg_phone_orient6.jpg", prof)]
             data = read(dst)
-            check("JPEG/6: ориентация 6 сохранена (по инспектору)", orient_in_report(after) == 6)
-            check("JPEG/6: ориентация 6 сохранена (по verify)", v["orient_src"] == 6 == v["orient_dst"])
-            check("JPEG/6: GPS, серийники, даты, MakerNote, Artist, миниатюра исчезли",
+            check("JPEG/6: orientation 6 kept (per the inspector)", orient_in_report(after) == 6)
+            check("JPEG/6: orientation 6 kept (per verify)", v["orient_src"] == 6 == v["orient_dst"])
+            check("JPEG/6: GPS, serials, dates, MakerNote, Artist, thumbnail are gone",
                   not ({f.label for f in after.findings} & leak_labels),
                   sorted({f.label for f in after.findings} & leak_labels))
-            check("JPEG/6: минимальный APP1 ровно 36 байт (маркер + длина 34)",
+            check("JPEG/6: minimal APP1 is exactly 36 bytes (marker + length 34)",
                   any(m == 0xE1 and y - x == 36 for m, x, y in _jpeg_walk(data)[0]))
-            check("JPEG/6: хвост после EOI и XMP/APP13/COM убраны",
+            check("JPEG/6: tail after EOI and XMP/APP13/COM removed",
                   not ({0xED, 0xFE} & set(jmarks(dst))) and _jpeg_walk(data)[1] == len(data)
                   and b"Igor" not in data and b"secret" not in data and b"Photoshop" not in data)
-            check("JPEG/6: JFIF-миниатюра отрезана (APP0 = 18 байт)",
+            check("JPEG/6: JFIF thumbnail cut off (APP0 = 18 bytes)",
                   any(m == 0xE0 and y - x == 18 for m, x, y in _jpeg_walk(data)[0]))
-            check("JPEG/6: блок SOS..EOI бит в бит", v["scan_same"] and v["image_same"])
+            check("JPEG/6: SOS..EOI block bit for bit", v["scan_same"] and v["image_same"])
             icc_kept = 0xE2 in jmarks(dst)
-            check("JPEG/6: ICC %s" % ("сохранён (STEALTH)" if tag == "stealth" else "убран (PARANOID)"),
+            check("JPEG/6: ICC %s" % ("kept (STEALTH)" if tag == "stealth" else "removed (PARANOID)"),
                   icc_kept == (tag == "stealth"))
-            check("JPEG/6: DQT помечен UNREMOVABLE", res.count(Act.UNREMOVABLE) == 1)
-            check("JPEG/6: Orientation и ICC/JFIF отражены как KEPT" if tag == "stealth"
-                  else "JPEG/6: Orientation и JFIF отражены как KEPT, ICC -- REMOVED с предупреждением",
+            check("JPEG/6: DQT marked UNREMOVABLE", res.count(Act.UNREMOVABLE) == 1)
+            check("JPEG/6: Orientation and ICC/JFIF reported as KEPT" if tag == "stealth"
+                  else "JPEG/6: Orientation and JFIF reported as KEPT, ICC as REMOVED with a "
+                       "warning",
                   any(a.act == Act.KEPT and "Orientation" in a.label for a in res.actions)
                   and (any(a.act == Act.KEPT and "ICC" in a.label for a in res.actions) if tag == "stealth"
-                       else any(a.act == Act.REMOVED and "ICC" in a.label and "цвета" in a.note
+                       else any(a.act == Act.REMOVED and "ICC" in a.label and "colors" in a.note
                                 for a in res.actions)))
 
             res, before, after, v, dst = results[("jpeg_phone_little_endian_orient8.jpg", prof)]
-            check("JPEG/8 (II): ориентация 8 сохранена", orient_in_report(after) == 8 and v["orient_dst"] == 8)
+            check("JPEG/8 (II): orientation 8 kept", orient_in_report(after) == 8 and v["orient_dst"] == 8)
 
             res, before, after, v, dst = results[("jpeg_orient1.jpg", prof)]
-            check("JPEG orient=1: EXIF не пишем вовсе", 0xE1 not in jmarks(dst))
+            check("JPEG orient=1: no EXIF written at all", 0xE1 not in jmarks(dst))
 
             res, before, after, v, dst = results[("jpeg_c2pa.jpg", prof)]
-            check("JPEG C2PA: APP11 убраны, предупреждение про детектируемость в note",
-                  0xEB not in jmarks(dst) and any("ДЕТЕКТИРУЕМ" in a.note for a in res.actions))
+            check("JPEG C2PA: APP11 removed, detectability warning in the note",
+                  0xEB not in jmarks(dst) and any("DETECTABLE" in a.note for a in res.actions))
 
             res, before, after, v, dst = results[("jpeg_adobe_cmyk.jpg", prof)]
-            check("JPEG CMYK: APP14 сохранён (иначе цвета ломаются), COM убран",
+            check("JPEG CMYK: APP14 kept (colors break otherwise), COM removed",
                   0xEE in jmarks(dst) and 0xFE not in jmarks(dst)
                   and any(a.act == Act.KEPT and "Adobe" in a.label for a in res.actions))
             res, before, after, v, dst = results[("jpeg_adobe_rgb.jpg", prof)]
-            check("JPEG RGB transform=0: APP14 сохранён", 0xEE in jmarks(dst))
+            check("JPEG RGB transform=0: APP14 kept", 0xEE in jmarks(dst))
             res, before, after, v, dst = results[("jpeg_adobe_ycc.jpg", prof)]
-            check("JPEG YCbCr transform=1: APP14 убран", 0xEE not in jmarks(dst))
+            check("JPEG YCbCr transform=1: APP14 removed", 0xEE not in jmarks(dst))
 
             res, before, after, v, dst = results[("jpeg_scans_with_junk_between.jpg", prof)]
-            check("JPEG мусор МЕЖДУ сканами убран, а сжатые данные целы",
+            check("JPEG junk BETWEEN scans removed, compressed data intact",
                   v["image_same"] and v["scan_same"] is False
                   and not ({0xFE, 0xE1} & set(jmarks(dst))), (v["image_same"], v["scan_same"]))
 
             res, before, after, v, dst = results[("jpeg_already_clean.jpg", prof)]
-            check("JPEG без метаданных: результат побайтно равен входу",
+            check("JPEG without metadata: the result equals the input byte for byte",
                   read(dst) == read(paths["jpeg_already_clean.jpg"]))
 
             res, before, after, v, dst = results[("png_full_orient8.png", prof)]
             names = [t.decode() for t, _, _ in _png_walk(read(dst))[0]]
-            check("PNG: текст/XMP/tIME/eXIf-полный/caBX/приватный чанк/хвост убраны",
+            check("PNG: text/XMP/tIME/full eXIf/caBX/private chunk/tail removed",
                   not ({"tEXt", "zTXt", "iTXt", "tIME", "caBX", "prVt"} & set(names))
                   and _png_walk(read(dst))[1] == len(read(dst)) and b"Igor" not in read(dst), names)
-            check("PNG: ориентация 8 сохранена, GPS/Artist из eXIf ушли",
+            check("PNG: orientation 8 kept, GPS/Artist from eXIf gone",
                   orient_in_report(after) == 8 and "eXIf" in names
                   and not ({f.label for f in after.findings} & leak_labels))
-            check("PNG: gAMA и pHYs (STRUCTURAL) сохранены, оба IDAT на месте",
+            check("PNG: gAMA and pHYs (STRUCTURAL) kept, both IDATs in place",
                   {"gAMA", "pHYs"} <= set(names) and names.count("IDAT") == 2, names)
-            check("PNG: iCCP %s" % ("сохранён" if tag == "stealth" else "убран"),
+            check("PNG: iCCP %s" % ("kept" if tag == "stealth" else "removed"),
                   ("iCCP" in names) == (tag == "stealth"), names)
             res, before, after, v, dst = results[("png_no_meta.png", prof)]
-            check("PNG без метаданных: результат побайтно равен входу",
+            check("PNG without metadata: the result equals the input byte for byte",
                   read(dst) == read(paths["png_no_meta.png"]))
 
             res, before, after, v, dst = results[("webp_full_orient3.webp", prof)]
             d = read(dst)
             ch, _, _ = _webp_walk(d)
             flags = d[ch[0][1]]
-            check("WebP: ориентация 3 сохранена, EXIF/XMP/хвост убраны",
+            check("WebP: orientation 3 kept, EXIF/XMP/tail removed",
                   v["orient_dst"] == 3 and orient_in_report(after) == 3 and b"Igor" not in d
                   and b"secret" not in d and not any(f == b"XMP " for f, _, _ in ch))
-            check("WebP: флаги VP8X = %s, signal inconsistent нет" % ("0x28" if tag == "stealth" else "0x08"),
+            check("WebP: VP8X flags = %s, no inconsistent signal" % ("0x28" if tag == "stealth" else "0x08"),
                   flags == (0x28 if tag == "stealth" else 0x08)
                   and not any(s.kind == "inconsistent" for s in after.signals), hex(flags))
             res, before, after, v, dst = results[("webp_prefixed_orient6.webp", prof)]
-            check("WebP c префиксом Exif: ориентация 6 сохранена, префикс повторён",
+            check("WebP with the Exif prefix: orientation 6 kept, prefix repeated",
                   v["orient_dst"] == 6 and b"Exif\0\0" in read(dst))
             res, before, after, v, dst = results[("webp_flag_without_chunk.webp", prof)]
-            check("WebP флаг без чанка: флаги приведены в порядок",
+            check("WebP flag without a chunk: flags fixed",
                   read(dst)[20] == 0x00 and any(a.act == Act.NORMALIZED for a in res.actions))
 
             res, before, after, v, dst = results[("gif_full.gif", prof)]
             d = read(dst)
-            check("GIF: комментарий, XMP, хвост убраны; NETSCAPE2.0 (зацикливание) оставлен",
+            check("GIF: comment, XMP, tail removed; NETSCAPE2.0 (looping) kept",
                   b"ImageMagick" not in d and b"xmpmeta" not in d and b"PK\x03\x04" not in d
                   and b"NETSCAPE2.0" in d and d.endswith(b"\x3b"))
 
@@ -1666,33 +1685,33 @@ def _selftest() -> int:
             res, before, after, v, dst = results[key]
             check("%s/%s: ok=True" % (key[0], key[1].value), res.ok, res.errors)
 
-        # --- патологии: везде ok=False, errors, без исключений, dst не остаётся ---
+        # --- pathologies: always ok=False, errors, no exceptions, no dst left ---
         print("-" * 100)
-        print("ПАТОЛОГИИ (ожидаем ok=False, errors, без исключений, без файла на диске)")
+        print("PATHOLOGIES (expect ok=False, errors, no exceptions, no file on disk)")
         good_jpeg = cases["jpeg_phone_orient6.jpg"]
         bad = {
-            "пустой файл": b"",
-            "обрезан на середине APP1": good_jpeg[:60],
-            "JPEG без EOI": good_jpeg[:good_jpeg.index(b"\xff\xd9") - 5],
-            "JPEG мусор вместо маркера": b"\xff\xd8\xff" + bytes([0xE0]) + struct.pack(">H", 4)
+            "empty file": b"",
+            "cut in the middle of APP1": good_jpeg[:60],
+            "JPEG without EOI": good_jpeg[:good_jpeg.index(b"\xff\xd9") - 5],
+            "JPEG junk instead of a marker": b"\xff\xd8\xff" + bytes([0xE0]) + struct.pack(">H", 4)
                                           + b"xx" + b"\x00\x11\x22\x33",
-            "JPEG без SOS": b"\xff\xd8" + jfif() + b"\xff\xd9",
-            "PNG битый CRC": png_full.replace(b"Author\0Igor", b"Author\0Igoz"),
-            "PNG обрезан в IDAT": png_full[:png_full.index(b"IDAT") + 10],
-            "PNG без IEND": png([])[:-12],
-            "PNG без IDAT": _PNG_SIG + pchunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+            "JPEG without SOS": b"\xff\xd8" + jfif() + b"\xff\xd9",
+            "PNG broken CRC": png_full.replace(b"Author\0Igor", b"Author\0Igoz"),
+            "PNG cut inside IDAT": png_full[:png_full.index(b"IDAT") + 10],
+            "PNG without IEND": png([])[:-12],
+            "PNG without IDAT": _PNG_SIG + pchunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
                             + pchunk(b"IEND", b""),
-            "PNG: IDAT короче, чем объявляет IHDR": _PNG_SIG
+            "PNG: IDAT shorter than IHDR declares": _PNG_SIG
             + pchunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0))
             + pchunk(b"IDAT", zlib.compress(b"\0" * 10)) + pchunk(b"IEND", b""),
-            "WebP обрезан": webp_full[:40],
-            "GIF обрезан": gif_full[:60],
-            "TIFF (честный отказ)": tiff(b"II", {"IFD0": [(0x013B, 2, b"Igor\0")]}),
-            "HEIC (честный отказ)": struct.pack(">I", 24) + b"ftypheic" + bytes(4) + b"heicmif1" + bytes(40),
-            "не картинка (текст)": b"hello world, this is plain text\n" * 5,
+            "WebP truncated": webp_full[:40],
+            "GIF truncated": gif_full[:60],
+            "TIFF (honest refusal)": tiff(b"II", {"IFD0": [(0x013B, 2, b"Igor\0")]}),
+            "HEIC (honest refusal)": struct.pack(">I", 24) + b"ftypheic" + bytes(4) + b"heicmif1" + bytes(40),
+            "not an image (text)": b"hello world, this is plain text\n" * 5,
         }
         for label, path in broken.items():
-            bad["фикстура проекта: " + label] = read(path) if label in ("jpeg_truncated", "png_ztxt_bomb") else None
+            bad["project fixture: " + label] = read(path) if label in ("jpeg_truncated", "png_ztxt_bomb") else None
         for label, blob in bad.items():
             if blob is None:
                 continue
@@ -1708,28 +1727,28 @@ def _selftest() -> int:
                 res, raised = None, True
             ok = (not raised) and (not res.ok) and bool(res.errors) and not os.path.exists(dst) \
                 and not res.actions and _file_sha(src) == sha0
-            print("  %-42s %s" % (label, ("ok=False: " + res.errors[0][:70]) if res else "ИСКЛЮЧЕНИЕ"))
-            check("патология «%s»: отказ без исключения и без файла" % label, ok,
+            print("  %-42s %s" % (label, ("ok=False: " + res.errors[0][:70]) if res else "EXCEPTION"))
+            check("pathology \"%s\": refused without an exception and without a file" % label, ok,
                   res and (res.ok, res.errors))
-        # dst == src: вход не перезаписываем
+        # dst == src: the input is never overwritten
         src = put("same.jpg", good_jpeg)
         sha0 = _file_sha(src)
         res = clean_image(src, src)
-        check("dst == src: отказ, вход цел", (not res.ok) and _file_sha(src) == sha0, res.errors)
-        res = clean_image(os.path.join(tmp, "нет_такого_файла.jpg"), os.path.join(outdir, "x.jpg"))
-        check("несуществующий вход: отказ без исключения", (not res.ok) and bool(res.errors))
+        check("dst == src: refused, input intact", (not res.ok) and _file_sha(src) == sha0, res.errors)
+        res = clean_image(os.path.join(tmp, "no_such_file.jpg"), os.path.join(outdir, "x.jpg"))
+        check("missing input: refused without an exception", (not res.ok) and bool(res.errors))
         res = clean_image(src, os.path.join(outdir, "x.jpg"), profile="no-such-profile")
-        check("неизвестный профиль: отказ без исключения", (not res.ok) and bool(res.errors))
+        check("unknown profile: refused without an exception", (not res.ok) and bool(res.errors))
         res = clean_image(src, os.path.join(outdir, "kept_icc.jpg"), Profile.PARANOID, keep={"icc"})
-        check("keep={'icc'} оставляет ICC и в PARANOID", res.ok and 0xE2 in jmarks(os.path.join(outdir, "kept_icc.jpg")))
+        check("keep={'icc'} keeps ICC in PARANOID too", res.ok and 0xE2 in jmarks(os.path.join(outdir, "kept_icc.jpg")))
         res = clean_image(src, os.path.join(outdir, "regen.jpg"), Profile.REGENERATE)
-        check("REGENERATE трактуется как PARANOID", res.ok and 0xE2 not in jmarks(os.path.join(outdir, "regen.jpg")))
-        check("в сообщениях об ошибках нет путей и имён файлов",
+        check("REGENERATE is treated as PARANOID", res.ok and 0xE2 not in jmarks(os.path.join(outdir, "regen.jpg")))
+        check("error messages contain no paths or file names",
               all("Users" not in e and tmp not in e for e in
                   clean_image(os.path.join(tmp, "nope.jpg"), os.path.join(outdir, "y.jpg")).errors))
 
-        # недоверенные строки из файла (метки сегментов, комментарии, ключи tEXt, fourcc, appid)
-        # не должны уносить в отчёт управляющие символы
+        # untrusted strings from the file (segment tags, comments, tEXt keys, fourcc, appid)
+        # must not carry control characters into the report
         hostile = {
             "hostile.jpg": jpeg([seg(0xE5, b"Ev\nil\x07tag\0data"), seg(0xFE, b"line1\nline2\x1b[31m")]),
             "hostile.png": png([pchunk(b"tEXt", b"Ke\ny\x07\0va\x1blue"),
@@ -1744,59 +1763,60 @@ def _selftest() -> int:
             hres = clean_image(put(hname, hblob), os.path.join(outdir, "out_" + hname))
             dirty = [a for a in hres.actions
                      if any(c in (a.location + a.label + a.before + a.after) for c in "\n\r\x07\x1b")]
-            check("%s: ok и в actions нет управляющих символов" % hname, hres.ok and not dirty,
+            check("%s: ok and no control characters in actions" % hname, hres.ok and not dirty,
                   (hres.errors, [(a.location, a.label) for a in dirty]))
-        # кириллица и пробелы в путях
+        # Cyrillic and spaces in paths
         ru_dir = os.path.join(tmp, "папка с пробелом")
         os.makedirs(ru_dir)
         ru_src = os.path.join(ru_dir, "фото Игорь.jpg")
         with open(ru_src, "wb") as fh:
             fh.write(good_jpeg)
         res = clean_image(ru_src, os.path.join(ru_dir, "результат.jpg"))
-        check("кириллица и пробелы в путях", res.ok, res.errors)
-        # выходной каталог не существует: отказ без исключения, вход цел
+        check("Cyrillic and spaces in paths", res.ok, res.errors)
+        # the output directory doesn't exist: refused without an exception, input intact
         sha0 = _file_sha(ru_src)
-        res = clean_image(ru_src, os.path.join(tmp, "нет такого каталога", "x.jpg"))
-        check("dst в несуществующем каталоге: отказ без исключения", (not res.ok) and bool(res.errors)
+        res = clean_image(ru_src, os.path.join(tmp, "no such directory", "x.jpg"))
+        check("dst in a missing directory: refused without an exception", (not res.ok) and bool(res.errors)
               and _file_sha(ru_src) == sha0, res.errors)
-        # откат: если проверка результата не прошла, dst не остаётся на диске
+        # rollback: if verification fails, dst doesn't remain on disk
         real_verify = globals()["_verify"]
-        globals()["_verify"] = lambda fmt, a, b: {"ok": False, "errors": ["подмена для теста отката"]}
+        globals()["_verify"] = lambda fmt, a, b: {"ok": False, "errors": ["stub for the rollback "
+                                                                          "test"]}
         try:
             rb_dst = os.path.join(outdir, "rollback.jpg")
             res = clean_image(ru_src, rb_dst)
         finally:
             globals()["_verify"] = real_verify
-        check("провал проверки результата: dst удалён, actions пуст, вход цел",
+        check("verification failure: dst removed, actions empty, input intact",
               (not res.ok) and not os.path.exists(rb_dst) and not res.actions
               and _file_sha(ru_src) == sha0, res.errors)
 
-        # --- необязательный независимый декодер: Pillow, если он вдруг есть ------
+        # --- optional independent decoder: Pillow, if it happens to be installed ------
         print("-" * 100)
         try:
             _pillow_check(tmp, outdir, check)
         except Exception as exc:                           # noqa: BLE001
-            print("  Pillow-проверка прервана: %s: %s" % (type(exc).__name__, exc))
-            check("Pillow-проверка не должна падать", False, exc)
+            print("  Pillow check interrupted: %s: %s" % (type(exc).__name__, exc))
+            check("the Pillow check must not crash", False, exc)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
     print("=" * 100)
-    print("ИТОГО: %s" % ("все проверки пройдены" if not fails else "ПРОВАЛЕНО: %d" % len(fails)))
+    print("TOTAL: %s" % ("all checks passed" if not fails else "FAILED: %d" % len(fails)))
     for f in fails:
         print("  - " + f)
     return 1 if fails else 0
 
 
 def _pillow_check(tmp, outdir, check) -> None:
-    """Независимый декодер (если установлен): пиксели ДО и ПОСЛЕ чистки совпадают бит в бит,
-    ориентация читается. В продукте Pillow не нужен -- это только внешний свидетель."""
+    """Independent decoder (if installed): pixels BEFORE and AFTER cleaning match bit for bit,
+    and the orientation is readable. The product doesn't need Pillow: it's only an outside witness."""
     try:
         from PIL import Image
     except ImportError:
-        print("  Pillow не найден: независимая декодировка пропущена")
+        print("  Pillow not found: independent decoding skipped")
         return
-    print("НЕЗАВИСИМЫЙ ДЕКОДЕР (Pillow %s): реальные картинки, пиксели до == после" % Image.__version__)
+    print("INDEPENDENT DECODER (Pillow %s): real images, pixels before == after" % Image.__version__)
     import io
     w, h = 64, 48
     base = Image.frombytes("RGB", (w, h), bytes((x * 4 + y, y * 5, 255 - x * 3) [c] & 255
@@ -1824,7 +1844,7 @@ def _pillow_check(tmp, outdir, check) -> None:
     from PIL.PngImagePlugin import PngInfo
     info = PngInfo()
     info.add_text("Author", "Igor")
-    info.add_itxt("Description", "секрет")
+    info.add_itxt("Description", "secret")
     base.save(os.path.join(tmp, "pil.png"), "PNG", pnginfo=info, exif=exif, **({"icc_profile": profile} if profile else {}))
     made["pil.png"] = "pil.png"
     rgba = base.convert("RGBA")
@@ -1836,7 +1856,7 @@ def _pillow_check(tmp, outdir, check) -> None:
                   xmp=b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>", **({"icc_profile": profile} if profile else {}))
         made["pil.webp"] = "pil.webp"
     except Exception as exc:                             # noqa: BLE001
-        print("  WebP не собрался Pillow (%s): пропущено" % type(exc).__name__)
+        print("  Pillow couldn't build the WebP (%s): skipped" % type(exc).__name__)
     frames = [base.convert("P").point(lambda v, k=k: (v + k * 20) % 256) for k in range(3)]
     frames[0].save(os.path.join(tmp, "pil.gif"), "GIF", save_all=True, append_images=frames[1:],
                    duration=80, loop=0, comment=b"secret gif comment")
@@ -1856,20 +1876,21 @@ def _pillow_check(tmp, outdir, check) -> None:
             dst = os.path.join(outdir, "pil_%s_%s" % (prof.value, name))
             res = clean_image(src, dst, prof)
             if not res.ok:
-                check("Pillow/%s/%s: чистка ok" % (name, prof.value), False, res.errors)
+                check("Pillow/%s/%s: cleaning ok" % (name, prof.value), False, res.errors)
                 continue
             fa, loop_a, orient_a = frames_of(src)
             fb, loop_b, orient_b = frames_of(dst)
             same = fa == fb
-            print("  %-22s %-8s пиксели совпали=%s кадров=%d ориентация %s->%s loop %s->%s размер %d->%d Б"
+            print("  %-22s %-8s pixels match=%s frames=%d orientation %s->%s loop %s->%s size "
+                  "%d->%d B"
                   % (name, prof.value, same, len(fb), orient_a, orient_b, loop_a, loop_b,
                      os.path.getsize(src), os.path.getsize(dst)))
-            check("Pillow/%s/%s: пиксели ДО и ПОСЛЕ идентичны" % (name, prof.value), same)
-            check("Pillow/%s/%s: ориентация и зацикливание сохранены" % (name, prof.value),
+            check("Pillow/%s/%s: pixels BEFORE and AFTER are identical" % (name, prof.value), same)
+            check("Pillow/%s/%s: orientation and looping kept" % (name, prof.value),
                   orient_a == orient_b and loop_a == loop_b, (orient_a, orient_b, loop_a, loop_b))
             with open(dst, "rb") as fh:
                 blob = fh.read()
-            check("Pillow/%s/%s: секреты из файла исчезли" % (name, prof.value),
+            check("Pillow/%s/%s: secrets from the file are gone" % (name, prof.value),
                   not any(s in blob for s in (b"Igor", b"SERIAL-123", b"secret", b"Canon", b"EOS R5",
                                               b"Photoshop 25", b"2024:05:17")))
 

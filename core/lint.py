@@ -1,37 +1,39 @@
-"""Оценка, выглядит ли файл обработанным. Фаза 3.
+"""Score whether a file looks processed. Phase 3.
 
-Не инспектирует файл заново и не ищет новые метаданные: сигналы уже собрал
-инспектор. Здесь они складываются в одну оценку, которую отчёт показывает
-после чистки. new_signals диспетчера -- частный случай: какие признаки
-появились именно от нашей чистки. Эта оценка смотрит на результат целиком,
-включая признаки, которые были и до неё.
+Doesn't re-inspect the file or look for new metadata: the inspector has
+already collected the signals. Here they're folded into one score that the
+report shows after cleaning. The dispatcher's new_signals is a special
+case: which traces came from our cleaning specifically. This score looks
+at the result as a whole, including traces that were there before.
 
-Публичный API:
+Public API:
     detect(report) -> (level, reasons)
         level: "none" | "noticeable" | "obvious"
-        reasons: короткие строки для отчёта, без значений из файла
+        reasons: short lines for the report, no values from the file
 
-Исключений не бросает.
+Never raises.
 """
 
 from __future__ import annotations
 
+from core.i18n import tr
+
 __all__ = ["detect"]
 
-# ai хуже scrubbed: файл выглядит не чищеным, а собранным программой.
-# inconsistent сам по себе не значит «чистили» -- это противоречие в данных.
+# ai is worse than scrubbed: the file looks not cleaned but built by a program.
+# inconsistent alone doesn't mean "scrubbed": it's a contradiction in the data.
 _OBVIOUS = "obvious"
 _NOTICE = "noticeable"
 _NONE = "none"
 
 
 def detect(report) -> tuple:
-    """Сигналы отчёта -> насколько файл выглядит обработанным.
+    """Report signals -> how processed the file looks.
 
-    report: Report или любой объект с .signals (элементы с .kind).
-    Возврат: (level, reasons). level -- none / noticeable / obvious.
-    reasons -- список пояснений без значений из файла.
-    При любом сбое: ("none", []).
+    report: a Report or any object with .signals (items with .kind).
+    Returns (level, reasons). level is none / noticeable / obvious.
+    reasons is a list of explanations without values from the file.
+    On any failure: ("none", []).
     """
     try:
         signals = list(getattr(report, "signals", None) or [])
@@ -45,24 +47,24 @@ def detect(report) -> tuple:
             kind = s[0]
         if kind:
             kinds.add(kind)
-        # Противоречие с высокой уверенностью («ModDate раньше CreationDate»,
-        # «Aptos в документе 2019 года») само говорит о ручной правке. Слабые
-        # (created == modified) бывают у честных файлов -- их не считаем.
+        # A high-confidence contradiction ("ModDate earlier than CreationDate",
+        # "Aptos in a 2019 document") points to manual editing by itself. Weak ones
+        # (created == modified) happen in honest files, so they don't count.
         if kind == "inconsistent" and getattr(s, "confidence", "") == "high":
             edited += 1
     reasons = []
     if "ai" in kinds:
         reasons.append(
-            "Инспектор считает файл собранным библиотекой или генератором, "
-            "а не сохранённым в офисном приложении.")
+            tr("The inspector considers the file built by a library or generator, not saved by "
+               "an office application."))
     if "scrubbed" in kinds:
         reasons.append(
-            "Есть признаки чистки: пустые поля личности или контейнер, "
-            "который так не пишет заявленное приложение.")
+            tr("There are signs of scrubbing: empty identity fields or a container the claimed "
+               "application doesn't write."))
     if edited:
         reasons.append(
-            "Метаданные противоречат сами себе (%d): даты, версии или шрифты "
-            "не сходятся так, как бывает только после ручной правки." % edited)
+            tr("The metadata contradicts itself (%d): dates, versions or fonts disagree in a way "
+               "that only happens after manual editing.") % edited)
     if "ai" in kinds:
         return _OBVIOUS, reasons
     if "scrubbed" in kinds or edited:

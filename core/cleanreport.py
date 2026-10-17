@@ -1,26 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Рендер CleanResult в отчёт о чистке: Telegram-HTML и plain-text для CLI.
+"""Render a CleanResult as a cleaning report: Telegram HTML and plain text for the CLI.
 
-Отчёт о чистке опаснее отчёта об инспекции: пользователь отправит файл дальше
-на основании того, что здесь написано. Поэтому главное правило -- отчёт не
-имеет права обещать больше, чем доказано повторной инспекцией результата:
+A cleaning report is more dangerous than an inspection report: the user will
+forward the file based on what it says. So the main rule is that the report
+must never promise more than re-inspection of the output has proven:
 
-  * result is None / ok == False  -> «ФАЙЛ НЕ ПОЧИЩЕН» и причина;
-  * формат без чистильщика         -> «НЕ ПОЧИЩЕН, формат только инспектируется
-                                       (фаза N)»; на ok=True без единого
-                                       действия такому формату не верим;
-  * critical_after == -1           -> «результат не проверен», чистоту не заявляем;
-  * critical_after > 0             -> «НЕ ЧИСТО» + что именно осталось и почему;
-  * critical_after == 0            -> «чисто» -- и только тогда, с оговорками,
-                                       если были сбои, ошибки или неубираемое.
+  * result is None / ok == False  -> "FILE NOT CLEANED" and the reason;
+  * format without a cleaner       -> "NOT CLEANED, format is inspect-only
+                                       (phase N)"; ok=True with zero
+                                       actions is not trusted for such a format;
+  * critical_after == -1           -> "result not verified", no claim of cleanliness;
+  * critical_after > 0             -> "NOT CLEAN" + what exactly remains and why;
+  * critical_after == 0            -> "clean", and only then, with caveats
+                                       if there were failures, errors or unremovables.
 
-Подходы повторяют core/report.py (экранирование, нарезка по UTF-16, посекционная
-деградация): значения из файла недоверенные, идут через clip() и html.escape();
-одна битая запись -- строка об ошибке на её месте, а не пустой отчёт.
+The approach mirrors core/report.py (escaping, UTF-16 splitting, per-section
+degradation): file values are untrusted and go through clip() and html.escape();
+one broken entry becomes an error line in its place, not an empty report.
 
-Приватность: ни src, ни dst в отчёт не попадают -- имя файла это метаданные.
+Privacy: neither src nor dst ends up in the report; a file name is metadata.
 
-Только stdlib.
+Stdlib only.
 """
 
 from __future__ import annotations
@@ -34,36 +34,37 @@ from core import sniff
 from core.cleanmodel import ACT_TITLE, Act
 from core.model import _ABS_PATH, PATH_STUB, clip
 from core.report import spoiler
+from core.i18n import tr
 
 __all__ = ["render_telegram", "render_plain", "summary_line"]
 
 TG_LIMIT = 4096
-TG_BUDGET = TG_LIMIT - 64      # запас под префикс нумерации частей
+TG_BUDGET = TG_LIMIT - 64      # margin for the part-numbering prefix
 WIDTH = 100
 
-# Форматы, для которых чистильщик есть (clean_pdf, clean_image, clean_ooxml).
-# Должно совпадать с ключами core.clean._CLEANERS, развёрнутыми до форматов:
-# по этому множеству бот решает, показывать ли кнопки чистки.
+# Formats that have a cleaner (clean_pdf, clean_image, clean_ooxml).
+# Must match the keys of core.clean._CLEANERS expanded to formats:
+# the bot uses this set to decide whether to show cleaning buttons.
 CLEANABLE = frozenset({"pdf", "jpeg", "png", "webp", "gif", "docx", "xlsx", "pptx",
                         "rtf", "odt", "ods", "odp"})
 
-# Чистильщика нет, фаза по docs/ROADMAP.md. Запасной путь: основной номер даёт
-# диспетчер через planned_phase, см. _no_cleaner(). Держать эти числа
-# согласованными с core.clean._PLANNED обязательно -- иначе пользователь увидит
-# в одном сообщении две разные фазы для одного формата.
-# OOXML здесь больше нет: с фазы 2 docx/xlsx/pptx чистятся, см. CLEANABLE.
-# В фазе 4 остаётся только то, что на месте не чистится в принципе:
-# легаси OLE2 с историей правок, вшитой в контейнер.
+# No cleaner yet, phase per docs/ROADMAP.md. Fallback only: the primary number
+# comes from the dispatcher via planned_phase, see _no_cleaner(). Keeping these
+# numbers in sync with core.clean._PLANNED is mandatory, otherwise the user sees
+# two different phases for one format in a single message.
+# OOXML is gone from here: since phase 2 docx/xlsx/pptx are cleaned, see CLEANABLE.
+# Phase 4 keeps only what can't be cleaned in place at all:
+# legacy OLE2 with revision history embedded in the container.
 _PHASE = {
     "doc": 4, "xls": 4, "ppt": 4, "ole": 4,
 }
-# TIFF/HEIC clean_image отклоняет намеренно (риск испортить файл), это не «ещё не дошли».
+# clean_image refuses TIFF/HEIC on purpose (risk of damaging the file); it's not "not yet".
 _REFUSED = frozenset({"tiff", "heic"})
 
-# Сколько находок инспектора может дать одно REGENERATED-действие: пара
-# trailer /ID[0] + /ID[1] у PDF -- две находки IDENTITY. Нужно только для оценки
-# «остаток объяснён списком действий»; завышение маскирует необъяснённый остаток,
-# поэтому взято минимальное из известных значений.
+# How many inspector findings one REGENERATED action can account for: the PDF
+# trailer /ID[0] + /ID[1] pair is two IDENTITY findings. Only used to judge
+# "the remainder is explained by the action list"; overestimating would hide an
+# unexplained remainder, so the smallest known value is used.
 _PER_REGEN = 2
 
 _DONE = (Act.REMOVED, Act.BLANKED, Act.NORMALIZED, Act.REGENERATED)
@@ -72,27 +73,27 @@ _ICON = {
     Act.REGENERATED: "\U0001F501", Act.KEPT: "\U0001F4CC", Act.UNREMOVABLE: "\U0001F512",
     Act.FAILED: "❌",
 }
-# Лимиты длины значений и пояснений по видам действий. Выбраны так, чтобы даже
-# строка из одних "&" (при экранировании x5) влезла в одно сообщение Telegram.
+# Length limits for values and notes per action kind. Chosen so that even a
+# string of nothing but "&" (x5 when escaped) fits in one Telegram message.
 _VAL_CAP = {Act.REMOVED: 200, Act.BLANKED: 200, Act.NORMALIZED: 120,
             Act.REGENERATED: 120, Act.KEPT: 160, Act.UNREMOVABLE: 160, Act.FAILED: 160}
 _NOTE_CAP = {Act.REMOVED: 160, Act.BLANKED: 160, Act.NORMALIZED: 240,
              Act.REGENERATED: 240, Act.KEPT: 300, Act.UNREMOVABLE: 400, Act.FAILED: 400}
-# Пояснение этих видов важнее значения: выносим на отдельную строку.
+# For these kinds the note matters more than the value: put it on its own line.
 _NOTE_OWN_LINE = (Act.KEPT, Act.UNREMOVABLE, Act.FAILED)
 
 _E = namedtuple("_E", "act loc label before after note")
 
-# Вердикты, при которых почищенного файла нет: списки действий не показываем,
-# иначе «Удалено: Автор» читалось бы как сделанное.
+# Verdicts with no cleaned file: action lists aren't shown, otherwise
+# "Removed: Author" would read as something that was done.
 _NOT_OK = ("none", "unsupported", "failed")
 
 
-# --- безопасное чтение недоверенного результата -----------------------------
+# --- safe reading of an untrusted result -------------------------------------
 
 
 def _c(value, cap=400) -> str:
-    """clip(), который не бросает даже на объекте с падающим __str__."""
+    """clip() that doesn't raise even on an object with a failing __str__."""
     try:
         return clip(value, cap)
     except Exception:
@@ -100,7 +101,7 @@ def _c(value, cap=400) -> str:
 
 
 def _g(obj, name, default=None):
-    """getattr, который не падает на падающем свойстве; None -> default."""
+    """getattr that doesn't fail on a failing property; None -> default."""
     try:
         v = getattr(obj, name)
     except Exception:
@@ -109,8 +110,8 @@ def _g(obj, name, default=None):
 
 
 def _try(obj, name):
-    """(значение, прочиталось ли). Нужен там, где «поле не прочиталось» и
-    «поле пустое» -- разные факты: первое нельзя выдавать за второе."""
+    """(value, whether it was read). Needed where "field couldn't be read" and
+    "field is empty" are different facts: the first must not pass as the second."""
     try:
         return getattr(obj, name), True
     except Exception:
@@ -118,8 +119,8 @@ def _try(obj, name):
 
 
 def _val(v):
-    """Enum -> его значение. str(Profile.STEALTH) в Python 3.11 даёт
-    'Profile.STEALTH', а не 'stealth'."""
+    """Enum -> its value. str(Profile.STEALTH) in Python 3.11 gives
+    'Profile.STEALTH', not 'stealth'."""
     try:
         return getattr(v, "value", v)
     except Exception:
@@ -127,7 +128,7 @@ def _val(v):
 
 
 def _num(v) -> int:
-    """Счётчик доказательства. Нечисло и отрицательное = -1 = «не проверялось»."""
+    """Proof counter. Non-numbers and negatives = -1 = "not verified"."""
     try:
         n = int(v)
     except Exception:
@@ -136,25 +137,25 @@ def _num(v) -> int:
 
 
 def _scrub(e) -> str:
-    """Текст ошибки без абсолютных путей: CleanResult.err() их режет, но
-    errors можно дополнить и в обход него."""
+    """Error text without absolute paths: CleanResult.err() strips them, but
+    errors can also be appended bypassing it."""
     try:
-        return _c(_ABS_PATH.sub(PATH_STUB, str(e)), 600)
+        return _c(_ABS_PATH.sub(tr(PATH_STUB), str(e)), 600)
     except Exception:
-        return "(текст ошибки не прочитался)"
+        return tr("(error text could not be read)")
 
 
 def _snap(result):
-    """Снимок результата: каждое поле прочитано один раз и защищённо.
-    Дальше рендер работает только со снимком и уже не может упасть на
-    битом объекте. Нечитаемое -- это запись в errs, а не молчание."""
+    """Snapshot of the result: every field is read once, defensively.
+    From here on rendering works only with the snapshot and can't crash on
+    a broken object. Anything unreadable becomes an entry in errs, not silence."""
     s = SimpleNamespace(has=result is not None, errs=[])
     s.fmt = _c(_val(_g(result, "fmt", "")), 40).lower()
     if not s.has:
-        s.fmt_name = "формат неизвестен"
+        s.fmt_name = tr("format unknown")
     else:
-        s.fmt_name = _c(sniff.pretty(s.fmt), 80) if s.fmt else "формат не указан"
-    s.profile = _c(_val(_g(result, "profile", "")), 40) or "не указан"
+        s.fmt_name = _c(sniff.pretty(s.fmt), 80) if s.fmt else tr("format not specified")
+    s.profile = _c(_val(_g(result, "profile", "")), 40) or tr("not specified")
     try:
         s.ok = bool(_g(result, "ok", False))
     except Exception:
@@ -164,12 +165,12 @@ def _snap(result):
     s.sb = _num(_g(result, "sensitive_before", -1))
     s.sa = _num(_g(result, "sensitive_after", -1))
 
-    # Доказательство от диспетчера (DispatchResult из core/clean.py), если оно
-    # есть. Оно ПРИОРИТЕТНЕЕ эвристики по critical_after: диспетчер ЗНАЕТ ответ
-    # из survived_values (какие исходные значения встречаются в результате), а
-    # отчёт может его только угадывать по счётчикам действий. Пока отчёт
-    # угадывал сам, он расходился с диспетчером в обе стороны -- и кричал
-    # «НЕ ЧИСТО» на доказанно чистый файл, и называл чистым недоказанный.
+    # Proof from the dispatcher (DispatchResult from core/clean.py), if present.
+    # It TAKES PRECEDENCE over the critical_after heuristic: the dispatcher KNOWS
+    # the answer from survived_values (which original values appear in the
+    # output), while the report can only guess from action counters. While the
+    # report guessed on its own, it disagreed with the dispatcher both ways:
+    # shouting "NOT CLEAN" at a proven-clean file and calling an unproven one clean.
     s.has_evidence = False
     s.verified = False
     s.survived_n = 0
@@ -180,12 +181,12 @@ def _snap(result):
             s.verified = bool(_g(result, "verified", False))
             sv = _g(result, "survived", None)
             s.survived_n = len(list(sv)) if sv is not None else 0
-            # residual: (место, поле, новое ли значение). Не новое -- было и в исходнике.
+            # residual: (location, field, is the value new). Not new = it was in the source too.
             s.res_old = ["%s %s" % (r[0], r[1]) for r in (_g(result, "residual", None) or []) if not r[2]]
     except Exception:
-        s.errs.append("доказательство диспетчера не прочиталось: вердикт по эвристике")
+        s.errs.append(tr("dispatcher proof could not be read: verdict by heuristic"))
     s.planned_phase = _num(_g(result, "planned_phase", 0))
-    # Сигналы, появившиеся ПОСЛЕ чистки: файл теперь опознаётся как обработанный.
+    # Signals that appeared AFTER cleaning: the file is now recognizable as processed.
     s.new_signals = []
     s.detect = ""
     s.detect_why = []
@@ -196,7 +197,7 @@ def _snap(result):
         s.detect = _c(_g(result, "detect", ""), 20)
         s.detect_why = [_c(x, 300) for x in (_g(result, "detect_why", None) or [])]
     except Exception:
-        s.errs.append("список новых сигналов не прочитался")
+        s.errs.append(tr("list of new signals could not be read"))
 
     entries, bad = [], 0
     raw, got = _try(result, "actions")
@@ -206,7 +207,7 @@ def _snap(result):
         items = []
         got = False
     if s.has and not got:
-        s.errs.append("список действий не прочитался: отчёт неполон")
+        s.errs.append(tr("action list could not be read: the report is incomplete"))
     for a in items:
         try:
             entries.append(_E(Act(_val(a.act)), _c(a.location, 120), _c(a.label, 120),
@@ -214,7 +215,7 @@ def _snap(result):
         except Exception:
             bad += 1
     if bad:
-        s.errs.append("записей о действиях не прочитано: %d, список выше неполон" % bad)
+        s.errs.append(tr("action entries not read: %d, the list above is incomplete") % bad)
     s.by = {}
     for e in entries:
         s.by.setdefault(e.act, []).append(e)
@@ -227,7 +228,7 @@ def _snap(result):
     except Exception:
         raw, got = [], False
     if s.has and not got:
-        s.errs.append("список ошибок не прочитался")
+        s.errs.append(tr("error list could not be read"))
     s.errs = [_scrub(e) for e in raw] + s.errs
     return s
 
@@ -236,30 +237,30 @@ def _n(s, *acts) -> int:
     return sum(len(s.by.get(a, [])) for a in acts)
 
 
-# --- вердикт -----------------------------------------------------------------
+# --- verdict -----------------------------------------------------------------
 
 
 def _no_cleaner(s) -> str:
-    # Номер фазы берём у диспетчера: у него таблица _PLANNED, и если отчёт
-    # назовёт свой номер, пользователь увидит в одном сообщении две разные
-    # фазы для одного формата. Своя таблица -- только запасной путь.
+    # The phase number comes from the dispatcher: it owns the _PLANNED table, and
+    # if the report named its own number, the user would see two different phases
+    # for one format in a single message. Our table is only a fallback.
     if s.planned_phase > 0:
-        return ("формат %s пока только инспектируется, чистка появится в фазе %d"
+        return (tr("format %s is inspect-only for now; cleaning arrives in phase %d")
                 % (s.fmt_name, s.planned_phase))
     if s.fmt in _PHASE:
-        return ("формат %s пока только инспектируется, чистка появится в фазе %d"
+        return (tr("format %s is inspect-only for now; cleaning arrives in phase %d")
                 % (s.fmt_name, _PHASE[s.fmt]))
     if s.fmt in _REFUSED:
-        return ("формат %s чистка намеренно не берёт: пересборка без перекодирования "
-                "рискует испортить файл" % s.fmt_name)
+        return (tr("format %s is deliberately not cleaned: rebuilding it without re-encoding "
+                   "risks damaging the file") % s.fmt_name)
     if not s.fmt:
-        return "в результате не указан формат файла, чистка не подтверждена"
-    return "для типа файла «%s» чистка не предусмотрена" % s.fmt_name
+        return tr("the result doesn't specify the file format; cleaning not confirmed")
+    return tr("no cleaning is provided for file type \"%s\"") % s.fmt_name
 
 
 def _pair(before, after, arrow) -> str:
     b = str(before) if before >= 0 else "?"
-    a = str(after) if after >= 0 else "не проверялось"
+    a = str(after) if after >= 0 else tr("not verified")
     return b + arrow + a
 
 
@@ -268,157 +269,158 @@ def _V(kind, mark, head, lines, short):
 
 
 def _verdict(s):
-    """Один честный вердикт. Порядок проверок -- порядок убывания тяжести."""
+    """One honest verdict. Checks run in order of decreasing severity."""
     f, u = _n(s, Act.FAILED), _n(s, Act.UNREMOVABLE)
-    hidden = (["Записи о действиях (%d) не показаны: почищенного файла нет, и выдавать их за "
-               "сделанное было бы неправдой." % s.n_actions] if s.n_actions else [])
+    hidden = ([tr("Action entries (%d) are not shown: there is no cleaned file, and presenting "
+                  "them as done would be untrue.") % s.n_actions] if s.n_actions else [])
     cav = []
     if f:
-        cav.append("не удалось обработать: %d" % f)
+        cav.append(tr("failed to process: %d") % f)
     if u:
-        cav.append("убрать невозможно: %d" % u)
+        cav.append(tr("cannot be removed: %d") % u)
     if s.errs:
-        cav.append("ошибок при чистке: %d" % len(s.errs))
-    cav_line = ["Оговорки: %s. Подробности в разделах ниже." % "; ".join(cav)] if cav else []
+        cav.append(tr("errors during cleaning: %d") % len(s.errs))
+    cav_line = [tr("Caveats: %s. Details in the sections below.") % "; ".join(cav)] if cav else []
     reason = s.errs[0] if s.errs else ""
 
     if not s.has:
-        return _V("none", "bad", "ФАЙЛ НЕ ПОЧИЩЕН: чистка не вернула результата.",
-                  ["Это внутренний сбой, а не «нечего чистить». Почищенной копии нет: "
-                   "ничего не отправляйте как почищенное."],
-                  "чистка не вернула результата: файл НЕ почищен")
+        return _V("none", "bad", tr("FILE NOT CLEANED: cleaning returned no result."),
+                  [tr("This is an internal failure, not \"nothing to clean\". There is no "
+                      "cleaned copy: don't send anything as cleaned.")],
+                  tr("cleaning returned no result: file NOT cleaned"))
 
     if s.fmt not in CLEANABLE and not (s.ok and s.n_actions):
         why = _no_cleaner(s)
-        lines = ["Сейчас для него доступна только инспекция: она показывает, что лежит в "
-                 "файле, но ничего не убирает. Почищенной копии нет, не отправляйте этот "
-                 "файл как почищенный."]
+        lines = [tr("Only inspection is available for it right now: it shows what's in the file "
+                    "but removes nothing. There is no cleaned copy; don't send this file as "
+                    "cleaned.")]
         if s.ok:
-            lines.append("Чистильщик отчитался об успехе без единого действия: этому нельзя верить.")
+            lines.append(tr("The cleaner reported success without a single action: this can't be "
+                            "trusted."))
         if reason:
-            lines.append("Сообщение чистильщика: %s" % reason)
+            lines.append(tr("Cleaner message: %s") % reason)
         lines += hidden
-        return _V("unsupported", "bad", "ФАЙЛ НЕ ПОЧИЩЕН: %s." % why, lines, "НЕ почищен: %s" % why)
+        return _V("unsupported", "bad", tr("FILE NOT CLEANED: %s.") % why, lines, tr("NOT cleaned: %s") % why)
 
     if not s.ok:
-        return _V("failed", "bad", "ФАЙЛ НЕ ПОЧИЩЕН: чистка не завершилась.",
-                  ["Причина: %s" % (reason or "не указана"),
-                   "Почищенной копии нет: ничего не отправляйте как почищенное."] + hidden,
-                  "НЕ почищен, чистка не завершилась")
+        return _V("failed", "bad", tr("FILE NOT CLEANED: cleaning did not finish."),
+                  [tr("Reason: %s") % (reason or tr("not specified")),
+                   tr("There is no cleaned copy: don't send anything as cleaned.")] + hidden,
+                  tr("NOT cleaned, cleaning did not finish"))
 
-    # --- доказательство диспетчера приоритетнее эвристики ------------------
-    # Диспетчер сверяет ЗНАЧЕНИЯ: какие исходные чувствительные значения
-    # встречаются в находках результата. Пустой список и есть доказательство
-    # чистоты -- в отличие от critical_after, который считает и НОВЫЕ находки
-    # (перегенерированный trailer /ID ничего об исходнике не говорит).
+    # --- the dispatcher's proof takes precedence over the heuristic ----------
+    # The dispatcher compares VALUES: which original sensitive values appear
+    # in the output's findings. An empty list is the proof of cleanliness,
+    # unlike critical_after, which also counts NEW findings (a regenerated
+    # trailer /ID says nothing about the source).
     if s.has_evidence:
         if not s.verified:
             return _V("unverified", "warn",
-                      "РЕЗУЛЬТАТ НЕ ПРОВЕРЕН: утверждать, что файл чист, нельзя.",
-                      ["Повторная инспекция результата не прогонялась, сверить "
-                       "исходные значения с содержимым результата было нечем. "
-                       "Прогоните инспекцию, прежде чем считать файл почищенным."]
-                      + cav_line, "результат не проверен")
+                      tr("RESULT NOT VERIFIED: the file can't be claimed clean."),
+                      [tr("The output was not re-inspected, so there was nothing to compare the "
+                          "original values against. Run inspection before treating the file as "
+                          "cleaned.")]
+                      + cav_line, tr("result not verified"))
         if s.survived_n:
             return _V("residual", "bad",
-                      "НЕ ЧИСТО: исходных значений пережило чистку: %d." % s.survived_n,
-                      ["Это значения из самого исходного файла, найденные в "
-                       "результате: чистка их не убрала. Такой файл отправлять "
-                       "нельзя."] + cav_line,
-                      "НЕ чисто: выжило исходных значений %d" % s.survived_n)
+                      tr("NOT CLEAN: original values survived cleaning: %d.") % s.survived_n,
+                      [tr("These are values from the original file found in the output: cleaning "
+                          "didn't remove them. Don't send this file.")] + cav_line,
+                      tr("NOT clean: %d original values survived") % s.survived_n)
         was = _pair(s.cb, s.ca, " -> ")
-        lines = ["Доказательство: ни одно исходное чувствительное значение не "
-                 "найдено в результате. Сверка идёт значениями, а не счётчиками."]
+        lines = [tr("Proof: no original sensitive value was found in the output. The comparison "
+                    "uses values, not counters.")]
         if s.detect == "obvious":
             lines.append(
-                "ОЦЕНКА: файл выглядит собранным программой, а не сохранённым "
-                "в офисном приложении. Для многих задач это хуже следа чистки.")
+                tr("ASSESSMENT: the file looks built by a program rather than saved by an office "
+                   "application. For many purposes this is worse than a cleaning trace."))
         elif s.detect == "noticeable":
             lines.append(
-                "ОЦЕНКА: файл выглядит чищеным. Утечки исходных значений нет, "
-                "но сам факт обработки виден.")
+                tr("ASSESSMENT: the file looks scrubbed. No original values leak, but the fact "
+                   "of processing is visible."))
         elif s.detect == "none":
             lines.append(
-                "ОЦЕНКА: инспектор не видит признаков обработки. Это не гарантия: "
-                "он видит только метаданные, не стиль текста и не водяные знаки.")
+                tr("ASSESSMENT: the inspector sees no signs of processing. This is not a "
+                   "guarantee: it only sees metadata, not writing style or watermarks."))
         if s.new_signals:
             lines.append(
-                "НО ФАЙЛ ТЕПЕРЬ ОПОЗНАЁТСЯ КАК ЧИЩЕНЫЙ. Утечки нет, однако после "
-                "чистки появились признаки обработки (%s), которых в исходнике не "
-                "было. Если вам важно, чтобы сам факт чистки не был виден, этого "
-                "результата недостаточно." % ", ".join(sorted(set(s.new_signals))))
+                tr("BUT THE FILE IS NOW RECOGNIZABLE AS SCRUBBED. Nothing leaks, but cleaning "
+                   "introduced signs of processing (%s) that weren't in the original. If it "
+                   "matters that the cleaning itself stays invisible, this result is not enough.") % ", ".join(sorted(set(s.new_signals))))
             lines.append(
-                "Для docx, xlsx и pptx это предел формата, а не недоработка: пустые "
-                "dc:creator и cp:lastModifiedBy вместе сами являются признаком, а "
-                "оставить настоящее имя значит не почистить, подставить чужое -- "
-                "подделать провенанс. Незаметность даёт только пересоздание файла "
-                "стоковым приложением (режим Regenerate, фаза 4).")
+                tr("For docx, xlsx and pptx this is a limit of the format, not a shortcoming: "
+                   "empty dc:creator and cp:lastModifiedBy together are a trace in themselves, "
+                   "keeping the real name means not cleaning, and substituting someone else's "
+                   "means forging provenance. Only regenerating the file with a stock "
+                   "application gives invisibility (Regenerate mode, phase 4)."))
         if s.ca > 0 and s.res_old:
-            lines.append("Критичных находок в результате: %d. Из них %d с тем же значением, что "
-                         "и в исходнике (%s): в сверку утечек они не попали (короткое или "
-                         "служебное значение). Проверьте их сами в списке ниже."
+            lines.append(tr("Critical findings in the output: %d. Of these, %d have the same "
+                            "value as in the original (%s): they weren't part of the leak "
+                            "comparison (short or service values). Check them yourself in the "
+                            "list below.")
                          % (s.ca, len(s.res_old), "; ".join(s.res_old[:5])))
         elif s.ca > 0:
-            lines.append("Критичных находок в результате: %d. Это НОВЫЕ значения, "
-                         "которых в исходнике не было -- например перегенерированный "
-                         "trailer /ID. С исходным файлом они не связаны." % s.ca)
+            lines.append(tr("Critical findings in the output: %d. These are NEW values that "
+                            "weren't in the original, e.g. a regenerated trailer /ID. They are "
+                            "unrelated to the source file.") % s.ca)
         lines += cav_line
         if f or s.errs:
             return _V("clean", "warn",
-                      "ИСХОДНЫХ ЗНАЧЕНИЙ НЕ ОСТАЛОСЬ, НО ЕСТЬ ОГОВОРКИ "
-                      "(критичных %s)." % was, lines, "")
+                      tr("NO ORIGINAL VALUES LEFT, BUT WITH CAVEATS (critical %s).") % was, lines, "")
         return _V("clean", "ok",
-                  "ЧИСТО: ни одно исходное значение не пережило чистку "
-                  "(критичных %s)." % was, lines, "")
+                  tr("CLEAN: no original value survived cleaning (critical %s).") % was, lines, "")
 
     if s.ca < 0:
         return _V("unverified", "warn",
-                  "РЕЗУЛЬТАТ НЕ ПРОВЕРЕН: утверждать, что файл чист, нельзя.",
-                  ["Файл записан и открывается, но повторная инспекция результата не "
-                   "прогонялась: число критичных находок после чистки неизвестно. "
-                   "Прогоните инспекцию результата, прежде чем считать файл почищенным."]
-                  + cav_line, "результат не проверен")
+                  tr("RESULT NOT VERIFIED: the file can't be claimed clean."),
+                  [tr("The file was written and opens, but the output was not re-inspected: the "
+                      "number of critical findings after cleaning is unknown. Re-inspect the "
+                      "output before treating the file as cleaned.")]
+                  + cav_line, tr("result not verified"))
 
     if s.ca == 0:
-        was = "было %s, стало 0" % (s.cb if s.cb >= 0 else "?")
-        # Неубираемое само по себе (таблицы квантования JPEG есть у каждого JPEG)
-        # статус не понижает: оракул критичного не видит, оговорка стоит прямо
-        # под вердиктом. Сбой и ошибки обработки -- понижают: там могло остаться.
+        was = tr("was %s, now 0") % (s.cb if s.cb >= 0 else "?")
+        # Unremovables on their own (every JPEG has quantization tables) don't
+        # lower the status: the oracle sees nothing critical, and the caveat sits
+        # right under the verdict. Failures and processing errors do lower it:
+        # something could have been left behind.
         if f or s.errs:
-            return _V("clean", "warn", "КРИТИЧНОГО НЕ ОСТАЛОСЬ, НО ЕСТЬ ОГОВОРКИ (%s)." % was,
+            return _V("clean", "warn", tr("NO CRITICAL FINDINGS LEFT, BUT WITH CAVEATS (%s).") % was,
                       cav_line, "")
-        return _V("clean", "ok", "ЧИСТО: повторная инспекция результата не нашла критичных "
-                  "находок (%s)." % was, cav_line, "")
+        return _V("clean", "ok", tr("CLEAN: re-inspection of the output found no critical "
+                                    "findings (%s).") % was, cav_line, "")
 
-    # critical_after > 0: чистым такой файл не называем.
+    # critical_after > 0: such a file is not called clean.
     regen = _n(s, Act.REGENERATED)
     wl = sum(1 for e in s.by.get(Act.KEPT, []) if "whitelist" in e.note.lower())
     unexplained = max(0, s.ca - (regen * _PER_REGEN + f + u + wl))
     lines = []
     if regen:
-        lines.append("Перегенерированные значения (%d), например trailer /ID: они новые и с "
-                     "исходными не связаны, это не утечка, но инспектор считает их находками." % regen)
+        lines.append(tr("Values regenerated by cleaning (%d), e.g. trailer /ID: they are new and "
+                        "unrelated to the originals. Not a leak, but the inspector counts them "
+                        "as findings.") % regen)
     if wl:
-        lines.append("Оставлено по вашему списку keep: %d. Это ваш выбор, поля остались как были." % wl)
+        lines.append(tr("Kept per your keep list: %d. Your choice; these fields stayed as they "
+                        "were.") % wl)
     if unexplained:
-        lines.append("НЕ ОБЪЯСНЕНО списком действий: не менее %d. Пока не выяснено, что это, "
-                     "файл чистым считать нельзя: прогоните инспекцию результата." % unexplained)
+        lines.append(tr("NOT EXPLAINED by the action list: at least %d. Until it's clear what "
+                        "this is, the file can't be considered clean: re-inspect the output.") % unexplained)
     lines += cav_line
-    was = "было %s" % (s.cb if s.cb >= 0 else "?")
+    was = tr("was %s") % (s.cb if s.cb >= 0 else "?")
     if unexplained:
-        return _V("residual", "bad", "НЕ ЧИСТО: критичных находок после чистки: %d (%s), и не всё "
-                  "объяснено." % (s.ca, was), lines, "остаток не объяснён")
-    return _V("residual", "warn", "ОСТАЛОСЬ КРИТИЧНЫХ НАХОДОК: %d (%s). По списку действий они "
-              "объясняются записями ниже; файл не объявляется чистым." % (s.ca, was), lines, "")
+        return _V("residual", "bad", tr("NOT CLEAN: critical findings after cleaning: %d (%s), "
+                                        "not all explained.") % (s.ca, was), lines, tr("remainder not explained"))
+    return _V("residual", "warn", tr("CRITICAL FINDINGS LEFT: %d (%s). The action list explains "
+                                     "them via the entries below; the file is not declared clean.") % (s.ca, was), lines, "")
 
 
-# --- оформление --------------------------------------------------------------
+# --- formatting --------------------------------------------------------------
 
 
 class _Style:
-    """Один набор приёмов на два вывода. Методы принимают СЫРОЕ значение и сами
-    его чистят и экранируют: готовый HTML сюда передавать нельзя (будет двойное
-    экранирование), зато забыть html.escape негде."""
+    """One set of helpers for both outputs. Methods take the RAW value and
+    clean and escape it themselves: ready HTML must not be passed in (double
+    escaping), but there's also nowhere to forget html.escape."""
 
     def __init__(self, tg):
         self.tg = tg
@@ -445,20 +447,20 @@ class _Style:
         return self._w("code", v, cap)
 
     def val(self, v, cap=200):
-        """Значение из файла. В Telegram уходит под спойлер (политика и
-        оговорка -- в core/report.py, флаг MASK_VALUES): отчёт о чистке
-        перечисляет ровно то, что было найдено, то есть те же персональные
-        данные, что и отчёт инспекции. Пустое не прячем -- скрывать нечего."""
+        """A value from the file. In Telegram it goes under a spoiler (policy and
+        caveat in core/report.py, flag MASK_VALUES): the cleaning report lists
+        exactly what was found, i.e. the same personal data as the inspection
+        report. Empty values aren't hidden: nothing to hide."""
         if not _c(v, cap):
-            return self.i("(пусто)")
+            return self.i(tr("(empty)"))
         return spoiler(self.code(v, cap)) if self.tg else self.code(v, cap)
 
     def p(self, v, cap=700):
-        """Абзац обычного текста."""
+        """A paragraph of plain text."""
         return self.t(v, cap) if self.tg else "  " + self.t(v, cap)
 
     def lead(self, v, cap=800):
-        """Пояснение под заголовком."""
+        """A note under a heading."""
         return self.i(v, cap) if self.tg else "  " + self.t(v, cap)
 
     def head(self, icon, title, n=None):
@@ -480,31 +482,30 @@ class _Style:
 _TG, _PL = _Style(True), _Style(False)
 
 
-# --- секции ------------------------------------------------------------------
+# --- sections ----------------------------------------------------------------
 
 
 def _sec_header(s, st, v):
     if st.tg:
-        out = ["\U0001F9F9 <b>Чистка метаданных</b> · %s · профиль %s"
+        out = [tr("\U0001F9F9 <b>Metadata cleaning</b> · %s · profile %s")
                % (st.b(s.fmt_name, 80), st.b(s.profile, 40))]
     else:
-        out = ["=" * WIDTH, "ОТЧЁТ О ЧИСТКЕ МЕТАДАННЫХ", "=" * WIDTH,
-               "Формат:  %s" % st.t(s.fmt_name, 80), "Профиль: %s" % st.t(s.profile, 40)]
-    done = ", ".join("%s %d" % (ACT_TITLE[a], _n(s, a)) for a in _DONE if _n(s, a))
+        out = ["=" * WIDTH, tr("METADATA CLEANING REPORT"), "=" * WIDTH,
+               tr("Format:  %s") % st.t(s.fmt_name, 80), tr("Profile: %s") % st.t(s.profile, 40)]
+    done = ", ".join("%s %d" % (tr(ACT_TITLE[a]), _n(s, a)) for a in _DONE if _n(s, a))
     if v.kind in _NOT_OK:
-        out.append("Изменено: %s (почищенного файла нет)" % st.b("0"))
+        out.append(tr("Changed: %s (no cleaned file)") % st.b("0"))
     else:
-        line = "Изменено: %s" % st.b(str(s.n_changed))
+        line = tr("Changed: %s") % st.b(str(s.n_changed))
         out.append(line + (" (%s)" % st.t(done, 200) if done else ""))
     if v.kind in ("unverified", "clean", "residual"):
-        out.append(st.b("Доказательство") + st.t(": повторная инспекция результата"))
-        out.append("%s Критичные (личность, окружение): %s"
+        out.append(st.b(tr("Proof")) + st.t(tr(": re-inspection of the output")))
+        out.append(tr("%s Critical (identity, environment): %s")
                    % (st.red, st.b(_pair(s.cb, s.ca, " %s " % st.arrow))))
-        out.append("%s Требующие чистки (с провенансом): %s"
+        out.append(tr("%s Needing cleaning (incl. provenance): %s")
                    % (st.yel, st.b(_pair(s.sb, s.sa, " %s " % st.arrow))))
     else:
-        out.append(st.t("Доказательства нет: файл не почищен, повторная инспекция результата "
-                        "не выполнялась."))
+        out.append(st.t(tr("No proof: the file was not cleaned, the output was not re-inspected.")))
     return [out]
 
 
@@ -520,9 +521,9 @@ def _by_loc(items):
 
 
 def _entry(act, e, st):
-    """Одна запись. Битая -- строка об ошибке на её месте."""
+    """One entry. A broken one becomes an error line in its place."""
     try:
-        line = st.t(e.label, 120) or "(без названия)"
+        line = st.t(e.label, 120) or tr("(untitled)")
         if e.before or act not in (Act.FAILED, Act.UNREMOVABLE):
             line += ": " + st.val(e.before, _VAL_CAP[act])
         if act in (Act.NORMALIZED, Act.REGENERATED) or e.after:
@@ -534,14 +535,14 @@ def _entry(act, e, st):
             line += " " + st.i("— " + note, _NOTE_CAP[act] + 4)
         return st.bullet(line)
     except Exception:
-        return st.bullet(st.t("(запись не отобразилась)"))
+        return st.bullet(st.t(tr("(entry could not be displayed)")))
 
 
 def _group(act, s, st, lead="", loud=False):
     items = s.by.get(act)
     if not items:
         return []
-    title = ACT_TITLE[act].upper() if loud else ACT_TITLE[act].capitalize()
+    title = tr(ACT_TITLE[act]).upper() if loud else tr(ACT_TITLE[act]).capitalize()
     out = st.head(_ICON[act], title, len(items))
     if lead:
         out.append(st.lead(lead))
@@ -562,41 +563,42 @@ def _sec_done(s, st, v):
 
 def _sec_kept(s, st, v):
     return [] if v.kind in _NOT_OK else _group(Act.KEPT, s, st, loud=True, lead=(
-        "Эти поля оставлены осознанно, а не забыты. Структурное (язык документа, теги "
-        "доступности, ICC-профиль, оглавление) нужно для чтения, печати и скринридеров; часть "
-        "вы могли сами попросить сохранить (keep)."
-        + (" Профиль stealth к тому же не обнуляет всё подряд: пустые метаданные сами выдают "
-           "чистку." if s.profile == "stealth" else "")
-        + " Чистка эти поля не трогает."))
+        tr("These fields were kept deliberately, not forgotten. Structural data (document "
+           "language, accessibility tags, ICC profile, outline) is needed for reading, printing "
+           "and screen readers; some you may have asked to keep yourself (keep).")
+        + (tr(" Also, the stealth profile doesn't blank everything: empty metadata gives "
+              "cleaning away by itself.") if s.profile == "stealth" else "")
+        + tr(" Cleaning leaves these fields alone.")))
 
 
 def _sec_unrem(s, st, v):
     return [] if v.kind in _NOT_OK else _group(Act.UNREMOVABLE, s, st, loud=True, lead=(
-        "Эти данные остаются в файле, и чистка их не уберёт: так устроен формат, либо "
-        "удаление сломало бы файл или его проверку. Прежде чем отправлять файл, решите, "
-        "приемлемо ли это."))
+        tr("This data stays in the file and cleaning won't remove it: either the format works "
+           "that way, or removing it would break the file or its verification. Before sending "
+           "the file, decide whether that's acceptable.")))
 
 
 def _sec_failed(s, st, v):
     return [] if v.kind in _NOT_OK else _group(Act.FAILED, s, st, loud=True, lead=(
-        "Чистка этих полей не удалась: считайте, что они остались в файле."))
+        tr("Cleaning these fields failed: assume they are still in the file.")))
 
 
 def _sec_errors(s, st, v):
     if not s.errs:
         return []
-    out = st.head("⚠" if st.tg else "", "Ошибки при чистке", len(s.errs))
-    out.append(st.lead("Эти части файла не разобрались или не обработались: в них могли остаться "
-                       "метаданные, даже если повторная инспекция ничего не нашла."))
+    out = st.head("⚠" if st.tg else "", tr("Errors during cleaning"), len(s.errs))
+    out.append(st.lead(tr("These parts of the file couldn't be parsed or processed: metadata may "
+                          "remain in them even if re-inspection found nothing.")))
     out += [st.bullet(st.code(e, 600)) for e in s.errs]
     return [out]
 
 
 def _sec_footer(s, st, v):
-    msgs = ("Исходный файл чисткой не изменён: она пишет только в новую копию.",
-            "Имя файла — тоже метаданные, и Telegram его сохраняет: если в имени есть ФИО или "
-            "название проекта, переименуйте файл перед отправкой.",
-            "Отчёт касается только метаданных: стиль текста и сам контент он не оценивает.")
+    msgs = (tr("The source file was not modified by cleaning: it only writes a new copy."),
+            tr("The file name is metadata too, and Telegram keeps it: if the name contains a "
+               "person's name or a project title, rename the file before sending."),
+            tr("The report covers metadata only: it doesn't assess writing style or the content "
+               "itself."))
     out = ["———" if st.tg else "=" * WIDTH]
     out += [st.lead(m, 400) for m in msgs]
     if not st.tg:
@@ -612,31 +614,31 @@ def _sections(s, st):
     try:
         v = _verdict(s)
     except Exception:
-        v = _V("failed", "bad", "ФАЙЛ НЕ ПОЧИЩЕН: вердикт не собрался.", [],
-               "НЕ почищен, вердикт не собрался")
+        v = _V("failed", "bad", tr("FILE NOT CLEANED: the verdict could not be built."), [],
+               tr("NOT cleaned, verdict could not be built"))
     out = []
     for build in _BUILDERS:
         try:
             out += build(s, st, v)
         except Exception as exc:
-            # Сломалась одна секция -- остальные доезжают.
-            out.append(["%s секция отчёта не собралась (%s)"
+            # One section broke; the rest still get through.
+            out.append([tr("%s report section failed to render (%s)")
                         % ("⚠" if st.tg else "[ !! ]", type(exc).__name__)])
     return out
 
 
-# --- нарезка на сообщения Telegram (как в core/report.py) ----------------------
+# --- splitting into Telegram messages (as in core/report.py) ------------------
 
 
 def _tg_len(s: str) -> int:
-    """Длина в UTF-16 code units: так считает лимит Telegram, а не len()."""
+    """Length in UTF-16 code units: that's how Telegram's limit counts, not len()."""
     return len(s.encode("utf-16-le", "surrogatepass")) // 2
 
 
 def _pack(sections, limit: int = TG_BUDGET):
-    """Секции -> сообщения не длиннее limit. Рвём по границам секций, а не
-    влезающую секцию -- по строкам (элементам); элемент всегда с
-    сбалансированными тегами, поэтому тег посередине не рвётся никогда."""
+    """Sections -> messages no longer than limit. Split at section boundaries,
+    and an oversized section at lines (items); an item always has balanced
+    tags, so a tag is never cut in the middle."""
     buf, msgs = [], []
 
     def cur():
@@ -665,9 +667,9 @@ def _pack(sections, limit: int = TG_BUDGET):
                 buf.append("")
         for line in sec:
             if _tg_len(line) > limit:
-                # Молча потерять запись в отчёте об утечках хуже, чем пометить.
-                line = ("• <i>(запись не влезла в одно сообщение Telegram и пропущена, "
-                        "смотрите текстовый отчёт)</i>")
+                # Silently losing an entry in a leak report is worse than marking it.
+                line = (tr("• <i>(entry didn't fit in one Telegram message and was skipped; see "
+                           "the text report)</i>"))
             if buf and cur() + 1 + _tg_len(line) > limit:
                 flush()
             buf.append(line)
@@ -675,19 +677,19 @@ def _pack(sections, limit: int = TG_BUDGET):
     return msgs
 
 
-# --- публичный API -------------------------------------------------------------
+# --- public API ----------------------------------------------------------------
 
 
 def render_telegram(result) -> list:
-    """CleanResult -> список сообщений для parse_mode="HTML". Теги только b, i, code.
-    Не бросает: на любой сбой возвращает сообщение «считайте файл НЕ почищенным»."""
+    """CleanResult -> list of messages for parse_mode="HTML". Tags: b, i, code only.
+    Never raises: on any failure returns a "consider the file NOT cleaned" message."""
     try:
         parts = _pack(_sections(_snap(result), _TG))
     except Exception as exc:
-        return ["⚠ Отчёт о чистке не собрался (%s). Считайте файл НЕ почищенным."
+        return [tr("⚠ The cleaning report could not be built (%s). Consider the file NOT cleaned.")
                 % type(exc).__name__]
     if not parts:
-        return ["⚠ Отчёт пуст. Считайте файл НЕ почищенным."]
+        return [tr("⚠ The report is empty. Consider the file NOT cleaned.")]
     if len(parts) > 1:
         total = len(parts)
         parts = ["<b>[%d/%d]</b>\n%s" % (i, total, p) for i, p in enumerate(parts, 1)]
@@ -695,7 +697,7 @@ def render_telegram(result) -> list:
 
 
 def _wrap(line: str) -> str:
-    """Перенос по WIDTH с висячим отступом; содержимое не режем."""
+    """Wrap to WIDTH with a hanging indent; content is never cut."""
     if len(line) <= WIDTH:
         return line
     body = line.lstrip(" ")
@@ -705,7 +707,7 @@ def _wrap(line: str) -> str:
 
 
 def render_plain(result) -> str:
-    """То же без HTML, ширина WIDTH, для CLI. Не бросает."""
+    """The same without HTML, width WIDTH, for the CLI. Never raises."""
     try:
         out = []
         for sec in _sections(_snap(result), _PL):
@@ -715,37 +717,37 @@ def render_plain(result) -> str:
                 out += [_wrap(ln) for ln in el.split("\n")]
         return "\n".join(out)
     except Exception as exc:
-        return "Отчёт о чистке не собрался (%s). Считайте файл НЕ почищенным." % type(exc).__name__
+        return tr("The cleaning report could not be built (%s). Consider the file NOT cleaned.") % type(exc).__name__
 
 
 def summary_line(result) -> str:
-    """Одна строка для логов и краткого ответа, без переводов строк:
-    «PDF, профиль stealth: изменено 7, critical 7->2, сохранено намеренно 10».
-    Имён файлов и содержимого находок в ней нет."""
+    """One line for logs and short replies, no line breaks:
+    "PDF, profile stealth: changed 7, critical 7->2, kept on purpose 10".
+    It contains no file names and no finding contents."""
     try:
         s = _snap(result)
         v = _verdict(s)
         if v.kind in ("none", "unsupported"):
             text = v.short
         elif v.kind == "failed":
-            text = "%s, профиль %s: %s" % (s.fmt_name, s.profile, v.short)
+            text = tr("%s, profile %s: %s") % (s.fmt_name, s.profile, v.short)
         else:
-            parts = ["изменено %d" % s.n_changed,
-                     "critical %s" % _pair(s.cb, s.ca, "->") if s.ca >= 0 else "не проверено",
-                     "сохранено намеренно %d" % _n(s, Act.KEPT)]
-            for label, n in (("не убрать", _n(s, Act.UNREMOVABLE)),
-                             ("не удалось", _n(s, Act.FAILED)), ("ошибок", len(s.errs))):
+            parts = [tr("changed %d") % s.n_changed,
+                     "critical %s" % _pair(s.cb, s.ca, "->") if s.ca >= 0 else tr("not verified"),
+                     tr("kept on purpose %d") % _n(s, Act.KEPT)]
+            for label, n in ((tr("unremovable"), _n(s, Act.UNREMOVABLE)),
+                             (tr("failed"), _n(s, Act.FAILED)), (tr("errors"), len(s.errs))):
                 if n:
                     parts.append("%s %d" % (label, n))
             if v.kind == "residual" and v.short:
                 parts.append(v.short)
-            text = "%s, профиль %s: %s" % (s.fmt_name, s.profile, ", ".join(parts))
+            text = tr("%s, profile %s: %s") % (s.fmt_name, s.profile, ", ".join(parts))
         return " ".join(_c(text, 400).split())
     except Exception:
-        return "отчёт о чистке не собрался: файл считать НЕ почищенным"
+        return tr("cleaning report could not be built: consider the file NOT cleaned")
 
 
-# --- самопроверка --------------------------------------------------------------
+# --- self-test -----------------------------------------------------------------
 
 
 def _demo():
@@ -760,7 +762,7 @@ def _demo():
     fails = []
 
     class Bal(HTMLParser):
-        """Простой парсер: разрешённые теги, правильный порядок закрытия."""
+        """Minimal parser: allowed tags, correct closing order."""
 
         def __init__(self):
             super().__init__(convert_charrefs=True)
@@ -768,23 +770,23 @@ def _demo():
 
         def handle_starttag(self, tag, attrs):
             if tag not in allowed:
-                self.bad.append("запрещённый тег " + tag)
+                self.bad.append("forbidden tag " + tag)
             self.stack.append(tag)
 
         def handle_endtag(self, tag):
             if not self.stack or self.stack.pop() != tag:
-                self.bad.append("нарушен порядок закрытия " + tag)
+                self.bad.append("closing order broken " + tag)
 
     def u16(text):
-        """Длина в UTF-16 code units, посчитанная НЕЗАВИСИМО от кода модуля."""
+        """Length in UTF-16 code units, computed INDEPENDENTLY of the module's code."""
         return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
     def claims_clean(text):
-        """Утверждает ли текст «ЧИСТО:» (а не «НЕ ЧИСТО:»)."""
-        return re.search(r"(?<!НЕ )ЧИСТО:", text) is not None
+        """Whether the text claims "CLEAN:" (as opposed to "NOT CLEAN:")."""
+        return re.search(r"(?<!NOT )CLEAN:", text) is not None
 
     def check(name, cond, detail=""):
-        print("  [%s] %s%s" % ("ok" if cond else "ПРОВАЛ", name, "" if cond else ": %r" % (detail,)))
+        print("  [%s] %s%s" % ("ok" if cond else "FAIL", name, "" if cond else ": %r" % (detail,)))
         if not cond:
             fails.append(name)
 
@@ -796,13 +798,13 @@ def _demo():
             p = Bal()
             p.feed(m)
             p.close()
-            bad += p.bad + (["не закрыты: " + ",".join(p.stack)] if p.stack else [])
+            bad += p.bad + (["not closed: " + ",".join(p.stack)] if p.stack else [])
             rest = tag_re.sub("", m)
             if "<" in rest or ">" in rest:
-                bad.append("сырой < или >")
+                bad.append("raw < or >")
             if re.search(r"&(?!(?:amp|lt|gt);)", rest):
-                bad.append("сырой &")
-        check("TG %s: %d сообщ., макс %d <= %d, теги сбалансированы"
+                bad.append("raw &")
+        check("TG %s: %d msgs, max %d <= %d, tags balanced"
               % (name, len(msgs), max(sizes), TG_LIMIT), max(sizes) <= TG_LIMIT and not bad,
               (sizes, bad[:3]))
         return msgs
@@ -810,7 +812,7 @@ def _demo():
     def check_plain(name, result):
         text = render_plain(result)
         widest = max(len(x) for x in text.split("\n"))
-        check("plain %s: макс. ширина %d <= %d, без HTML" % (name, widest, WIDTH),
+        check("plain %s: max width %d <= %d, no HTML" % (name, widest, WIDTH),
               widest <= WIDTH and "<code>" not in text and "&amp;" not in text, widest)
         return text
 
@@ -819,99 +821,101 @@ def _demo():
                            fmt=fmt, profile=profile, ok=ok, critical_before=cb,
                            critical_after=ca, sensitive_before=sb, sensitive_after=sa)
 
-    # 1. Все виды Act, значение-инъекция, ok, критичный остаток объяснён /ID.
+    # 1. Every Act kind, injected value, ok, critical remainder explained by /ID.
     full = mk()
-    full.act("removed", "/Info", "/Author", "Иванов Иван <ivan@corp.ru>", note="ФИО владельца лицензии")
+    full.act("removed", "/Info", "/Author", "Иванов Иван <ivan@corp.ru>", note="license owner's full name")
     full.act("removed", "/Info", "/Subject", "<script>&")
     full.act("removed", "<i>/Info", "<b>/Creator", "")
     full.act("removed", "XMP", "xmpMM:DocumentID", "uuid:1234-abcd")
     full.act("blanked", "/Info", "/Title", "Договор №5")
-    full.act("normalized", "заголовок", "бинарный маркер qpdf", "25C2B5", "25E2E3",
-             "Заменён равным по длине маркером исходника.")
+    full.act("normalized", "header", "qpdf binary marker", "25C2B5", "25E2E3",
+             "Replaced with a marker of the same length as the original.")
     full.act("regenerated", "trailer", "/ID", "a1b2c3d4", "9f8e7d6c",
-             "Оба значения новые, пара как у исходника.")
-    full.act("kept", "/Root", "/Lang", "ru-RU", note="Язык документа: нужен скринридерам.")
-    full.act("kept", "/Root", "/StructTreeRoot", "есть", note="Теги доступности.")
-    full.act("kept", "/Root", "/Outlines", "есть", note="Оглавление.")
-    full.act("kept", "/Root", "/OutputIntents", "ICC sRGB", note="ICC-профиль: без него цвета едут.")
-    full.act("unremovable", "DQT", "Таблицы квантования", "2 шт", "без изменений",
-             "Убрать нельзя без перекодирования: они сами фингерпринтят энкодер.")
-    full.act("failed", "/Names", "JavaScript", note="сбой секции (ValueError)")
-    full.err("Секция «/Names»: ValueError: плохой словарь <a href=x>")
-    print("=== 1. все виды Act, ok=True, critical 7->2 ===")
-    tg = check_tg("полный", full)
+             "Both values are new, the pair is shaped like the original.")
+    full.act("kept", "/Root", "/Lang", "ru-RU", note="Document language: needed by screen "
+                                                     "readers.")
+    full.act("kept", "/Root", "/StructTreeRoot", "present", note="Accessibility tags.")
+    full.act("kept", "/Root", "/Outlines", "present", note="Outline.")
+    full.act("kept", "/Root", "/OutputIntents", "ICC sRGB", note="ICC profile: colors shift "
+                                                                 "without it.")
+    full.act("unremovable", "DQT", "Quantization tables", "2 pcs", "unchanged",
+             "Can't be removed without re-encoding: they fingerprint the encoder themselves.")
+    full.act("failed", "/Names", "JavaScript", note="section failure (ValueError)")
+    full.err("Section \"/Names\": ValueError: bad dictionary <a href=x>")
+    print("=== 1. every Act kind, ok=True, critical 7->2 ===")
+    tg = check_tg("full", full)
     for i, m in enumerate(tg, 1):
-        print("--- сообщение %d, %d UTF-16 ---" % (i, u16(m)))
+        print("--- message %d, %d UTF-16 ---" % (i, u16(m)))
         print(m)
-    pl = check_plain("полный", full)
+    pl = check_plain("full", full)
     print(pl)
     joined = "\n".join(tg)
-    check("значение экранировано", "&lt;script&gt;&amp;" in joined and "<script>" not in joined)
-    check("в plain значение как есть", "<script>&" in pl)
-    check("не сказано «ЧИСТО» при critical_after=2", not claims_clean(joined) and not claims_clean(pl))
-    check("остаток объяснён /ID, а не 'не объяснён'", "перегенерированные" in joined.lower()
-          and "НЕ ОБЪЯСНЕНО" not in joined)
-    check("секции KEPT и UNREMOVABLE заметны",
-          "СОХРАНЕНО НАМЕРЕННО" in joined and "УБРАТЬ НЕВОЗМОЖНО" in joined
-          and "осознанно, а не забыты" in joined and "Таблицы квантования" in joined)
-    check("порядок: удалено < обнулено < нормализовано < перегенерировано < сохранено < невозможно < не удалось",
-          [joined.find(x) for x in ("Удалено", "Обнулено", "Нормализовано", "Перегенерировано",
-                                    "СОХРАНЕНО", "УБРАТЬ", "НЕ УДАЛОСЬ")]
-          == sorted(joined.find(x) for x in ("Удалено", "Обнулено", "Нормализовано",
-                                             "Перегенерировано", "СОХРАНЕНО", "УБРАТЬ", "НЕ УДАЛОСЬ")))
-    check("before виден у удалённого", "Иванов Иван" in joined and "Договор №5" in joined)
-    check("подвал: исходник не изменён, имя файла = метаданные",
-          "Исходный файл чисткой не изменён" in tg[-1] and "Telegram его сохраняет" in tg[-1])
-    check("имена файлов не утекли", all(x not in joined + pl + summary_line(full)
+    check("value escaped", "&lt;script&gt;&amp;" in joined and "<script>" not in joined)
+    check("in plain the value is as is", "<script>&" in pl)
+    check("no \"CLEAN\" claimed with critical_after=2", not claims_clean(joined) and not claims_clean(pl))
+    check("remainder explained by /ID, not 'not explained'", "values regenerated" in joined.lower()
+          and "NOT EXPLAINED" not in joined)
+    check("KEPT and UNREMOVABLE sections stand out",
+          "KEPT ON PURPOSE" in joined and "CANNOT BE REMOVED" in joined
+          and "deliberately, not forgotten" in joined and "Quantization tables" in joined)
+    check("order: removed < blanked < normalized < regenerated < kept < unremovable < failed",
+          [joined.find(x) for x in ("Removed", "Blanked", "Normalized", "Regenerated",
+                                    "KEPT", "CANNOT", "FAILED")]
+          == sorted(joined.find(x) for x in ("Removed", "Blanked", "Normalized",
+                                             "Regenerated", "KEPT", "CANNOT", "FAILED")))
+    check("\"before\" shown for removed entries", "Иванов Иван" in joined and "Договор №5" in joined)
+    check("footer: source not modified, file name = metadata",
+          "The source file was not modified by cleaning" in tg[-1] and "Telegram keeps it" in tg[-1])
+    check("file names didn't leak", all(x not in joined + pl + summary_line(full)
                                          for x in ("Иванов_договор", "secret", "out.pdf")))
     print("summary:", summary_line(full))
 
-    # 2. Ровно пример из задания.
+    # 2. Exactly the example from the spec.
     ex = mk()
     for i in range(6):
-        ex.act("removed", "/Info", "поле %d" % i, "v")
+        ex.act("removed", "/Info", "field %d" % i, "v")
     ex.act("regenerated", "trailer", "/ID", "aa", "bb")
     for i in range(10):
         ex.act("kept", "/Root", "k%d" % i, "v")
-    check("summary_line == пример из задания",
-          summary_line(ex) == "PDF, профиль stealth: изменено 7, critical 7->2, сохранено намеренно 10",
+    check("summary_line == the spec example",
+          summary_line(ex) == "PDF, profile stealth: changed 7, critical 7->2, kept on purpose 10",
           summary_line(ex))
 
     # 3. ok=False.
     bad = mk(ok=False, cb=-1, ca=-1, sb=-1, sa=-1)
-    bad.err("PDF защищён паролем: чистка отклонена C:\\Users\\secret\\x.pdf")
+    bad.err("PDF is password-protected: cleaning refused C:\\Users\\secret\\x.pdf")
     print("\n=== 3. ok=False ===")
     m = check_tg("ok=False", bad)
     print("\n".join(m))
-    check("ok=False: НЕ ПОЧИЩЕН и причина", "ФАЙЛ НЕ ПОЧИЩЕН" in m[0] and "защищён паролем" in m[0])
-    check("ok=False: путь вырезан из ошибки", "secret" not in "\n".join(m) and html.escape(PATH_STUB) in "\n".join(m))
-    check("ok=False: нет «чисто» и нет цифр доказательства", not claims_clean(m[0]) and "Доказательства нет" in m[0])
+    check("ok=False: NOT CLEANED and the reason", "FILE NOT CLEANED" in m[0] and "password-protected" in m[0])
+    check("ok=False: path stripped from the error", "secret" not in "\n".join(m) and html.escape(PATH_STUB) in "\n".join(m))
+    check("ok=False: no \"clean\" and no proof numbers", not claims_clean(m[0]) and "No proof" in m[0])
     print("summary:", summary_line(bad))
     check_plain("ok=False", bad)
     bad.act("removed", "/Info", "/Author", "Иванов")
     m = "\n".join(render_telegram(bad))
-    check("ok=False + действия: не показаны как сделанное, но об этом сказано",
-          "Удалено" not in m and "Иванов" not in m and "не показаны" in m, m[:400])
+    check("ok=False + actions: not shown as done, but that is stated",
+          "Removed" not in m and "Иванов" not in m and "are not shown" in m, m[:400])
     del bad.actions[:]
 
-    # 3b. Маскировка значений. Отчёт о чистке перечисляет ровно те значения,
-    # что нашёл инспектор, то есть те же персональные данные -- значит прятать
-    # их надо здесь так же. Площадка одна (_Style.val), поэтому хватит проверки,
-    # что под спойлером оказалось значение, а не пустая строка и не весь абзац.
+    # 3b. Value masking. The cleaning report lists exactly the values the
+    # inspector found, i.e. the same personal data, so they must be hidden here
+    # too. There's a single render site (_Style.val), so it's enough to check
+    # that the spoiler holds the value, not an empty string or the whole paragraph.
     msk = mk()
     msk.act("removed", "/Info", "/Author", "Иванов Иван Иванович")
     msk.act("blanked", "docProps/core.xml", "dc:creator", "")
     m = "\n".join(render_telegram(msk))
-    check("маскировка: значение ушло под спойлер",
+    check("masking: the value went under a spoiler",
           "<tg-spoiler><code>Иванов Иван Иванович</code></tg-spoiler>" in m, m[:300])
-    check("маскировка: пустое значение не прячем (скрывать нечего)",
-          "<tg-spoiler><i>(пусто)</i>" not in m and "<i>(пусто)</i>" in m)
-    check("маскировка: в plain спойлера нет -- это вывод в локальную консоль",
+    check("masking: an empty value isn't hidden (nothing to hide)",
+          "<tg-spoiler><i>(empty)</i>" not in m and "<i>(empty)</i>" in m)
+    check("masking: no spoiler in plain output, it goes to the local console",
           "tg-spoiler" not in render_plain(msk))
     import core.report as _rep
     _rep.MASK_VALUES = False
     try:
-        check("маскировка: общий выключатель действует и на отчёт о чистке",
+        check("masking: the shared switch also applies to the cleaning report",
               "tg-spoiler" not in "\n".join(render_telegram(msk))
               and "<code>Иванов Иван Иванович</code>" in "\n".join(render_telegram(msk)))
     finally:
@@ -920,144 +924,144 @@ def _demo():
     # 4. critical_after == -1.
     unv = mk(ca=-1, sa=-1)
     unv.act("removed", "/Info", "/Author", "Иванов")
-    print("\n=== 4. critical_after = -1 (проверка не прогонялась) ===")
-    m = check_tg("не проверено", unv)
+    print("\n=== 4. critical_after = -1 (verification not run) ===")
+    m = check_tg("not verified", unv)
     print("\n".join(m))
-    check("не проверено: не заявляем чистоту",
-          "РЕЗУЛЬТАТ НЕ ПРОВЕРЕН" in m[0] and not claims_clean(m[0]) and "не проверялось" in m[0])
+    check("not verified: no cleanliness claimed",
+          "RESULT NOT VERIFIED" in m[0] and not claims_clean(m[0]) and "not verified" in m[0])
     print("summary:", summary_line(unv))
-    check_plain("не проверено", unv)
+    check_plain("not verified", unv)
 
-    # 5. Чисто / остаток без объяснения.
+    # 5. Clean / unexplained remainder.
     ok0 = mk(ca=0, sa=130)
     ok0.act("removed", "/Info", "/Author", "Иванов")
-    ok0.act("kept", "/Root", "/Lang", "ru-RU", note="язык")
-    m = check_tg("чисто", ok0)
-    check("critical_after=0 без оговорок: ЧИСТО", claims_clean(m[0]) and "было 7, стало 0" in m[0])
-    ok0.act("unremovable", "DQT", "Таблицы квантования", "2 шт", note="нельзя")
-    m = check_tg("чисто с оговоркой", ok0)
-    check("critical_after=0 + неубираемое: ЧИСТО, но оговорка видна под вердиктом",
-          claims_clean(m[0]) and "убрать невозможно: 1" in m[0], m[0][:600])
-    ok0.act("failed", "/Names", "JavaScript", note="сбой")
-    m = check_tg("чисто с неудачей", ok0)
-    check("critical_after=0, но есть FAILED: оговорки, не «ЧИСТО:»",
-          not claims_clean(m[0]) and "ОГОВОРКИ" in m[0] and "не удалось обработать: 1" in m[0], m[0][:600])
+    ok0.act("kept", "/Root", "/Lang", "ru-RU", note="language")
+    m = check_tg("clean", ok0)
+    check("critical_after=0 without caveats: CLEAN", claims_clean(m[0]) and "was 7, now 0" in m[0])
+    ok0.act("unremovable", "DQT", "Quantization tables", "2 pcs", note="impossible")
+    m = check_tg("clean with a caveat", ok0)
+    check("critical_after=0 + unremovable: CLEAN, but the caveat is visible under the verdict",
+          claims_clean(m[0]) and "cannot be removed: 1" in m[0], m[0][:600])
+    ok0.act("failed", "/Names", "JavaScript", note="failure")
+    m = check_tg("clean with a failure", ok0)
+    check("critical_after=0, but FAILED present: caveats, not \"CLEAN:\"",
+          not claims_clean(m[0]) and "CAVEATS" in m[0] and "failed to process: 1" in m[0], m[0][:600])
     res5 = mk(ca=5)
     res5.act("regenerated", "trailer", "/ID", "aa", "bb")
-    m = check_tg("остаток не объяснён", res5)
-    check("critical_after=5 при одном /ID: «НЕ ЧИСТО» и «не менее 3»",
-          "НЕ ЧИСТО" in m[0] and "не менее 3" in m[0], m[0][:400])
+    m = check_tg("remainder not explained", res5)
+    check("critical_after=5 with one /ID: \"NOT CLEAN\" and \"at least 3\"",
+          "NOT CLEAN" in m[0] and "at least 3" in m[0], m[0][:400])
     print("summary:", summary_line(res5))
     wl = mk(ca=3)
     wl.act("regenerated", "trailer", "/ID", "aa", "bb")
-    wl.act("kept", "/Info", "/Author", "Иванов", note="оставлено по whitelist пользователя (keep)")
+    wl.act("kept", "/Info", "/Author", "Иванов", note="kept per the user's whitelist (keep)")
     m = check_tg("whitelist", wl)
-    check("critical_after=3 = /ID (2) + keep (1): остаток объяснён, но не «ЧИСТО»",
-          "НЕ ОБЪЯСНЕНО" not in m[0] and "по вашему списку keep: 1" in m[0] and not claims_clean(m[0]),
+    check("critical_after=3 = /ID (2) + keep (1): remainder explained, but not \"CLEAN\"",
+          "NOT EXPLAINED" not in m[0] and "per your keep list: 1" in m[0] and not claims_clean(m[0]),
           m[0][:500])
 
-    # 6. Форматы без чистильщика: не врать.
-    print("\n=== 6. форматы без чистильщика ===")
-    # docx/xlsx/pptx здесь больше нет: с фазы 2 чистильщик для них ЕСТЬ
-    # (CLEANABLE). Остались форматы, у которых его правда нет.
-    for fmt, ok, phase in (("doc", False, "фазе 4"), ("xls", False, "фазе 4"),
-                           ("doc", True, "фазе 4")):
+    # 6. Formats without a cleaner: no lying.
+    print("\n=== 6. formats without a cleaner ===")
+    # docx/xlsx/pptx are gone from here: since phase 2 they DO have a cleaner
+    # (CLEANABLE). What's left are formats that really have none.
+    for fmt, ok, phase in (("doc", False, "phase 4"), ("xls", False, "phase 4"),
+                           ("doc", True, "phase 4")):
         r = mk(fmt=fmt, ok=ok, cb=-1, ca=0 if ok else -1)
         m = check_tg("%s ok=%s" % (fmt, ok), r)
-        check("%s ok=%s: НЕ ПОЧИЩЕН + только инспекция + %s" % (fmt, ok, phase),
-              "ФАЙЛ НЕ ПОЧИЩЕН" in m[0] and "только инспектируется" in m[0] and phase in m[0]
+        check("%s ok=%s: NOT CLEANED + inspect-only + %s" % (fmt, ok, phase),
+              "FILE NOT CLEANED" in m[0] and "inspect-only" in m[0] and phase in m[0]
               and not claims_clean(m[0]), m[0][:300])
         if fmt == "doc" and not ok:
             print(m[0])
         print("summary:", summary_line(r))
     tiff = mk(fmt="tiff", ok=False, cb=-1, ca=-1)
-    tiff.err("TIFF: чистка не поддерживается")
+    tiff.err("TIFF: cleaning not supported")
     m = check_tg("tiff", tiff)
-    check("tiff: намеренный отказ, не «фаза»", "намеренно не берёт" in m[0] and "фазе" not in m[0])
-    # Формат без чистильщика, но с действиями и ok=True: отчёт строится как
-    # обычно, а не отказом. Страховка на случай, когда чистильщик для формата
-    # появится раньше, чем его впишут в CLEANABLE.
+    check("tiff: deliberate refusal, not a \"phase\"", "deliberately not cleaned" in m[0] and "phase" not in m[0])
+    # A format without a cleaner but with actions and ok=True: the report is
+    # built as usual, not as a refusal. A safety net for when a format's cleaner
+    # lands before it's added to CLEANABLE.
     future = mk(fmt="ppt", ok=True, ca=0)
     future.act("removed", "meta.xml", "dc:creator", "Иванов")
-    check("ppt ok=True с действиями (чистильщик вне CLEANABLE): отчёт строится как обычно",
+    check("ppt ok=True with actions (cleaner outside CLEANABLE): report built as usual",
           claims_clean(render_telegram(future)[0]))
 
-    # 7. 500 действий, значения по 5000 символов.
+    # 7. 500 actions, 5000-char values.
     big = mk()
     for i in range(500):
         big.actions.append(SimpleNamespace(
-            act=Act.REMOVED if i % 3 else Act.KEPT, location="loc%d" % (i % 7), label="Поле %d <&>" % i,
+            act=Act.REMOVED if i % 3 else Act.KEPT, location="loc%d" % (i % 7), label="Field %d <&>" % i,
             before="<&>" * 1700, after="&" * 5000, note="&" * 5000))
-    print("\n=== 7. 500 действий по 5000 символов ===")
-    m = check_tg("500 действий", big)
-    check("нумерация частей [i/n]", m[0].startswith("<b>[1/%d]</b>" % len(m)) and len(m) > 1)
-    check("подвал в последней части", "Исходный файл чисткой не изменён" in m[-1])
-    check("вердикт в первой части", "ОСТАЛОСЬ КРИТИЧНЫХ" in m[0] or "НЕ ЧИСТО" in m[0])
-    check_plain("500 действий", big)
+    print("\n=== 7. 500 actions of 5000 chars ===")
+    m = check_tg("500 actions", big)
+    check("part numbering [i/n]", m[0].startswith("<b>[1/%d]</b>" % len(m)) and len(m) > 1)
+    check("footer in the last part", "The source file was not modified by cleaning" in m[-1])
+    check("verdict in the first part", "CRITICAL FINDINGS LEFT" in m[0] or "NOT CLEAN" in m[0])
+    check_plain("500 actions", big)
     print("summary:", summary_line(big))
     flood = mk()
     for i in range(60):
-        flood.act("removed", "/Info", "Поле %d" % i, "\U0001F600" * 150, note="\U0001F600" * 100)
-    check_tg("эмодзи вне BMP (2 unit на символ)", flood)
+        flood.act("removed", "/Info", "Field %d" % i, "\U0001F600" * 150, note="\U0001F600" * 100)
+    check_tg("non-BMP emoji (2 units per char)", flood)
 
-    # 8. None и битые объекты.
+    # 8. None and broken objects.
     print("\n=== 8. None ===")
     m = check_tg("None", None)
     print("\n".join(m))
     print(render_plain(None))
     print("summary:", summary_line(None))
-    check("None: НЕ ПОЧИЩЕН", "ФАЙЛ НЕ ПОЧИЩЕН" in m[0] and "НЕ почищен" in summary_line(None))
+    check("None: NOT CLEANED", "FILE NOT CLEANED" in m[0] and "NOT cleaned" in summary_line(None))
 
     class Boom:
         def __getattr__(self, name):
-            raise RuntimeError("битый результат")
+            raise RuntimeError("broken result")
 
     class Half:
         fmt, profile, ok = "pdf", Profile.STEALTH, True
         critical_before, sensitive_before, sensitive_after = 7, 1, 1
-        errors = ["что-то"]
+        errors = ["something"]
 
         @property
         def critical_after(self):
-            raise RuntimeError("падающее поле")
+            raise RuntimeError("failing field")
 
         @property
         def actions(self):
-            raise RuntimeError("падающий список")
+            raise RuntimeError("failing list")
 
     class BadStr:
         def __str__(self):
-            raise RuntimeError("нет str")
+            raise RuntimeError("no str")
 
     mixed = mk()
-    mixed.actions[:] = [SimpleNamespace(act="чушь", location="x", label="x", before="", after="", note=""),
+    mixed.actions[:] = [SimpleNamespace(act="nonsense", location="x", label="x", before="", after="", note=""),
                         object(), SimpleNamespace(act=Act.REMOVED, location="/Info", label=BadStr(),
                                                   before=BadStr(), after="", note=""),
                         ]
     mixed.act("removed", "/Info", "/Author", "Иванов")
     for name, obj in (("Boom", Boom()), ("Half", Half()), ("actions=None", SimpleNamespace(
             fmt="pdf", profile="stealth", ok=True, actions=None, errors=None, critical_before=1,
-            critical_after=0, sensitive_before=1, sensitive_after=0)), ("битые записи", mixed),
-            ("число строкой", SimpleNamespace(fmt="pdf", profile="x", ok="yes", actions=[], errors="одна ошибка",
+            critical_after=0, sensitive_before=1, sensitive_after=0)), ("broken entries", mixed),
+            ("number as a string", SimpleNamespace(fmt="pdf", profile="x", ok="yes", actions=[], errors="one error",
                                               critical_before="7", critical_after="abc",
                                               sensitive_before=None, sensitive_after=-5))):
         try:
             t, p, sline = render_telegram(obj), render_plain(obj), summary_line(obj)
             good = (all(isinstance(x, str) for x in t) and isinstance(p, str) and "\n" not in sline)
-            check("%s: ни одного исключения" % name, good)
+            check("%s: not a single exception" % name, good)
         except Exception as exc:  # noqa: BLE001
-            check("%s: ни одного исключения" % name, False, repr(exc))
+            check("%s: not a single exception" % name, False, repr(exc))
             continue
         check_tg(name, obj)
         print("   summary:", sline)
     m = "\n".join(render_telegram(mixed))
-    check("битая запись -- строка об ошибке, а не пустой отчёт",
-          "Чистка метаданных" in m and "Иванов" in m and "не прочитано: 2" in m and not claims_clean(m), m[:500])
+    check("broken entry -> an error line, not an empty report",
+          "Metadata cleaning" in m and "Иванов" in m and "not read: 2" in m and not claims_clean(m), m[:500])
     h = render_telegram(Half())[0]
-    check("Half: критичное после чистки не прочиталось -> «не проверен»", "РЕЗУЛЬТАТ НЕ ПРОВЕРЕН" in h)
-    check("Half: нечитаемый список действий отмечен в ошибках", "список действий не прочитался" in h)
+    check("Half: critical-after unreadable -> \"not verified\"", "RESULT NOT VERIFIED" in h)
+    check("Half: unreadable action list is noted in errors", "action list could not be read" in h)
 
-    # 9. Фаззинг: мусор в любых полях. Инвариант один -- без исключений, лимит и теги целы.
+    # 9. Fuzzing: junk in every field. One invariant: no exceptions, limit and tags intact.
     import random
     rnd = random.Random(20260930)
     alphabet = list("ab <>&\"'\n\t\x00\x1b\\/") + ["\ud800", "\U0001F600", "Ж", "‮", "&amp;", "</b>", "<b>"]
@@ -1065,7 +1069,7 @@ def _demo():
     nums = [-5, 0, 1, 7, 10 ** 30, "x", None, 2.5, True]
     bad_runs = 0
     for _ in range(150):
-        acts = [rnd.choice(list(Act) + ["чушь", None, 5]) for _ in range(rnd.choice((0, 1, 20, 60)))]
+        acts = [rnd.choice(list(Act) + ["nonsense", None, 5]) for _ in range(rnd.choice((0, 1, 20, 60)))]
         fz = SimpleNamespace(
             fmt=rnd.choice(["pdf", "docx", "tiff", "", None, junk(), "jpeg", 5]),
             profile=rnd.choice([Profile.PARANOID, "stealth", junk(), None]),
@@ -1073,7 +1077,7 @@ def _demo():
             critical_before=rnd.choice(nums), critical_after=rnd.choice(nums),
             sensitive_before=rnd.choice(nums), sensitive_after=rnd.choice(nums),
             actions=[SimpleNamespace(act=a, location=junk(), label=junk(), before=junk(), after=junk(),
-                                     note=junk()) for a in acts] + [rnd.choice([None, 5, "строка"])],
+                                     note=junk()) for a in acts] + [rnd.choice([None, 5, "string"])],
             errors=rnd.choice([[junk(), junk()], [], None, junk(), 5]))
         try:
             t, p, line = render_telegram(fz), render_plain(fz), summary_line(fz)
@@ -1089,17 +1093,17 @@ def _demo():
                 bad_runs += 1
         except Exception as exc:  # noqa: BLE001
             bad_runs += 1
-            print("   фаззинг: исключение", repr(exc))
-    check("фаззинг, 150 прогонов: без исключений, лимит/теги/ширина целы", bad_runs == 0, bad_runs)
+            print("   fuzzing: exception", repr(exc))
+    check("fuzzing, 150 runs: no exceptions, limit/tags/width intact", bad_runs == 0, bad_runs)
 
     lines = [summary_line(x) for x in (full, bad, unv, ok0, res5, big, None, Boom(), Half(), mixed)]
-    check("summary_line без переводов строк", all("\n" not in x and x for x in lines))
+    check("summary_line has no line breaks", all("\n" not in x and x for x in lines))
 
     print()
     if fails:
-        print("ПРОВАЛЕНО: %d: %s" % (len(fails), fails))
+        print("FAILED: %d: %s" % (len(fails), fails))
         raise SystemExit(1)
-    print("ОК")
+    print("OK")
 
 
 if __name__ == "__main__":

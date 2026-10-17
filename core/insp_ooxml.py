@@ -1,22 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Инспектор OOXML-пакетов: .docx / .xlsx / .pptx.
+"""OOXML package inspector: .docx / .xlsx / .pptx.
 
-Фаза 0: только чтение. Файл открывается строго на чтение, ничего не
-распаковывается на диск, входной файл не модифицируется никогда.
+Phase 0: read only. The file is opened strictly for reading, nothing is
+extracted to disk, and the input file is never modified.
 
-Контейнер OOXML -- это обычный ZIP, и метаданные в нём лежат не только в
-docProps/*.xml: течёт сам ZIP (таймстемпы записей), настройки Word (rsid,
-путь к шаблону), правки с именами авторов, presenceInfo с реальными email,
-DEVMODE принтера, строки подключения Excel и метки Purview с GUID тенанта.
-Поэтому разбираем пакет как контейнер, а не как "документ": стандартные
-библиотеки (python-docx, openpyxl) теряют части пакета и вместе с ними --
-половину утечек.
+An OOXML container is an ordinary ZIP, and metadata lives not only in
+docProps/*.xml: the ZIP itself leaks (entry timestamps), and so do Word
+settings (rsid, template path), revisions with author names, presenceInfo
+with real emails, the printer DEVMODE, Excel connection strings and
+Purview labels with the tenant GUID. So we parse the package as a
+container, not as a "document": the standard libraries (python-docx,
+openpyxl) drop parts of the package and, with them, half of the leaks.
 
-Публичный API:
+Public API:
     inspect_ooxml(path, fmt="docx") -> Report
-    parse_props(zf) -> dict            # сырые значения core/app/custom для фазы 2
+    parse_props(zf) -> dict            # raw core/app/custom values for phase 2
 
-Самопроверка: PYTHONIOENCODING=utf-8 python -m core.insp_ooxml
+Self-test: PYTHONIOENCODING=utf-8 python -m core.insp_ooxml
 """
 
 from __future__ import annotations
@@ -33,46 +33,51 @@ from lxml import etree
 
 try:
     from .model import Report, Risk
-except ImportError:  # запуск файла напрямую, вне пакета
+except ImportError:  # running the file directly, outside the package
     from model import Report, Risk
+from core.i18n import N_, tr
 
 
-# --- пределы, защищающие от зип-бомб и просто гигантских файлов -----------
+# --- limits that protect against zip bombs and plain huge files ----------
 
-MAX_PART_READ = 32 * 1024 * 1024      # сколько максимум читаем в память за раз
-MAX_STREAM = 50 * 1024 * 1024         # потолок потокового разбора document.xml
+MAX_PART_READ = 32 * 1024 * 1024      # most we read into memory at once
+MAX_STREAM = 50 * 1024 * 1024         # ceiling for the streaming parse of document.xml
 MAX_TOTAL_UNPACKED = 512 * 1024 * 1024
-MAX_RATIO = 120                       # суммарный коэффициент сжатия пакета
-# Высокий коэффициент сжатия сам по себе не бомба: однообразный XML большого
-# отчёта жмётся в сотни раз и при этом безобиден. Опасна только сумма
-# "много байт И огромный коэффициент", поэтому у коэффициента есть порог.
+MAX_RATIO = 120                       # overall compression ratio of the package
+# A high compression ratio is not a bomb by itself: the repetitive XML of a
+# large report compresses hundreds of times and is harmless. Only the sum
+# "many bytes AND a huge ratio" is dangerous, which is why the ratio has a
+# threshold.
 MIN_BOMB_UNPACKED = 64 * 1024 * 1024
-MAX_PARTS_SCAN = 4000                 # сколько записей ZIP вообще обрабатываем
-MAX_ELEMENTS = 400_000                # потолок элементов при iterparse
-MAX_LISTED = 40                       # сколько однотипных находок печатаем
+MAX_PARTS_SCAN = 4000                 # how many ZIP entries we process at all
+MAX_ELEMENTS = 400_000                # ceiling on elements during iterparse
+MAX_LISTED = 40                       # how many findings of one kind we list
 
-WORD_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)   # что Word ставит всем записям
+WORD_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)   # what Word stamps on every entry
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PATH_RE = re.compile(
     r"^\s*(file:///|[A-Za-z]:[\\/]|\\\\[^\\]+\\|/Users/|/home/|/Volumes/)"
 )
-# Путь ВНУТРИ значения, а не с его начала: переменные документа и свойства СЭД
-# обычно выглядят как "docVar(name=База; val=\\FS01\buh\baza.accdb)".
-# (?<![A-Za-z]) не даёт принять "https://" за диск "s:/".
+# A path INSIDE a value, not only at its start: document variables and EDMS
+# properties usually look like "docVar(name=Database; val=\\FS01\buh\baza.accdb)".
+# (?<![A-Za-z]) keeps "https://" from being mistaken for the drive "s:/".
 _PATH_ANY_RE = re.compile(
     r"(file:///|(?<![A-Za-z])[A-Za-z]:[\\/]|\\\\[^\\\s]+\\|/Users/|/home/|/Volumes/)"
 )
 
-# Имена свойств, в которых лежит именно человек. Без этого списка ФИО из
-# свойств СЭД ("Исполнитель", "Подписант") уезжали бы в PROVENANCE.
+# Names of properties that hold a person. Without this list, full names from
+# EDMS (electronic document management system) properties such as "Executor"
+# or "Signer" would end up in PROVENANCE. The pattern also matches the
+# Russian equivalents that Russian EDMS products write.
 _PERSON_NAME_RE = re.compile(
     r"(author|owner|creator|manager|savedby|lasteditedby|employee|signer"
     r"|автор|исполнител|ответствен|подписант|согласов|утвердил|разработал"
     r"|руководител|сотрудник|фио|контакт)", re.I)
 
-# Части, которые Word обязан положить в .docx. Их отсутствие -- признак того,
-# что файл собран библиотекой, а не Word, даже если app.xml утверждает обратное.
+# Parts that Word is required to put into a .docx. Their absence is a sign
+# that the file was built by a library, not by Word, even if app.xml claims
+# otherwise.
 WORD_REQUIRED = [
     "word/styles.xml",
     "word/settings.xml",
@@ -81,101 +86,101 @@ WORD_REQUIRED = [
     "word/theme/theme1.xml",
 ]
 
-# Поля docProps/core.xml: локальное имя -> (риск, подпись, пояснение).
+# docProps/core.xml fields: local name -> (risk, label, explanation).
 CORE_FIELDS = [
-    ("creator", Risk.IDENTITY, "dc:creator — автор",
-     "Имя пользователя или логин того, кто создал документ."),
-    ("lastModifiedBy", Risk.IDENTITY, "cp:lastModifiedBy — кто сохранил последним",
-     "Часто не совпадает с автором и выдаёт второго человека в цепочке."),
-    ("created", Risk.PROVENANCE, "dcterms:created — создан", ""),
-    ("modified", Risk.PROVENANCE, "dcterms:modified — изменён", ""),
-    ("revision", Risk.PROVENANCE, "cp:revision — номер ревизии",
-     "Сколько раз документ сохраняли."),
-    ("lastPrinted", Risk.PROVENANCE, "cp:lastPrinted — последняя печать",
-     "Сам факт печати и её точное время."),
-    ("title", Risk.PROVENANCE, "dc:title — заголовок",
-     "Нередко хранит исходное имя файла или название проекта."),
-    ("subject", Risk.PROVENANCE, "dc:subject — тема", ""),
-    ("description", Risk.PROVENANCE, "dc:description — описание", ""),
-    ("keywords", Risk.PROVENANCE, "cp:keywords — ключевые слова", ""),
-    ("category", Risk.PROVENANCE, "cp:category — категория", ""),
-    ("contentStatus", Risk.PROVENANCE, "cp:contentStatus — статус",
-     "Черновик/на согласовании — выдаёт внутренний процесс."),
-    ("identifier", Risk.PROVENANCE, "dc:identifier — идентификатор",
-     "Внутренний ID документа в СЭД или GUID."),
-    ("language", Risk.STRUCTURAL, "dc:language — язык",
-     "Обычно сохраняем: влияет на проверку орфографии и доступность."),
+    ("creator", Risk.IDENTITY, N_("dc:creator — author"),
+     N_("The user name or login of whoever created the document.")),
+    ("lastModifiedBy", Risk.IDENTITY, N_("cp:lastModifiedBy — last saved by"),
+     N_("Often differs from the author and reveals a second person in the chain.")),
+    ("created", Risk.PROVENANCE, N_("dcterms:created — created"), ""),
+    ("modified", Risk.PROVENANCE, N_("dcterms:modified — modified"), ""),
+    ("revision", Risk.PROVENANCE, N_("cp:revision — revision number"),
+     N_("How many times the document was saved.")),
+    ("lastPrinted", Risk.PROVENANCE, N_("cp:lastPrinted — last printed"),
+     N_("The fact of printing and its exact time.")),
+    ("title", Risk.PROVENANCE, N_("dc:title — title"),
+     N_("Often holds the original file name or a project name.")),
+    ("subject", Risk.PROVENANCE, N_("dc:subject — subject"), ""),
+    ("description", Risk.PROVENANCE, N_("dc:description — description"), ""),
+    ("keywords", Risk.PROVENANCE, N_("cp:keywords — keywords"), ""),
+    ("category", Risk.PROVENANCE, N_("cp:category — category"), ""),
+    ("contentStatus", Risk.PROVENANCE, N_("cp:contentStatus — status"),
+     N_("Draft / under review: reveals an internal process.")),
+    ("identifier", Risk.PROVENANCE, N_("dc:identifier — identifier"),
+     N_("An internal document ID from an EDMS, or a GUID.")),
+    ("language", Risk.STRUCTURAL, N_("dc:language — language"),
+     N_("Usually kept: it affects spell-checking and accessibility.")),
 ]
 
-# Поля docProps/app.xml.
+# docProps/app.xml fields.
 APP_FIELDS = {
-    "Application": (Risk.PROVENANCE, "Application — приложение",
-                    "Чем именно сохранён файл."),
-    "AppVersion": (Risk.PROVENANCE, "AppVersion — версия приложения",
-                   "Сужает круг до конкретной сборки Office."),
-    "Company": (Risk.IDENTITY, "Company — организация",
-                "Название компании из настроек Office."),
-    "Manager": (Risk.IDENTITY, "Manager — руководитель",
-                "ФИО руководителя из свойств документа."),
-    "TotalTime": (Risk.PROVENANCE, "TotalTime — время редактирования, мин",
-                  "Сколько реально работали над документом. Сильная утечка: "
-                  "выдаёт и трудоёмкость, и то, что документ не шаблонный."),
-    "Pages": (Risk.PROVENANCE, "Pages — страниц", ""),
-    "Words": (Risk.PROVENANCE, "Words — слов", ""),
-    "Characters": (Risk.PROVENANCE, "Characters — символов", ""),
-    "CharactersWithSpaces": (Risk.PROVENANCE, "CharactersWithSpaces — символов с пробелами", ""),
-    "Lines": (Risk.PROVENANCE, "Lines — строк", ""),
-    "Paragraphs": (Risk.PROVENANCE, "Paragraphs — абзацев", ""),
-    "Slides": (Risk.PROVENANCE, "Slides — слайдов", ""),
-    "Notes": (Risk.PROVENANCE, "Notes — заметок", ""),
-    "HiddenSlides": (Risk.PROVENANCE, "HiddenSlides — скрытых слайдов", ""),
-    "Template": (Risk.PROVENANCE, "Template — шаблон",
-                 "Имя шаблона; если это путь — утекает файловая система."),
-    "DocSecurity": (Risk.PROVENANCE, "DocSecurity — флаг защиты", ""),
+    "Application": (Risk.PROVENANCE, N_("Application — application"),
+                    N_("Which program exactly saved the file.")),
+    "AppVersion": (Risk.PROVENANCE, N_("AppVersion — application version"),
+                   N_("Narrows it down to a specific Office build.")),
+    "Company": (Risk.IDENTITY, N_("Company — organization"),
+                N_("The company name from the Office settings.")),
+    "Manager": (Risk.IDENTITY, N_("Manager — manager"),
+                N_("The manager's full name from the document properties.")),
+    "TotalTime": (Risk.PROVENANCE, N_("TotalTime — editing time, min"),
+                  N_("How long people really worked on the document. A strong leak: it reveals "
+                     "both the effort and that the document is not a template.")),
+    "Pages": (Risk.PROVENANCE, N_("Pages — pages"), ""),
+    "Words": (Risk.PROVENANCE, N_("Words — words"), ""),
+    "Characters": (Risk.PROVENANCE, N_("Characters — characters"), ""),
+    "CharactersWithSpaces": (Risk.PROVENANCE, N_("CharactersWithSpaces — characters with spaces"), ""),
+    "Lines": (Risk.PROVENANCE, N_("Lines — lines"), ""),
+    "Paragraphs": (Risk.PROVENANCE, N_("Paragraphs — paragraphs"), ""),
+    "Slides": (Risk.PROVENANCE, N_("Slides — slides"), ""),
+    "Notes": (Risk.PROVENANCE, N_("Notes — notes"), ""),
+    "HiddenSlides": (Risk.PROVENANCE, N_("HiddenSlides — hidden slides"), ""),
+    "Template": (Risk.PROVENANCE, N_("Template — template"),
+                 N_("The template name; if it is a path, the file system leaks.")),
+    "DocSecurity": (Risk.PROVENANCE, N_("DocSecurity — protection flag"), ""),
     "ScaleCrop": (Risk.PROVENANCE, "ScaleCrop", ""),
     "LinksUpToDate": (Risk.PROVENANCE, "LinksUpToDate", ""),
-    "SharedDoc": (Risk.PROVENANCE, "SharedDoc — общий доступ", ""),
+    "SharedDoc": (Risk.PROVENANCE, N_("SharedDoc — shared"), ""),
     "HyperlinksChanged": (Risk.PROVENANCE, "HyperlinksChanged", ""),
-    "HeadingPairs": (Risk.PROVENANCE, "HeadingPairs — состав документа", ""),
-    "TitlesOfParts": (Risk.PROVENANCE, "TitlesOfParts — названия частей",
-                      "Заголовки разделов и имена листов книги."),
-    "DigSig": (Risk.IDENTITY, "DigSig — цифровая подпись", ""),
+    "HeadingPairs": (Risk.PROVENANCE, N_("HeadingPairs — document composition"), ""),
+    "TitlesOfParts": (Risk.PROVENANCE, N_("TitlesOfParts — part titles"),
+                      N_("Section headings and the sheet names of a workbook.")),
+    "DigSig": (Risk.IDENTITY, N_("DigSig — digital signature"), ""),
 }
 
-# Атрибуты в частях с комментариями и авторами. З-секция.
+# Attributes in parts with comments and authors.
 PERSON_ATTRS = {
-    "author": (Risk.IDENTITY, "Автор"),
-    "name": (Risk.IDENTITY, "Имя автора"),
-    "displayName": (Risk.IDENTITY, "Отображаемое имя"),
-    "initials": (Risk.IDENTITY, "Инициалы автора"),
-    "userId": (Risk.IDENTITY, "userId — как правило, реальный email"),
-    "email": (Risk.IDENTITY, "Email автора"),
-    "providerId": (Risk.PROVENANCE, "Провайдер учётной записи"),
-    "date": (Risk.PROVENANCE, "Дата комментария"),
-    "dT": (Risk.PROVENANCE, "Дата комментария"),
-    "created": (Risk.PROVENANCE, "Дата создания комментария"),
-    # GUID сам по себе не PII, но связывает реплику со списком авторов:
-    # если фаза 2 вычистит authors.xml, а эти ссылки оставит — связь пропадёт.
-    "authorId": (Risk.PROVENANCE, "authorId — ссылка на список авторов"),
-    "personId": (Risk.PROVENANCE, "personId — ссылка на список авторов"),
-    "lastModifiedBy": (Risk.IDENTITY, "Кем изменён комментарий"),
-    "userName": (Risk.IDENTITY, "Участник общей книги (xl/revisions)"),
-    "dateTime": (Risk.PROVENANCE, "Время сохранения участником"),
+    "author": (Risk.IDENTITY, N_("Author")),
+    "name": (Risk.IDENTITY, N_("Author name")),
+    "displayName": (Risk.IDENTITY, N_("Display name")),
+    "initials": (Risk.IDENTITY, N_("Author initials")),
+    "userId": (Risk.IDENTITY, N_("userId — usually a real email")),
+    "email": (Risk.IDENTITY, N_("Author email")),
+    "providerId": (Risk.PROVENANCE, N_("Account provider")),
+    "date": (Risk.PROVENANCE, N_("Comment date")),
+    "dT": (Risk.PROVENANCE, N_("Comment date")),
+    "created": (Risk.PROVENANCE, N_("Comment creation date")),
+    # A GUID is not PII by itself, but it links a reply to the author list:
+    # if phase 2 scrubs authors.xml and leaves these references, the link is lost.
+    "authorId": (Risk.PROVENANCE, N_("authorId — reference to the author list")),
+    "personId": (Risk.PROVENANCE, N_("personId — reference to the author list")),
+    "lastModifiedBy": (Risk.IDENTITY, N_("Who modified the comment")),
+    "userName": (Risk.IDENTITY, N_("Shared-workbook participant (xl/revisions)")),
+    "dateTime": (Risk.PROVENANCE, N_("Time saved by the participant")),
 }
 
 
-# === мелкие утилиты =======================================================
+# === small utilities ========================================================
 
 
 def _ln(tag) -> str:
-    """Локальное имя тега или атрибута без пространства имён."""
+    """Local name of a tag or attribute, without the namespace."""
     if not isinstance(tag, str):
         return ""
     return tag.rsplit("}", 1)[-1]
 
 
 def _attr(el, name):
-    """Атрибут по локальному имени: префиксы в файлах бывают любые."""
+    """Attribute by local name: files may use any prefixes."""
     for key, val in el.attrib.items():
         if _ln(key) == name:
             return val
@@ -183,7 +188,7 @@ def _attr(el, name):
 
 
 def _iter_tag(root, *names):
-    """Все элементы с указанными локальными именами."""
+    """All elements with the given local names."""
     wanted = set(names)
     for el in root.iter():
         if _ln(el.tag) in wanted:
@@ -191,7 +196,7 @@ def _iter_tag(root, *names):
 
 
 def _text(el) -> str:
-    """Весь текст элемента вместе с потомками (vt:vector и т.п.)."""
+    """All text of an element, descendants included (vt:vector etc.)."""
     return " ".join(t.strip() for t in el.itertext() if t and t.strip())
 
 
@@ -200,7 +205,7 @@ def _is_path(value) -> bool:
 
 
 def _has_path(value) -> bool:
-    """Путь где-то внутри значения, а не обязательно с его начала."""
+    """A path anywhere inside the value, not necessarily at its start."""
     return bool(value) and bool(_PATH_ANY_RE.search(str(value)))
 
 
@@ -209,7 +214,7 @@ def _emails(value):
 
 
 def _value_risk(value, default=Risk.PROVENANCE):
-    """Риск по форме значения: email -> личность, путь -> окружение."""
+    """Risk by the shape of the value: email -> identity, path -> environment."""
     if _emails(value):
         return Risk.IDENTITY
     if _has_path(value):
@@ -218,10 +223,11 @@ def _value_risk(value, default=Risk.PROVENANCE):
 
 
 def _kids_attrs(el, limit=MAX_LISTED) -> str:
-    """Данные потомков, у которых значение лежит в атрибутах, а не в тексте.
+    """Data of descendants whose value lives in attributes rather than in text.
 
-    w:docVars и w:shapeDefaults устроены именно так: itertext() по ним даёт
-    пустую строку, и без этого разбора имена и значения переменных теряются.
+    w:docVars and w:shapeDefaults are built exactly like that: itertext() over
+    them yields an empty string, and without this parsing the names and values
+    of the variables are lost.
     """
     out = []
     for kid in el.iter():
@@ -236,7 +242,7 @@ def _kids_attrs(el, limit=MAX_LISTED) -> str:
 
 
 def _parser():
-    """XML-парсер без внешних сущностей и сети: файлы недоверенные."""
+    """XML parser with no external entities and no network: the files are untrusted."""
     return etree.XMLParser(
         resolve_entities=False, no_network=True, huge_tree=False,
         load_dtd=False, recover=True,
@@ -244,7 +250,7 @@ def _parser():
 
 
 class _Capped:
-    """Поток с жёстким потолком байт: защита от бомбы при потоковом разборе."""
+    """A stream with a hard byte ceiling: bomb protection during streaming parse."""
 
     def __init__(self, fh, limit):
         self._fh = fh
@@ -261,26 +267,26 @@ class _Capped:
 
     @property
     def exhausted(self) -> bool:
-        """Достигнут ли потолок байт (а не естественный конец потока)."""
+        """Whether the byte ceiling was reached (rather than the natural end of the stream)."""
         return self._left <= 0
 
 
 def _read_part(zf, name, limit=MAX_PART_READ):
-    """Прочитать часть пакета в память с проверкой заявленного размера."""
+    """Read a package part into memory, checking the declared size."""
     try:
         info = zf.getinfo(name)
     except KeyError:
         return None
     if info.file_size > limit:
         raise ValueError(
-            "часть %s слишком велика (%d байт), пропущена" % (name, info.file_size)
+            tr("part %s is too large (%d bytes), skipped") % (name, info.file_size)
         )
     with zf.open(info, "r") as fh:
         return fh.read(limit + 1)[:limit]
 
 
 def _read_xml(zf, name, limit=MAX_PART_READ):
-    """Разобрать XML-часть. Возвращает корень или None."""
+    """Parse an XML part. Returns the root or None."""
     raw = _read_part(zf, name, limit)
     if not raw:
         return None
@@ -289,18 +295,19 @@ def _read_xml(zf, name, limit=MAX_PART_READ):
 
 
 def _section(rep, title, fn, *args):
-    """Каждая секция разбора изолирована: сбой одной не валит инспекцию."""
+    """Each parsing section is isolated: a failure in one does not bring down the inspection."""
     try:
         fn(*args)
-    except Exception as exc:  # noqa: BLE001 -- ловим всё намеренно
+    except Exception as exc:  # noqa: BLE001 -- we deliberately catch everything
         rep.err("%s: %s: %s" % (title, type(exc).__name__, exc))
 
 
 def _try(rep, where, fn, *args):
-    """То же, но для ОДНОЙ части внутри цикла.
+    """The same, but for ONE part inside a loop.
 
-    Без этого битый локальный заголовок одной записи обрывал разбор всех
-    остальных частей секции: в отчёте оставалась одна ошибка вместо находок.
+    Without it, a broken local header of one entry aborted the parsing of all
+    the other parts of the section: the report ended up with a single error
+    instead of findings.
     """
     try:
         return fn(*args)
@@ -309,16 +316,16 @@ def _try(rep, where, fn, *args):
         return None
 
 
-# === разбор docProps (переиспользуется фазой 2) ===========================
+# === docProps parsing (reused by phase 2) ===================================
 
 
 def parse_props(zf) -> dict:
-    """Сырые значения docProps/core.xml, app.xml и custom.xml.
+    """Raw values of docProps/core.xml, app.xml and custom.xml.
 
-    Вынесено отдельной функцией, чтобы фаза 2 (чистка) не переписывала разбор
-    заново, а работала с теми же словарями, что видел инспектор.
-    Возвращает {"core": {...}, "app": {...}, "custom": [(имя, тип, значение)]}.
-    Никогда не бросает: непрочитанная часть даёт пустой словарь.
+    Factored out into a separate function so that phase 2 (cleaning) does not
+    rewrite the parsing but works with the same dictionaries the inspector saw.
+    Returns {"core": {...}, "app": {...}, "custom": [(name, type, value)]}.
+    Never raises: a part that cannot be read yields an empty dictionary.
     """
     out = {"core": {}, "app": {}, "custom": []}
 
@@ -358,20 +365,20 @@ def parse_props(zf) -> dict:
     return out
 
 
-# === А. сам ZIP-контейнер =================================================
+# === ZIP container ==========================================================
 
 
-# Стоковые офисные пакеты, которые НЕ являются Microsoft Office. Их файлы
-# законно отличаются от вордовских: другой порядок записей в ZIP, другой набор
-# частей, нет rsid. Без этого списка ЛЮБОЙ подлинный документ из LibreOffice
-# объявлялся «собранным библиотекой python-docx или генератором ИИ» -- ложное
-# срабатывание на файлах реальных людей, а не только на наших пересозданных.
+# Stock office suites that are NOT Microsoft Office. Their files legitimately
+# differ from Word's: a different order of ZIP entries, a different set of
+# parts, no rsid. Without this list ANY genuine LibreOffice document was
+# declared "built by the python-docx library or an AI generator" -- a false
+# positive on real people's files, not only on our regenerated ones.
 _STOCK_SUITES = ("libreoffice", "openoffice", "staroffice", "neooffice",
                  "collabora", "onlyoffice", "ascensio", "wps ", "kingsoft")
 
 
 def _stock_suite(app) -> str:
-    """Имя стокового не-майкрософтовского пакета из Application, иначе ''."""
+    """Name of a stock non-Microsoft suite from Application, otherwise ''."""
     low = str(app or "").lower()
     if "microsoft" in low:
         return ""
@@ -382,8 +389,9 @@ def _stock_suite(app) -> str:
 
 
 def _app_name_early(zf) -> str:
-    """Application до разбора секций: секции ZIP надо знать, чем собран пакет,
-    а _sec_app отрабатывает позже. Читает одну маленькую часть, не бросает."""
+    """Application before the sections are parsed: the ZIP section needs to know
+    what built the package, while _sec_app runs later. Reads one small part,
+    never raises."""
     try:
         raw = zf.read("docProps/app.xml")
     except Exception:
@@ -401,7 +409,7 @@ def _sec_zip(zf, rep, ctx):
     ctx["nameset"] = set(ctx["names"])
 
     if len(infos) > MAX_PARTS_SCAN:
-        rep.err("В пакете %d записей, обработаны первые %d"
+        rep.err(tr("The package has %d entries, only the first %d were processed")
                 % (len(infos), MAX_PARTS_SCAN))
         infos = infos[:MAX_PARTS_SCAN]
 
@@ -410,7 +418,7 @@ def _sec_zip(zf, rep, ctx):
     for i in infos:
         total_unc += i.file_size
         total_cmp += i.compress_size
-        # Фаза 2 пересобирает пакет байт-в-байт, ей нужны все поля записи.
+        # Phase 2 rebuilds the package byte for byte, so it needs every field of the entry.
         rep.parts.append({
             "name": i.filename,
             "date_time": tuple(i.date_time),
@@ -428,34 +436,34 @@ def _sec_zip(zf, rep, ctx):
             total_unc > MIN_BOMB_UNPACKED and ratio > MAX_RATIO):
         ctx["safe"] = False
         rep.signal("hazard",
-                   "Подозрение на zip-бомбу: несжатый объём %d байт, коэффициент "
-                   "сжатия %.0f. Содержимое частей не распаковывалось."
+                   tr("Suspected zip bomb: uncompressed size %d bytes, compression ratio %.0f. "
+                      "The contents of the parts were not decompressed.")
                    % (total_unc, ratio), "high")
-        rep.err("Разбор содержимого пропущен из соображений безопасности")
+        rep.err(tr("Content parsing skipped for security reasons"))
 
-    rep.add(Risk.PROVENANCE, "ZIP", "Записей в пакете", str(len(infos)),
-            "Состав пакета сам по себе выдаёт и генератор, и структуру документа.")
+    rep.add(Risk.PROVENANCE, "ZIP", tr("Entries in the package"), str(len(infos)),
+            tr("The package layout alone reveals both the generator and the document structure."))
 
-    # Первая запись. Office всегда кладёт [Content_Types].xml первым.
+    # First entry. Office always puts [Content_Types].xml first.
     first = infos[0].filename if infos else ""
-    rep.add(Risk.PROVENANCE, "ZIP", "Первая запись контейнера", first,
-            "Word/Excel/PowerPoint всегда пишут [Content_Types].xml первым.")
+    rep.add(Risk.PROVENANCE, "ZIP", tr("First container entry"), first,
+            tr("Word/Excel/PowerPoint always write [Content_Types].xml first."))
     if first and first != "[Content_Types].xml":
         suite = _stock_suite(_app_name_early(zf))
         if suite:
-            # LibreOffice и подобные кладут первым word/document.xml. Это их
-            # штатный порядок, а не след постороннего инструмента.
+            # LibreOffice and the like put word/document.xml first. That is their normal
+            # order, not a trace of a foreign tool.
             rep.signal("producer",
-                       "Первая запись ZIP — %s: штатный порядок для %s, "
-                       "Microsoft Office кладёт первым [Content_Types].xml."
+                       tr("First ZIP entry is %s: the normal order for %s, whereas Microsoft "
+                          "Office puts [Content_Types].xml first.")
                        % (first, suite), "medium")
         else:
             rep.signal("ai",
-                       "Первая запись ZIP — %s, а не [Content_Types].xml: пакет "
-                       "собран сторонним инструментом или пересобран." % first,
+                       tr("First ZIP entry is %s, not [Content_Types].xml: the package was built "
+                          "by a third-party tool or rebuilt.") % first,
                        "medium")
 
-    # Таймстемпы. Word обнуляет их в 1980-01-01, библиотеки пишут реальное время.
+    # Timestamps. Word zeroes them to 1980-01-01, libraries write the real time.
     stamps = [tuple(i.date_time) for i in infos]
     epoch_like = [s for s in stamps if s[:3] == (1980, 1, 1)]
     real = sorted(s for s in stamps if s[0] >= 2000)
@@ -465,81 +473,83 @@ def _sec_zip(zf, rep, ctx):
     if real:
         lo = "%04d-%02d-%02d %02d:%02d:%02d" % real[0]
         hi = "%04d-%02d-%02d %02d:%02d:%02d" % real[-1]
-        rep.add(Risk.ENVIRONMENT, "ZIP", "Реальное время сохранения записей",
-                "%s … %s (%d из %d записей)" % (lo, hi, len(real), len(stamps)),
-                "Office ставит всем записям 1980-01-01 00:00. Реальные даты "
-                "означают, что пакет собран или пересобран библиотекой: время "
-                "работы над файлом утекает даже при полностью вычищенном "
-                "docProps/core.xml.")
+        rep.add(Risk.ENVIRONMENT, "ZIP", tr("Real save time of entries"),
+                tr("%s … %s (%d of %d entries)") % (lo, hi, len(real), len(stamps)),
+                tr("Office stamps every entry with 1980-01-01 00:00. Real dates mean the package "
+                   "was built or rebuilt by a library: the time spent working on the file leaks "
+                   "even when docProps/core.xml is completely scrubbed."))
         ctx["zip_real_max"] = hi
     elif ctx["zip_epoch_only"]:
-        rep.add(Risk.PROVENANCE, "ZIP", "Таймстемпы записей",
-                "все 1980-01-01 00:00",
-                "Штатное поведение Office: время сохранения через ZIP не течёт.")
+        rep.add(Risk.PROVENANCE, "ZIP", tr("Entry timestamps"),
+                tr("all 1980-01-01 00:00"),
+                tr("Normal Office behavior: the save time does not leak through the ZIP."))
 
     types = {i.compress_type for i in infos}
     if types and types != {zipfile.ZIP_DEFLATED}:
-        rep.add(Risk.PROVENANCE, "ZIP", "Методы сжатия",
+        rep.add(Risk.PROVENANCE, "ZIP", tr("Compression methods"),
                 ", ".join(str(t) for t in sorted(types)),
-                "Office сжимает все части deflate; смесь методов — признак "
-                "пересборки сторонним инструментом.")
+                tr("Office compresses all parts with deflate; a mix of methods is a sign of "
+                   "rebuilding by a third-party tool."))
 
 
-# === Б. docProps/core.xml =================================================
+# === docProps/core.xml ======================================================
 
 
 def _sec_core(zf, rep, ctx):
     core = ctx["props"]["core"]
     if "docProps/core.xml" not in ctx["nameset"]:
-        rep.signal("ai", "Нет docProps/core.xml — Office такой пакет не пишет.",
+        rep.signal("ai", tr("No docProps/core.xml — Office does not write a package like this."),
                    "high")
         return
     if not core:
-        # Иначе битый core.xml выглядит как чистый: ни ошибки, ни находок.
-        rep.err("docProps/core.xml: часть есть, но ни одного свойства не "
-                "разобрано (повреждённый или не-XML контент)")
+        # Otherwise a broken core.xml looks clean: no error and no findings.
+        rep.err(tr("docProps/core.xml: the part exists but no property could be parsed "
+                   "(corrupted or non-XML content)"))
     for key, risk, label, note in CORE_FIELDS:
+        label, note = tr(label), tr(note)
         present = key in core
         value = core.get(key, "")
         full = note
         if not present:
-            full = (note + " Элемент в core.xml отсутствует.").strip()
-        # Пустое поле показываем намеренно: это тоже факт (чистили или сток).
+            full = (note + tr(" The element is missing from core.xml.")).strip()
+        # An empty field is shown deliberately: that is a fact too (scrubbed or stock).
         rep.add(risk, "docProps/core.xml", label, value, full)
         for mail in _emails(value):
             rep.add(Risk.IDENTITY, "docProps/core.xml",
-                    "Email в поле %s" % key, mail,
-                    "Адрес в свойствах документа.")
+                    tr("Email in field %s") % key, mail,
+                    tr("An address in the document properties."))
 
 
-# === В. docProps/app.xml ==================================================
+# === docProps/app.xml =======================================================
 
 
 def _sec_app(zf, rep, ctx):
     app = ctx["props"]["app"]
     if "docProps/app.xml" not in ctx["nameset"]:
-        rep.signal("ai", "Нет docProps/app.xml — Office такой пакет не пишет.",
+        rep.signal("ai", tr("No docProps/app.xml — Office does not write a package like this."),
                    "high")
         return
     if not app:
-        rep.err("docProps/app.xml: часть есть, но ни одного свойства не "
-                "разобрано (повреждённый или не-XML контент)")
+        rep.err(tr("docProps/app.xml: the part exists but no property could be parsed (corrupted "
+                   "or non-XML content)"))
     for key, value in app.items():
         risk, label, note = APP_FIELDS.get(
-            key, (Risk.PROVENANCE, "%s" % key, "Нестандартное поле app.xml.")
+            key, (Risk.PROVENANCE, "%s" % key, tr("Non-standard app.xml field."))
         )
+        if key in APP_FIELDS:
+            label, note = tr(label), tr(note)
         if key == "Template" and _has_path(value):
             risk = Risk.ENVIRONMENT
-            note = "Путь к шаблону выдаёт файловую систему автора."
+            note = tr("The template path reveals the author's file system.")
         rep.add(risk, "docProps/app.xml", label, value, note)
         for mail in _emails(value):
             rep.add(Risk.IDENTITY, "docProps/app.xml",
-                    "Email в поле %s" % key, mail, "Адрес в свойствах документа.")
+                    tr("Email in field %s") % key, mail, tr("An address in the document properties."))
 
 
-# === Г. docProps/custom.xml и метки Purview ==============================
+# === docProps/custom.xml and Purview labels =================================
 
-# Свойства SharePoint/СЭД: привязка к конкретному порталу и библиотеке.
+# SharePoint/EDMS properties: a tie to a specific portal and library.
 _SP_NAMES = {
     "ContentTypeId", "TemplateUrl", "_SourceUrl", "_SharedFileIndex",
     "_dlc_DocId", "_dlc_DocIdUrl", "_dlc_DocIdItemGuid", "Order",
@@ -547,17 +557,17 @@ _SP_NAMES = {
 }
 
 _MSIP_NOTES = {
-    "SetBy": "Реальный email пользователя, применившего метку. Самая прямая "
-             "утечка личности в OOXML.",
-    "SiteId": "GUID тенанта Microsoft 365 — однозначно идентифицирует "
-              "организацию, даже если всё остальное вычищено.",
-    "SetDate": "Точное время применения метки.",
-    "Name": "Человекочитаемое имя метки конфиденциальности.",
-    "ActionId": "GUID операции маркировки.",
-    "Enabled": "Флаг активности метки.",
-    "Method": "Как применена метка: вручную или политикой.",
-    "ContentBits": "Какие части документа промаркированы (колонтитул, ватермарк).",
-    "SiteUrl": "URL портала организации.",
+    "SetBy": N_("The real email of the user who applied the label. The most direct identity leak "
+                "in OOXML."),
+    "SiteId": N_("The Microsoft 365 tenant GUID: uniquely identifies the organization even if "
+                 "everything else is scrubbed."),
+    "SetDate": N_("The exact time the label was applied."),
+    "Name": N_("The human-readable name of the sensitivity label."),
+    "ActionId": N_("GUID of the labeling operation."),
+    "Enabled": N_("Flag showing whether the label is active."),
+    "Method": N_("How the label was applied: manually or by policy."),
+    "ContentBits": N_("Which parts of the document are labeled (header/footer, watermark)."),
+    "SiteUrl": N_("URL of the organization's portal."),
 }
 
 
@@ -565,59 +575,59 @@ def _sec_custom(zf, rep, ctx):
     props = ctx["props"]["custom"]
     loc = "docProps/custom.xml"
     if not props and loc in ctx["nameset"]:
-        # Та же логика, что у core.xml/app.xml: часть есть, но ни одного
-        # свойства не разобрано -- иначе битый custom.xml выглядит как файл
-        # без кастомных свойств вовсе, и находка молча пропадает.
-        rep.err("docProps/custom.xml: часть есть, но ни одного свойства не "
-                "разобрано (повреждённый или не-XML контент)")
+        # The same logic as for core.xml/app.xml: the part exists but no property
+        # could be parsed -- otherwise a broken custom.xml looks like a file with no
+        # custom properties at all, and the finding silently disappears.
+        rep.err(tr("docProps/custom.xml: the part exists but no property could be parsed "
+                   "(corrupted or non-XML content)"))
     for name, vtype, value in props:
         risk = Risk.PROVENANCE
-        note = "Пользовательское свойство (тип %s)." % (vtype or "?")
+        note = tr("Custom property (type %s).") % (vtype or "?")
 
         if name.startswith("MSIP_Label_"):
             risk = Risk.IDENTITY
             field = name.rsplit("_", 1)[-1]
-            note = _MSIP_NOTES.get(
-                field, "Метка конфиденциальности Microsoft Purview.")
+            note = (tr(_MSIP_NOTES[field]) if field in _MSIP_NOTES
+                    else tr("Microsoft Purview sensitivity label."))
             note = "Purview: " + note
-        # Email/ФИО в ЗНАЧЕНИИ -- это личность независимо от того, как называется
-        # само свойство. Раньше имя вида "_dlc_DocId" или "_Approver" уводило
-        # находку в ENVIRONMENT по одному лишь подчёркиванию, даже если внутри
-        # лежал реальный email: проверка по значению должна идти раньше
-        # проверки по имени SharePoint/СЭД, а не после неё.
+        # An email or full name in the VALUE is an identity no matter what the
+        # property itself is called. A name like "_dlc_DocId" or "_Approver" used to
+        # send the finding to ENVIRONMENT on the underscore alone, even when a real
+        # email sat inside: the check by value must come before the check by
+        # SharePoint/EDMS name, not after it.
         elif _emails(value):
             risk = Risk.IDENTITY
-            note = "Значение содержит email."
+            note = tr("The value contains an email.")
         elif value and _PERSON_NAME_RE.search(name):
             risk = Risk.IDENTITY
-            note = ("Свойство хранит человека (автор, исполнитель, подписант) — "
-                    "ФИО из шаблона или карточки СЭД.")
+            note = (tr("The property holds a person (author, executor, signer) — a full name "
+                       "from a template or an EDMS card."))
         elif name in _SP_NAMES or name.startswith("_") or "urn:schemas" in name:
             risk = Risk.ENVIRONMENT
-            note = "Свойство SharePoint/СЭД: привязка к порталу и библиотеке."
+            note = tr("SharePoint/EDMS property: a tie to a portal and library.")
         elif _has_path(value):
             risk = Risk.ENVIRONMENT
-            note = "Значение похоже на локальный или сетевой путь."
+            note = tr("The value looks like a local or network path.")
 
         rep.add(risk, loc, name, value, note)
 
     if any(n.startswith("MSIP_Label_") for n, _, _ in props):
         rep.signal("producer",
-                   "Документ промаркирован Microsoft Purview: метка несёт GUID "
-                   "тенанта и email применившего её сотрудника.", "high")
+                   tr("The document is labeled with Microsoft Purview: the label carries the "
+                      "tenant GUID and the email of the employee who applied it."), "high")
 
-    # Параллельная площадка для тех же меток в новых сборках Office.
+    # A parallel place for the same labels in newer Office builds.
     for name in ctx["names"]:
         if name.lower().endswith("labelinfo.xml"):
             raw = _try(rep, name, _read_part, zf, name, 1 * 1024 * 1024)
             if raw:
-                rep.add(Risk.IDENTITY, name, "LabelInfo (метка Purview)",
+                rep.add(Risk.IDENTITY, name, tr("LabelInfo (Purview label)"),
                         raw.decode("utf-8", "replace"),
-                        "Дублирует метку конфиденциальности отдельной частью "
-                        "пакета; чистка только custom.xml её не убирает.")
+                        tr("Duplicates the sensitivity label as a separate package part; "
+                           "cleaning custom.xml alone does not remove it."))
 
 
-# === Д. превью ============================================================
+# === preview ================================================================
 
 
 def _sec_thumbnail(zf, rep, ctx):
@@ -628,16 +638,16 @@ def _sec_thumbnail(zf, rep, ctx):
             size = zf.getinfo(name).file_size
         except KeyError:
             size = 0
-        rep.add(Risk.PROVENANCE, name, "Превью документа", "%d байт" % size,
-                "Превью рендерится при сохранении и может показывать ПРЕДЫДУЩУЮ "
-                "версию документа — в том числе уже удалённый текст. Кроме "
-                "того, это картинка со своими метаданными.")
+        rep.add(Risk.PROVENANCE, name, tr("Document preview"), tr("%d bytes") % size,
+                tr("The preview is rendered at save time and may show the PREVIOUS version of "
+                   "the document — including text that has since been deleted. It is also an "
+                   "image with its own metadata."))
         rep.signal("hazard",
-                   "Есть встроенное превью (%s): визуально может отличаться от "
-                   "текущего содержимого." % name, "low")
+                   tr("There is an embedded preview (%s): it may visually differ from the "
+                      "current content.") % name, "low")
 
 
-# === И. отношения (*.rels) ================================================
+# === relationships (*.rels) =================================================
 
 
 def _owner_of_rels(name):
@@ -673,9 +683,9 @@ def _sec_rels(zf, rep, ctx):
             rtype = _attr(el, "Type") or ""
             table[rid] = (target, mode, rtype)
             low = target.lower()
-            # На TargetMode полагаться нельзя: в битых пакетах атрибут теряется
-            # при восстановлении XML. Внутренняя цель никогда не выглядит как
-            # абсолютный путь, mailto: или http(s), поэтому судим по форме.
+            # TargetMode cannot be relied on: in broken packages the attribute is lost
+            # when the XML is recovered. An internal target never looks like an absolute
+            # path, mailto: or http(s), so we judge by shape.
             external = (
                 mode == "External" or _has_path(target)
                 or low.startswith(("mailto:", "http://", "https://"))
@@ -683,11 +693,11 @@ def _sec_rels(zf, rep, ctx):
             if not external:
                 continue
             if low.startswith("mailto:"):
-                rep.add(Risk.IDENTITY, name, "Ссылка mailto", target,
-                        "Прямой email-адрес во внешнем отношении.")
+                rep.add(Risk.IDENTITY, name, tr("mailto link"), target,
+                        tr("A direct email address in an external relationship."))
                 continue
-            # http(s) разбираем ДО путей: иначе URL с буквой диска внутри
-            # попадал бы в ветку файлов.
+            # http(s) is handled BEFORE paths: otherwise a URL with a drive letter
+            # inside would fall into the file branch.
             if low.startswith("http://") or low.startswith("https://"):
                 http_count += 1
                 if shown < MAX_LISTED:
@@ -696,32 +706,32 @@ def _sec_rels(zf, rep, ctx):
                         "sharepoint.com" in low or "/personal/" in low
                         or ".local/" in low
                     ) else Risk.PROVENANCE
-                    rep.add(risk, name, "Внешняя гиперссылка", target,
-                            "Внешнее отношение; корпоративные URL выдают "
-                            "портал и учётную запись.")
+                    rep.add(risk, name, tr("External hyperlink"), target,
+                            tr("External relationship; corporate URLs reveal the portal and the "
+                               "account."))
                 continue
             if _has_path(target):
-                rep.add(Risk.ENVIRONMENT, name, "Внешняя ссылка на файл", target,
-                        "Абсолютный путь/UNC выдаёт имя пользователя, диск или "
-                        "сервер организации.")
+                rep.add(Risk.ENVIRONMENT, name, tr("External file link"), target,
+                        tr("An absolute path/UNC reveals the user name, the drive or the "
+                           "organization's server."))
                 continue
-            rep.add(Risk.ENVIRONMENT, name, "Внешнее отношение (%s)" % rid,
-                    target, "TargetMode=External, тип %s" % _ln(rtype))
+            rep.add(Risk.ENVIRONMENT, name, tr("External relationship (%s)") % rid,
+                    target, tr("TargetMode=External, type %s") % _ln(rtype))
 
     if http_count > shown:
-        rep.add(Risk.PROVENANCE, "*.rels", "Ещё внешних гиперссылок",
-                str(http_count - shown), "Показаны не все, остальные того же рода.")
+        rep.add(Risk.PROVENANCE, "*.rels", tr("More external hyperlinks"),
+                str(http_count - shown), tr("Not all are shown, the rest are of the same kind."))
 
 
 def _resolve(ctx, owner, rid):
-    """Разрешить r:id в цель через соответствующий .rels."""
+    """Resolve an r:id to its target through the corresponding .rels."""
     if not rid:
         return None
     entry = ctx.get("rels", {}).get(owner, {}).get(rid)
     return entry[0] if entry else None
 
 
-# === Е. word/settings.xml =================================================
+# === word/settings.xml ======================================================
 
 
 def _sec_settings(zf, rep, ctx):
@@ -732,36 +742,36 @@ def _sec_settings(zf, rep, ctx):
     if root is None:
         return
 
-    # rsid: идентификаторы сессий правки.
+    # rsid: edit session identifiers.
     rsids = []
     for el in _iter_tag(root, "rsid", "rsidRoot"):
         val = _attr(el, "val")
         if val:
             rsids.append(val)
     ctx["rsid_count"] = len(rsids)
-    rep.add(Risk.PROVENANCE, loc, "w:rsid — идентификаторы сессий правки",
-            "%d шт.: %s" % (len(rsids), ", ".join(rsids[:8]) or "нет"),
-            "Каждый rsid — отдельная сессия редактирования. Их количество "
-            "выдаёт, сколько раз документ открывали и правили, а сам набор "
-            "связывает разные документы одной инсталляции Word.")
+    rep.add(Risk.PROVENANCE, loc, tr("w:rsid — edit session identifiers"),
+            tr("%d total: %s") % (len(rsids), ", ".join(rsids[:8]) or tr("none")),
+            tr("Each rsid is a separate editing session. Their number reveals how many times the "
+               "document was opened and edited, and the set itself links different documents "
+               "from one Word installation."))
 
-    # attachedTemplate: почти всегда путь вида file:///C:/Users/ИМЯ/...
+    # attachedTemplate: almost always a path like file:///C:/Users/NAME/...
     for el in _iter_tag(root, "attachedTemplate"):
         rid = _attr(el, "id")
         target = _resolve(ctx, loc, rid)
         risk = Risk.ENVIRONMENT if _has_path(target) else Risk.PROVENANCE
-        rep.add(risk, loc, "w:attachedTemplate — присоединённый шаблон",
-                target or ("r:id=%s (не разрешён)" % rid),
-                "Путь к шаблону обычно содержит имя пользователя Windows или "
-                "UNC-путь к серверу организации.")
+        rep.add(risk, loc, tr("w:attachedTemplate — attached template"),
+                target or (tr("r:id=%s (not resolved)") % rid),
+                tr("The template path usually contains the Windows user name or a UNC path to "
+                   "the organization's server."))
 
-    # mailMerge: источник данных рассылки.
+    # mailMerge: the mail-merge data source.
     for el in _iter_tag(root, "mailMerge"):
         for kid in el.iter():
             kname = _ln(kid.tag)
-            # w:udl -- это и есть строка подключения слияния (ODBC/OLEDB),
-            # w:table -- имя листа или таблицы в источнике. Без них разбор
-            # mailMerge не доставал главного: логина и адреса сервера.
+            # w:udl is the merge connection string (ODBC/OLEDB), w:table is the sheet
+            # or table name in the source. Without them the mailMerge parsing missed the
+            # main thing: the login and the server address.
             if kname not in ("dataSource", "headerSource", "query", "src",
                              "connectString", "udl", "table", "odso"):
                 continue
@@ -772,65 +782,68 @@ def _sec_settings(zf, rep, ctx):
                 continue
             rep.add(_value_risk(val, Risk.ENVIRONMENT),
                     loc, "w:mailMerge/%s" % kname, val,
-                    "Источник данных слияния: путь к базе, таблице или "
-                    "строка подключения с логином и адресом сервера.")
+                    tr("Merge data source: a path to a database or table, or a connection string "
+                       "with a login and server address."))
 
-    # documentProtection: хеш и соль пароля.
+    # documentProtection: password hash and salt.
     for el in _iter_tag(root, "documentProtection", "writeProtection"):
         parts = ["%s=%s" % (_ln(k), v) for k, v in el.attrib.items()]
-        rep.add(Risk.IDENTITY, loc, "w:%s — защита документа" % _ln(el.tag),
+        rep.add(Risk.IDENTITY, loc, tr("w:%s — document protection") % _ln(el.tag),
                 "; ".join(parts),
-                "Хеш и соль пароля. Удаление снимает саму защиту, поэтому "
-                "убирать нельзя без потери функциональности.",
+                tr("Password hash and salt. Removing them lifts the protection itself, so they "
+                   "cannot be removed without losing functionality."),
                 removable=False)
 
     for el in _iter_tag(root, "proofState"):
         parts = ["%s=%s" % (_ln(k), v) for k, v in el.attrib.items()]
-        rep.add(Risk.PROVENANCE, loc, "w:proofState — состояние проверки",
+        rep.add(Risk.PROVENANCE, loc, tr("w:proofState — proofing state"),
                 "; ".join(parts),
-                "Показывает, дочитал ли автор проверку орфографии.")
+                tr("Shows whether the author finished the spell check."))
 
     if any(True for _ in _iter_tag(root, "trackChanges")):
-        rep.add(Risk.PROVENANCE, loc, "w:trackChanges — запись исправлений",
-                "включена",
-                "Режим записи правок включён: все последующие изменения будут "
-                "сохраняться вместе с именем автора.")
+        rep.add(Risk.PROVENANCE, loc, tr("w:trackChanges — change tracking"),
+                tr("enabled"),
+                tr("Change tracking is on: all subsequent edits will be saved together with the "
+                   "author's name."))
         rep.signal("hazard",
-                   "В settings.xml включён режим записи исправлений.", "medium")
+                   tr("Change tracking is turned on in settings.xml."), "medium")
 
     for el in _iter_tag(root, "hdrShapeDefaults", "shapeDefaults"):
-        value = _kids_attrs(el) or _text(el) or "присутствует"
+        value = _kids_attrs(el) or _text(el) or tr("present")
         rep.add(_value_risk(value), loc,
-                "w:%s — умолчания фигур" % _ln(el.tag), value,
-                "Блок хранит настройки объектов и иногда идентификаторы "
-                "предыдущих вставок.")
+                tr("w:%s — shape defaults") % _ln(el.tag), value,
+                tr("The block stores object settings and sometimes identifiers of earlier "
+                   "insertions."))
 
     for el in _iter_tag(root, "docVars"):
-        # Значения docVar лежат в атрибутах name/val, текста у элемента нет:
-        # через itertext() всё содержимое переменных теряется.
-        value = _kids_attrs(el) or _text(el) or "присутствует"
-        rep.add(_value_risk(value), loc, "w:docVars — переменные документа",
+        # docVar values live in the name/val attributes and the element has no text:
+        # through itertext() the whole content of the variables is lost.
+        value = _kids_attrs(el) or _text(el) or tr("present")
+        rep.add(_value_risk(value), loc, tr("w:docVars — document variables"),
                 value,
-                "Переменные макросов, надстроек и шаблонов СЭД: там регулярно "
-                "лежат ФИО согласующих, номера договоров и пути к базам.")
-        # Переменная, названная как человек («Owner», «Исполнитель»), -- личность,
-        # как одноимённое свойство в custom.xml. Отдельной находкой: в общей строке
-        # выше её значение терялось в PROVENANCE, и Stealth оставлял ФИО в файле.
+                tr("Variables of macros, add-ins and EDMS templates: they regularly hold the "
+                   "full names of approvers, contract numbers and database paths."))
+        # A variable named like a person ("Owner", "Executor") is an identity, like a
+        # same-named property in custom.xml. As a separate finding: in the combined
+        # line above its value got lost in PROVENANCE, and Stealth left the full name
+        # in the file.
         for var in _iter_tag(el, "docVar"):
             if _PERSON_NAME_RE.search(_attr(var, "name") or ""):
                 rep.add_nonempty(Risk.IDENTITY, loc,
                                  "w:docVar %s" % (_attr(var, "name") or "")[:60], _attr(var, "val"),
-                                 "Переменная документа хранит человека: ФИО из шаблона или СЭД.")
+                                 tr("The document variable holds a person: a full name from a "
+                                    "template or an EDMS."))
 
 
-# === Ж. word/document.xml и его соседи ====================================
+# === word/document.xml and its neighbours ===================================
 
 _REVISION_TAGS = ("ins", "del", "moveFrom", "moveTo", "cellIns", "cellDel",
                   "rPrChange", "pPrChange", "sectPrChange", "tblPrChange")
 
-# Части, где лежит текст со правками. Колонтитулы, сноски и словарь автотекста
-# (word/glossary/document.xml) -- такое же тело со своими авторами и rsid,
-# и чистка, которая смотрит только в document.xml, их пропускает.
+# Parts that hold text with revisions. Headers and footers, footnotes and the
+# autotext glossary (word/glossary/document.xml) are the same kind of body
+# with their own authors and rsids, and cleaning that looks only at
+# document.xml misses them.
 _BODY_PART_RE = re.compile(
     r"^word/(document\d*\.xml|glossary/document\d*\.xml|header\d*\.xml"
     r"|footer\d*\.xml|footnotes\.xml|endnotes\.xml|comments\.xml)$"
@@ -838,18 +851,18 @@ _BODY_PART_RE = re.compile(
 
 
 def _scan_body(zf, part, acc):
-    """Потоковый разбор одной части тела.
+    """Streaming parse of one body part.
 
-    Возвращает причину обрыва (строка) или None, если часть разобрана целиком.
-    Обрыв возможен по двум независимым пределам: числу элементов (MAX_ELEMENTS)
-    и объёму декомпрессированных байт (MAX_STREAM, через _Capped) -- документ
-    может быть маленьким по числу тегов, но содержать один огромный текстовый
-    узел, и тогда предел по байтам сработает первым. Раньше в этом случае
-    правки за обрывом пропадали молча: ни в findings, ни в errors следа не
-    было. Оба предела теперь обязаны попасть в отчёт.
+    Returns the reason for stopping (a string) or None if the part was parsed
+    in full. Stopping is possible at two independent limits: the number of
+    elements (MAX_ELEMENTS) and the volume of decompressed bytes (MAX_STREAM,
+    via _Capped) -- a document can be small in tag count yet hold one huge text
+    node, and then the byte limit fires first. Previously the revisions beyond
+    the cutoff vanished silently: no trace in findings or in errors. Both
+    limits must now reach the report.
     """
     with zf.open(zf.getinfo(part), "r") as raw:
-        # iterparse, а не fromstring: document.xml бывает сотни мегабайт.
+        # iterparse, not fromstring: document.xml can be hundreds of megabytes.
         capped = _Capped(raw, MAX_STREAM)
         context = etree.iterparse(
             capped, events=("end",), resolve_entities=False,
@@ -859,7 +872,7 @@ def _scan_body(zf, part, acc):
         for _, el in context:
             seen += 1
             if seen > MAX_ELEMENTS:
-                return "предел %d элементов" % MAX_ELEMENTS
+                return tr("limit of %d elements") % MAX_ELEMENTS
             tag = _ln(el.tag)
             if tag in _REVISION_TAGS:
                 who = _attr(el, "author")
@@ -885,7 +898,7 @@ def _scan_body(zf, part, acc):
                 while el.getprevious() is not None:
                     del parent[0]
         if capped.exhausted:
-            return "предел потокового разбора %d МБ" % (MAX_STREAM // (1024 * 1024))
+            return tr("streaming parse limit of %d MB") % (MAX_STREAM // (1024 * 1024))
     return None
 
 
@@ -897,61 +910,61 @@ def _sec_document(zf, rep, ctx):
     acc = {"authors": {}, "dates": [], "editors": set(), "goback": set(),
            "rsid": 0}
     for part in targets:
-        # Своё try на каждую часть: битый заголовок одной записи не должен
-        # лишать отчёт правок из всех остальных.
+        # A try of its own for each part: a broken header of one entry must not
+        # deprive the report of the revisions from all the others.
         try:
             reason = _scan_body(zf, part, acc)
             if reason:
-                rep.err("%s: разбор остановлен (%s), правки за этим пределом "
-                        "в отчёт не попали" % (part, reason))
+                rep.err(tr("%s: parsing stopped (%s), revisions beyond this limit did not make "
+                           "it into the report") % (part, reason))
         except Exception as exc:  # noqa: BLE001
             rep.err("%s: %s: %s" % (part, type(exc).__name__, exc))
 
     ctx["rsid_attrs"] = acc["rsid"]
     main = ("word/document.xml" if "word/document.xml" in targets
             else targets[0])
-    rep.add(Risk.PROVENANCE, main, "rsid-атрибутов в теле", str(acc["rsid"]),
-            "Word помечает каждый абзац и прогон идентификатором сессии правки. "
-            "Полное отсутствие rsid означает, что документ создан не Word. "
-            "Просканировано частей тела: %d (%s)."
+    rep.add(Risk.PROVENANCE, main, tr("rsid attributes in the body"), str(acc["rsid"]),
+            tr("Word marks every paragraph and run with an edit session identifier. A complete "
+               "absence of rsid means the document was not created by Word. Body parts scanned: "
+               "%d (%s).")
             % (len(targets), ", ".join(targets[:8])))
 
     ranked = sorted(acc["authors"].items(), key=lambda kv: -kv[1])
     for (part, who), cnt in ranked[:MAX_LISTED]:
-        rep.add(Risk.IDENTITY, part, "Автор исправления (w:ins/w:del)",
-                "%s (%d правок)" % (who or "<пусто>", cnt),
-                "Track changes хранит ФИО или логин правившего прямо в теле "
-                "документа — вне docProps.")
+        rep.add(Risk.IDENTITY, part, tr("Revision author (w:ins/w:del)"),
+                tr("%s (%d edits)") % (who or tr("<empty>"), cnt),
+                tr("Track changes stores the full name or login of the editor right in the "
+                   "document body — outside docProps."))
     if acc["dates"]:
         acc["dates"].sort()
-        rep.add(Risk.PROVENANCE, main, "Даты исправлений",
-                "%s … %s (%d шт.)"
+        rep.add(Risk.PROVENANCE, main, tr("Revision dates"),
+                tr("%s … %s (%d total)")
                 % (acc["dates"][0], acc["dates"][-1], len(acc["dates"])),
-                "Точное время каждой правки.")
+                tr("The exact time of each edit."))
     for part, ed in sorted(acc["editors"])[:MAX_LISTED]:
-        rep.add(Risk.IDENTITY, part, "w:permStart — разрешённый редактор", ed,
-                "Имя учётной записи, которой разрешено править область.")
+        rep.add(Risk.IDENTITY, part, tr("w:permStart — permitted editor"), ed,
+                tr("The account name that is allowed to edit the region."))
     for part in sorted(acc["goback"]):
-        rep.add(Risk.PROVENANCE, part, "Закладка _GoBack", "присутствует",
-                "Word ставит её на позицию последней правки. Факт её наличия "
-                "подтверждает сохранение именно из Word.")
+        rep.add(Risk.PROVENANCE, part, tr("_GoBack bookmark"), tr("present"),
+                tr("Word places it at the position of the last edit. Its presence confirms the "
+                   "file was saved from Word."))
     if acc["authors"]:
         people = {who for _, who in acc["authors"]}
         where = sorted({part for part, _ in acc["authors"]})
         rep.signal("hazard",
-                   "В теле документа сохранены исправления (track changes) от "
-                   "%d автор(ов), части: %s."
+                   tr("The document body contains saved revisions (track changes) from %d "
+                      "author(s), parts: %s.")
                    % (len(people), ", ".join(where[:8])), "high")
 
 
-# === З. комментарии, авторы, presenceInfo =================================
+# === comments, authors, presenceInfo ========================================
 
 
 def _is_person_part(name):
     if name in ("word/comments.xml", "word/commentsExtended.xml",
                 "word/commentsIds.xml", "word/people.xml",
                 "word/commentsExtensible.xml", "ppt/commentAuthors.xml",
-                "ppt/authors.xml"):     # авторы «современных» комментариев PowerPoint 365
+                "ppt/authors.xml"):     # authors of the "modern" comments of PowerPoint 365
         return True
     return bool(
         re.match(r"^xl/persons/.*\.xml$", name)
@@ -986,14 +999,14 @@ def _sec_people(zf, rep, ctx):
                 if mark in seen or len(seen) > 400:
                     continue
                 seen.add(mark)
-                note = "Автор комментария или участник обсуждения."
+                note = tr("A comment author or discussion participant.")
                 if _ln(key) == "userId":
-                    note = ("w15:presenceInfo/@userId — в подавляющем "
-                            "большинстве случаев это реальный рабочий email.")
-                rep.add(risk, name, label, val, note)
+                    note = (tr("w15:presenceInfo/@userId — in the overwhelming majority of cases "
+                               "this is a real work email."))
+                rep.add(risk, name, tr(label), val, note)
 
 
-# === К. медиа, вложения, макросы ==========================================
+# === media, attachments, macros =============================================
 
 
 def _sec_media(zf, rep, ctx):
@@ -1017,43 +1030,43 @@ def _sec_media(zf, rep, ctx):
             activex.append((name, size))
 
     if media:
-        listed = ", ".join("%s (%d Б)" % (n.rsplit("/", 1)[-1], s)
+        listed = ", ".join(tr("%s (%d B)") % (n.rsplit("/", 1)[-1], s)
                            for n, s in media[:20])
-        rep.add(Risk.PROVENANCE, "media", "Встроенные изображения",
-                "%d шт.: %s" % (len(media), listed),
-                "Каждая картинка несёт собственные метаданные (EXIF, XMP, ICC, "
-                "GPS). Требуется рекурсивная инспекция инспектором изображений: "
-                "вызывает её диспетчер, не этот модуль.")
+        rep.add(Risk.PROVENANCE, "media", tr("Embedded images"),
+                tr("%d total: %s") % (len(media), listed),
+                tr("Each picture carries its own metadata (EXIF, XMP, ICC, GPS). A recursive "
+                   "inspection by the image inspector is required: the dispatcher calls it, not "
+                   "this module."))
     for name, size in embeds[:MAX_LISTED]:
-        rep.add(Risk.PROVENANCE, name, "Вложенный OLE-объект", "%d байт" % size,
-                "У вложенного объекта СВОИ docProps (автор, компания, путь). "
-                "Нужна рекурсивная инспекция OLE-инспектором.")
+        rep.add(Risk.PROVENANCE, name, tr("Embedded OLE object"), tr("%d bytes") % size,
+                tr("An embedded object has ITS OWN docProps (author, company, path). A recursive "
+                   "inspection by the OLE inspector is needed."))
     if embeds:
         rep.signal("hazard",
-                   "В пакете %d вложенных OLE-объект(ов) со своими "
-                   "метаданными." % len(embeds), "medium")
+                   tr("The package has %d embedded OLE object(s) with their own metadata.") % len(embeds), "medium")
     for name, size in vba:
-        rep.add(Risk.PROVENANCE, name, "Проект VBA (макросы)", "%d байт" % size,
-                "Хранит исходники макросов, имена модулей и нередко путь к "
-                "проекту на машине автора.")
+        rep.add(Risk.PROVENANCE, name, tr("VBA project (macros)"), tr("%d bytes") % size,
+                tr("Stores macro sources, module names and often the project path on the "
+                   "author's machine."))
         rep.signal("hazard",
-                   "Файл содержит макросы VBA (%s): активное содержимое." % name,
+                   tr("The file contains VBA macros (%s): active content.") % name,
                    "high")
     for name, size in activex[:10]:
-        rep.add(Risk.PROVENANCE, name, "ActiveX-элемент", "%d байт" % size,
-                "Активное содержимое во встроенном элементе управления.")
+        rep.add(Risk.PROVENANCE, name, tr("ActiveX control"), tr("%d bytes") % size,
+                tr("Active content in an embedded control."))
     if activex:
-        rep.signal("hazard", "В пакете есть ActiveX-элементы управления.", "medium")
+        rep.signal("hazard", tr("The package contains ActiveX controls."), "medium")
 
 
-# === Л. printerSettings*.bin (DEVMODE) ====================================
+# === printerSettings*.bin (DEVMODE) =========================================
 
 
 def _wchar32(blob: bytes, offset: int) -> str:
-    """Поле WCHAR[32] по смещению offset: 64 байта UTF-16LE до первого NUL.
+    """A WCHAR[32] field at offset: 64 bytes of UTF-16LE up to the first NUL.
 
-    Пустая строка, если поле не читается или не печатается -- недоверенные
-    байты, из них нельзя делать находку с мусором внутри.
+    An empty string if the field cannot be read or is not printable -- these
+    are untrusted bytes, and a finding with garbage inside must not be made
+    from them.
     """
     if len(blob) < offset + 64:
         return ""
@@ -1061,38 +1074,39 @@ def _wchar32(blob: bytes, offset: int) -> str:
     return text if text and text.isprintable() else ""
 
 
-# Смещения в DEVMODEW. Структура фиксированная, это не эвристика:
-# dmDeviceName[32] WCHAR, затем служебные WORD/DWORD, затем dmFormName[32] WCHAR.
-# Полный размер DEVMODEW -- 220 байт, после него идут приватные данные драйвера
-# длиной dmDriverExtra.
-_DM_SIZE_OFF = 68          # dmSize: WORD, полная длина самой структуры
-_DM_DRIVER_EXTRA_OFF = 70  # dmDriverExtra: WORD, длина приватного хвоста драйвера
-_DM_PAPERSIZE_OFF = 78     # dmPaperSize: short, код формата бумаги
+# Offsets in DEVMODEW. The structure is fixed, this is not a heuristic:
+# dmDeviceName[32] WCHAR, then service WORD/DWORD fields, then dmFormName[32]
+# WCHAR. The full size of DEVMODEW is 220 bytes, followed by the driver's
+# private data of length dmDriverExtra.
+_DM_SIZE_OFF = 68          # dmSize: WORD, full length of the structure itself
+_DM_DRIVER_EXTRA_OFF = 70  # dmDriverExtra: WORD, length of the driver's private tail
+_DM_PAPERSIZE_OFF = 78     # dmPaperSize: short, paper size code
 _DM_FORMNAME_OFF = 102     # dmFormName[32] WCHAR
 _DEVMODEW_SIZE = 220
 
-# Коды dmPaperSize, по которым различается регион. Letter/Legal -- это Северная
-# Америка, A4 -- почти весь остальной мир. Контракт (docs/ARCHITECTURE.md) прямо
-# относит формат бумаги к сигналу kind="dating": геолокация по косвенным признакам.
+# dmPaperSize codes that tell the region apart. Letter/Legal mean North
+# America, A4 almost the whole rest of the world. The contract
+# (docs/ARCHITECTURE.md) explicitly files paper size under the signal
+# kind="dating": geolocation from indirect evidence.
 _PAPER_REGION = {
-    1: ("Letter 8.5x11in", "США и Канада"),
-    5: ("Legal 8.5x14in", "США и Канада"),
-    8: ("A3 297x420mm", "Европа и остальной мир"),
-    9: ("A4 210x297mm", "Европа и остальной мир"),
-    11: ("A5 148x210mm", "Европа и остальной мир"),
+    1: ("Letter 8.5x11in", N_("US and Canada")),
+    5: ("Legal 8.5x14in", N_("US and Canada")),
+    8: ("A3 297x420mm", N_("Europe and the rest of the world")),
+    9: ("A4 210x297mm", N_("Europe and the rest of the world")),
+    11: ("A5 148x210mm", N_("Europe and the rest of the world")),
 }
-# Имена форм, по которым регион читается даже когда dmPaperSize не заполнен.
-_FORM_REGION = {"letter": "США и Канада", "legal": "США и Канада",
-                "a4": "Европа и остальной мир", "a3": "Европа и остальной мир",
-                "a5": "Европа и остальной мир"}
+# Form names that give the region even when dmPaperSize is not filled in.
+_FORM_REGION = {"letter": N_("US and Canada"), "legal": N_("US and Canada"),
+                "a4": N_("Europe and the rest of the world"), "a3": N_("Europe and the rest of the world"),
+                "a5": N_("Europe and the rest of the world")}
 
 
 def _device_name(blob: bytes) -> str:
-    """dmDeviceName из начала DEVMODE.
+    """dmDeviceName from the start of the DEVMODE.
 
-    В OOXML почти всегда лежит DEVMODEW: имя занимает 32 WCHAR = 64 байта
-    в UTF-16LE и обрывается NUL. Для старого DEVMODEA (32 однобайтовых
-    символа) делаем запасной разбор.
+    In OOXML this is almost always a DEVMODEW: the name takes 32 WCHAR = 64
+    bytes in UTF-16LE and ends at a NUL. For the old DEVMODEA (32 single-byte
+    characters) there is a fallback parse.
     """
     name = _wchar32(blob, 0)
     if name:
@@ -1104,11 +1118,11 @@ def _device_name(blob: bytes) -> str:
 
 
 def _devmode_tail(blob: bytes):
-    """Приватные данные драйвера, лежащие ПОСЛЕ структуры DEVMODE.
+    """The driver's private data that sits AFTER the DEVMODE structure.
 
-    Возвращает (смещение, байты) или (0, b""). Длину берём из dmSize, а не из
-    константы: у драйвера может быть своя версия структуры. Если dmSize
-    невменяемый, откатываемся на штатный размер DEVMODEW.
+    Returns (offset, bytes) or (0, b""). The length is taken from dmSize, not
+    from a constant: a driver may have its own version of the structure. If
+    dmSize is insane, we fall back to the standard DEVMODEW size.
     """
     if len(blob) < _DEVMODEW_SIZE:
         return 0, b""
@@ -1118,15 +1132,17 @@ def _devmode_tail(blob: bytes):
     return size, blob[size:]
 
 
-# Хост или UNC-путь в приватных данных драйвера: там регулярно оказывается
-# \\PRINTSRV01\HP4050 или имя порта. Ищем в UTF-16LE и в однобайтовой кодировке.
+# A host or UNC path in the driver's private data: \\PRINTSRV01\HP4050 or a
+# port name regularly turns up there. We search in UTF-16LE and in a
+# single-byte encoding.
 _UNC_RE = re.compile(r"\\\\[A-Za-z0-9._-]{2,63}\\[A-Za-z0-9._$ -]{1,63}")
 
 
 def _tail_strings(tail: bytes, limit=6):
-    """UNC-пути из приватного хвоста драйвера. Хвост -- бинарный мусор, поэтому
-    ищем только то, что опознаётся однозначно, и не выдумываем «похожие на имена»
-    строки: ложная находка в отчёте о приватности дороже пропущенной."""
+    """UNC paths from the driver's private tail. The tail is binary garbage, so we
+    look only for what is recognizable unambiguously and do not invent
+    "name-like" strings: a false finding in a privacy report costs more than a
+    missed one."""
     found, seen = [], set()
     for raw in (tail.decode("utf-16le", "ignore"), tail.decode("cp1251", "ignore")):
         for m in _UNC_RE.finditer(raw):
@@ -1144,25 +1160,26 @@ def _sec_printer(zf, rep, ctx):
     for name in ctx["names"]:
         if "printersettings" not in name.lower() or not name.lower().endswith(".bin"):
             continue
-        # _try, а не прямой вызов: один раздутый/битый printerSettings*.bin не
-        # должен гасить разбор остальных -- их в пакете может быть несколько.
+        # _try, not a direct call: one bloated/broken printerSettings*.bin must not
+        # suppress parsing of the others -- there can be several in a package.
         blob = _try(rep, name, _read_part, zf, name, 4 * 1024 * 1024)
         if not blob:
             continue
         device = _device_name(blob)
-        rep.add(Risk.ENVIRONMENT, name, "dmDeviceName — имя принтера",
-                device or "<не разобрано>",
-                "Имя принтера из структуры DEVMODE. Регулярно содержит имя "
-                "хоста, номер кабинета, город или название офиса — то есть "
-                "физическое расположение автора.")
-        rep.add(Risk.ENVIRONMENT, name, "Блок DEVMODE", "%d байт" % len(blob),
-                "Полный слепок настроек печати: драйвер, лоток, формат.")
+        rep.add(Risk.ENVIRONMENT, name, tr("dmDeviceName — printer name"),
+                device or tr("<unparsed>"),
+                tr("The printer name from the DEVMODE structure. It regularly contains a host "
+                   "name, an office number, a city or an office name — that is, the physical "
+                   "location of the author."))
+        rep.add(Risk.ENVIRONMENT, name, tr("DEVMODE block"), tr("%d bytes") % len(blob),
+                tr("A full snapshot of the print settings: driver, tray, paper format."))
         _try(rep, name, _devmode_details, rep, name, blob)
 
 
 def _devmode_details(rep, name, blob):
-    """Поля DEVMODE за пределами dmDeviceName. Отдельной функцией, чтобы битое
-    поле не уносило с собой уже добытое имя принтера (оно добавлено выше)."""
+    """DEVMODE fields beyond dmDeviceName. A separate function so that a broken
+    field does not take with it the printer name already extracted (it was
+    added above)."""
     form = _wchar32(blob, _DM_FORMNAME_OFF)
     paper = None
     if len(blob) >= _DM_PAPERSIZE_OFF + 2:
@@ -1171,49 +1188,49 @@ def _devmode_details(rep, name, blob):
     region = None
     if form:
         region = _FORM_REGION.get(form.lower())
-        rep.add(Risk.ENVIRONMENT, name, "dmFormName — формат бумаги", form,
-                "Имя формы печати. Нестандартное значение бывает заведено "
-                "администратором и тогда несёт название организации или "
-                "отдела; стандартное выдаёт регион.")
+        rep.add(Risk.ENVIRONMENT, name, tr("dmFormName — paper format"), form,
+                tr("The print form name. A non-standard value may have been set up by an "
+                   "administrator and then carries the name of an organization or department; a "
+                   "standard one reveals the region."))
     if region is None and paper in _PAPER_REGION:
         region = _PAPER_REGION[paper][1]
     if paper in _PAPER_REGION:
-        rep.add(Risk.ENVIRONMENT, name, "dmPaperSize — код формата бумаги",
+        rep.add(Risk.ENVIRONMENT, name, tr("dmPaperSize — paper size code"),
                 "%d (%s)" % (paper, _PAPER_REGION[paper][0]),
-                "Код формата бумаги из DEVMODE.")
+                tr("The paper size code from the DEVMODE."))
     if region:
         rep.signal("dating",
-                   "Формат бумаги в настройках печати (%s) указывает на регион: %s. "
-                   "Косвенный признак: формат ставится по локали системы, а не "
-                   "выбирается осознанно."
-                   % (form or _PAPER_REGION.get(paper, ("?",))[0], region))
+                   tr("The paper format in the print settings (%s) points to a region: %s. An "
+                      "indirect sign: the format is set from the system locale rather than "
+                      "chosen deliberately.")
+                   % (form or _PAPER_REGION.get(paper, ("?",))[0], tr(region)))
 
     if len(blob) >= _DM_DRIVER_EXTRA_OFF + 2:
         extra = struct.unpack_from("<H", blob, _DM_DRIVER_EXTRA_OFF)[0]
         if extra:
-            rep.add(Risk.ENVIRONMENT, name, "dmDriverExtra — приватные данные драйвера",
-                    "%d байт" % extra,
-                    "Непрозрачный блок настроек конкретного драйвера. Формат "
-                    "недокументирован и у разных драйверов разный, поэтому "
-                    "разобран он не полностью — но очередь печати, порт и "
-                    "сервер печати обычно лежат именно здесь.")
+            rep.add(Risk.ENVIRONMENT, name, tr("dmDriverExtra — driver private data"),
+                    tr("%d bytes") % extra,
+                    tr("An opaque block of settings of a specific driver. The format is "
+                       "undocumented and differs between drivers, so it is not fully parsed — "
+                       "but the print queue, port and print server usually sit right here."))
     offset, tail = _devmode_tail(blob)
     for val in _tail_strings(tail):
-        rep.add(Risk.ENVIRONMENT, name, "UNC-путь в данных драйвера печати", val,
-                "Найден в приватном блоке драйвера (смещение %d). Имя сервера "
-                "печати и очереди: это имя хоста в вашей сети." % offset)
+        rep.add(Risk.ENVIRONMENT, name, tr("UNC path in the print driver data"), val,
+                tr("Found in the driver's private block (offset %d). The print server and queue "
+                   "name: this is a host name on your network.") % offset)
 
 
-# === М1. customXml ========================================================
-# Живёт в секции Excel по историческим причинам, но к Excel отношения не имеет:
-# customXml/ бывает в любом OOXML-пакете, и у настоящих .docx он есть чаще.
+# === customXml ==============================================================
+# Lives in the Excel section for historical reasons but has nothing to do with
+# Excel: customXml/ can be in any OOXML package, and real .docx files have it
+# more often.
 
-# Корни SharePoint/СЭД: вот здесь и лежат имена сотрудников, даты и адрес
-# портала. Список обязан совпадать с core/clean_ooxml.py::_SP_ROOT_NS -- по
-# нему чистильщик решает, что обнулять. Расхождение между двумя списками делает
-# оракул ложноположительным: инспектор объявит утечкой то, что чистильщик
-# сознательно не трогает, и правильно почищенный файл получит вердикт
-# «почищено не полностью».
+# SharePoint/EDMS roots: this is where employee names, dates and the portal
+# address live. The list must match core/clean_ooxml.py::_SP_ROOT_NS -- the
+# cleaner decides from it what to zero out. A mismatch between the two lists
+# makes the oracle give false positives: the inspector would declare a leak
+# what the cleaner deliberately leaves alone, and a correctly cleaned file
+# would get the verdict "not cleaned completely".
 _CX_SHAREPOINT_NS = frozenset((
     "http://schemas.microsoft.com/office/2006/metadata/properties",
     "http://schemas.microsoft.com/office/2006/metadata/contentType",
@@ -1222,29 +1239,32 @@ _CX_SHAREPOINT_NS = frozenset((
     "http://schemas.microsoft.com/sharepoint/v3/contenttype/forms",
 ))
 
-# Корни, которые означают СОДЕРЖИМОЕ документа, а не метаданные окружения.
-# Библиография -- это список литературы, он виден в тексте и его видит читатель;
-# убрать его значит испортить документ, а объявить утечкой -- соврать.
+# Roots that mean document CONTENT, not environment metadata. A bibliography
+# is the list of references: it is visible in the text and the reader sees
+# it; removing it would spoil the document, and declaring it a leak would be
+# a lie.
 _CX_CONTENT_NS = frozenset((
     "http://schemas.openxmlformats.org/officeDocument/2006/bibliography",
 ))
 
-# Публичные адреса схем: одинаковы у всех документов мира и об организации не
-# говорят ничего. Корпоративный URI в schemaRef -- наоборот, сразу выдаёт портал.
+# Public schema addresses: identical for all documents in the world and say
+# nothing about the organization. A corporate URI in schemaRef, on the
+# contrary, immediately gives away the portal.
 _PUBLIC_SCHEMA_RE = re.compile(
     r"^(https?://)?(schemas\.(openxmlformats\.org|microsoft\.com)"
     r"|purl\.org|www\.w3\.org)/", re.I)
 
 
 def _xml_values(root, limit=400):
-    """Значения части: текст между тегами плюс значения атрибутов. Имена тегов и
-    объявления пространств имён отброшены намеренно -- они одинаковы у всех
-    документов такого типа, и сырой дамп XML делает оракул ложноположительным:
-    любая законно оставленная часть считалась бы «значением, пережившим чистку».
-    Атрибуты при этом нужны: contentTypeID с GUID сайта лежит именно там."""
+    """Values of the part: the text between tags plus attribute values. Tag names
+    and namespace declarations are dropped deliberately -- they are the same
+    for all documents of this type, and a raw XML dump makes the oracle give
+    false positives: any legitimately left part would count as a "value that
+    survived cleaning". Attributes are needed though: contentTypeID with the
+    site GUID lives exactly there."""
     out = []
     for el in root.iter():
-        if not isinstance(el.tag, str):     # комментарии и PI значений не несут
+        if not isinstance(el.tag, str):     # comments and PIs carry no values
             continue
         for key, val in el.attrib.items():
             name = _ln(key)
@@ -1261,65 +1281,65 @@ def _xml_values(root, limit=400):
 
 
 def _customxml_item(zf, rep, name):
-    """customXml/item*.xml. Риск определяется корневым пространством имён, а не
-    самим фактом наличия части: SharePoint -- утечка, библиография -- контент."""
-    # Локальный try, хотя вызов и так обёрнут _try: при неразобранной части
-    # находку всё равно надо выдать. Молчание здесь читалось бы как «ничего
-    # подозрительного», а правильное прочтение -- «не проверено».
+    """customXml/item*.xml. The risk is determined by the root namespace, not by
+    the mere presence of the part: SharePoint is a leak, a bibliography is
+    content."""
+    # A local try even though the call is already wrapped in _try: for an
+    # unparsed part a finding must still be emitted. Silence here would read as
+    # "nothing suspicious", while the right reading is "not checked".
     try:
         root = _read_xml(zf, name, 2 * 1024 * 1024)
     except Exception as exc:  # noqa: BLE001
         rep.err("%s: %s" % (name, exc))
         root = None
     if root is None:
-        rep.add(Risk.ENVIRONMENT, name, "Данные customXml", "не разобрано как XML",
-                "Пользовательская XML-часть, которую не удалось разобрать. "
-                "Содержимое не проверено -- считаем худший случай.")
+        rep.add(Risk.ENVIRONMENT, name, tr("customXml data"), tr("not parsed as XML"),
+                tr("A custom XML part that could not be parsed. The content was not checked -- "
+                   "we assume the worst case."))
         return
     ns = (etree.QName(root).namespace or "").strip()
     text = _xml_values(root)
     n_el = sum(1 for _ in root.iter())
 
     if ns in _CX_SHAREPOINT_NS:
-        # Пустая часть SharePoint -- не утечка, а провенанс. Разделение
-        # принципиально: риски IDENTITY и ENVIRONMENT проверяет оракул по
-        # совпадению значений, и слово-заглушка вместо значения совпала бы
-        # сама с собой -- правильно почищенный файл получил бы вердикт
-        # «значение пережило чистку».
+        # An empty SharePoint part is not a leak but provenance. The split is
+        # essential: the IDENTITY and ENVIRONMENT risks are checked by the oracle by
+        # matching values, and a placeholder word instead of a value would match
+        # itself -- a correctly cleaned file would get the verdict "value survived
+        # cleaning".
         if text:
-            rep.add(Risk.ENVIRONMENT, name, "Данные customXml (SharePoint/СЭД)", text,
-                    "Колонки библиотеки SharePoint: имена сотрудников, даты, "
-                    "адрес портала и тип контента организации.")
+            rep.add(Risk.ENVIRONMENT, name, tr("customXml data (SharePoint/EDMS)"), text,
+                    tr("SharePoint library columns: employee names, dates, the portal address "
+                       "and the organization's content type."))
         else:
-            rep.add(Risk.PROVENANCE, name, "Часть SharePoint/СЭД (пустая)",
-                    "значений нет",
-                    "Значений внутри нет, но сама часть осталась: документ "
-                    "лежал в библиотеке SharePoint или в СЭД.",
+            rep.add(Risk.PROVENANCE, name, tr("SharePoint/EDMS part (empty)"),
+                    tr("no values"),
+                    tr("There are no values inside, but the part itself remained: the document "
+                       "lived in a SharePoint library or in an EDMS."),
                     removable=False)
     elif ns in _CX_CONTENT_NS:
-        rep.add(Risk.STRUCTURAL, name, "Библиография (customXml)",
-                "элементов: %d" % n_el,
-                "Список литературы документа. Это содержимое, видимое "
-                "читателю, а не метаданные: чистка его не трогает намеренно. "
-                "Имена авторов здесь -- авторы цитируемых работ, не ваши.",
+        rep.add(Risk.STRUCTURAL, name, tr("Bibliography (customXml)"),
+                tr("elements: %d") % n_el,
+                tr("The document's list of references. This is content visible to the reader, "
+                   "not metadata: cleaning deliberately leaves it alone. The author names here "
+                   "are the authors of the cited works, not yours."),
                 removable=False)
     elif not text:
-        # Корень неизвестен, но значений внутри нет: сообщить стоит, пугать нечем.
-        rep.add(Risk.PROVENANCE, name, "Пользовательская XML-часть (пустая)",
-                ns or "без пространства имён",
-                "Часть есть, значений внутри нет. Сам факт её наличия говорит "
-                "о приложении или системе, которая файл создала.")
+        # The root is unknown but there are no values inside: worth reporting, nothing to be scared of.
+        rep.add(Risk.PROVENANCE, name, tr("Custom XML part (empty)"),
+                ns or tr("no namespace"),
+                tr("The part exists, there are no values inside. The mere fact of its presence "
+                   "tells about the application or system that created the file."))
     else:
-        rep.add(Risk.ENVIRONMENT, name, "Данные customXml", text,
-                "Пользовательская XML-часть неизвестного происхождения (%s). "
-                "Так хранят данные СЭД и привязку элементов содержимого; "
-                "убрать её вслепую нельзя -- на неё может опираться текст "
-                "документа." % (ns or "без пространства имён"))
+        rep.add(Risk.ENVIRONMENT, name, tr("customXml data"), text,
+                tr("A custom XML part of unknown origin (%s). This is how EDMS data and "
+                   "content-control bindings are stored; it cannot be removed blindly -- the "
+                   "document text may depend on it.") % (ns or tr("no namespace")))
 
 
 def _customxml_props(zf, rep, name):
-    """customXml/itemProps*.xml -- привязка к схеме. Утечка здесь только тогда,
-    когда адрес схемы корпоративный: публичные URI OOXML есть у всех."""
+    """customXml/itemProps*.xml -- a binding to a schema. It leaks only when the
+    schema address is corporate: the public OOXML URIs are everywhere."""
     try:
         root = _read_xml(zf, name, 2 * 1024 * 1024)
     except Exception as exc:  # noqa: BLE001
@@ -1333,73 +1353,75 @@ def _customxml_props(zf, rep, name):
                 refs.append(uri)
     private = [r for r in refs if not _PUBLIC_SCHEMA_RE.match(r)]
     if private:
-        rep.add(Risk.ENVIRONMENT, name, "Схема customXml", "; ".join(private),
-                "Привязка к нестандартной схеме: выдаёт портал SharePoint или "
-                "тип контента организации.")
+        rep.add(Risk.ENVIRONMENT, name, tr("customXml schema"), "; ".join(private),
+                tr("A binding to a non-standard schema: reveals the SharePoint portal or the "
+                   "organization's content type."))
     elif refs:
-        rep.add(Risk.STRUCTURAL, name, "Схема customXml (стандартная)",
+        rep.add(Risk.STRUCTURAL, name, tr("customXml schema (standard)"),
                 "; ".join(refs),
-                "Публичный адрес схемы OOXML. Одинаков у всех документов и об "
-                "организации не говорит ничего.", removable=False)
+                tr("A public OOXML schema address. The same for all documents, says nothing "
+                   "about the organization."), removable=False)
     else:
-        rep.add(Risk.PROVENANCE, name, "Схема customXml", "без schemaRef",
-                "Часть привязки схемы есть, самой ссылки в ней нет.")
+        rep.add(Risk.PROVENANCE, name, tr("customXml schema"), tr("no schemaRef"),
+                tr("The schema binding part exists, but there is no reference in it."))
 
 
-# === М. специфика Excel ===================================================
+# === Excel specifics ========================================================
 
 
 def _sec_excel(zf, rep, ctx):
     names = ctx["nameset"]
 
     if "xl/workbook.xml" in names:
-        # _try везде ниже: части Excel-специфики независимы друг от друга,
-        # и раздутый/битый workbook.xml не должен гасить разбор connections.xml,
-        # pivotCache, externalLinks и customXml, которые идут следом.
+        # _try everywhere below: the Excel-specific parts are independent of each
+        # other, and a bloated/broken workbook.xml must not suppress parsing of
+        # connections.xml, pivotCache, externalLinks and customXml, which come next.
         root = _try(rep, "xl/workbook.xml", _read_xml, zf, "xl/workbook.xml")
         if root is not None:
             for el in _iter_tag(root, "fileVersion"):
                 parts = ["%s=%s" % (_ln(k), v) for k, v in el.attrib.items()]
                 rep.add(Risk.PROVENANCE, "xl/workbook.xml",
-                        "fileVersion — версия и билд Excel", "; ".join(parts),
-                        "rupBuild указывает точную сборку Excel, lastEdited и "
-                        "lowestEdited — диапазон версий, в которых книгу правили.")
+                        tr("fileVersion — Excel version and build"), "; ".join(parts),
+                        tr("rupBuild gives the exact Excel build, lastEdited and lowestEdited — "
+                           "the range of versions in which the workbook was edited."))
             for el in _iter_tag(root, "workbookPr"):
                 parts = ["%s=%s" % (_ln(k), v) for k, v in el.attrib.items()]
                 if parts:
                     rep.add(Risk.PROVENANCE, "xl/workbook.xml",
                             "workbookPr", "; ".join(parts),
-                            "filterPrivacy=1 означает, что книгу уже помечали "
-                            "как содержащую персональные данные.")
-            # Чистильщик эти два места убирает давно, а инспектор их не видел: отчёт
-            # молчал о самой частой утечке Excel, и оракулу не с чем было сверять.
+                            tr("filterPrivacy=1 means the workbook was already marked as "
+                               "containing personal data."))
+            # The cleaner has removed these two places for a long time, but the
+            # inspector did not see them: the report was silent about the most common
+            # Excel leak, and the oracle had nothing to check against.
             for el in _iter_tag(root, "absPath"):
                 rep.add_nonempty(Risk.ENVIRONMENT, "xl/workbook.xml",
-                                 "x15ac:absPath — папка, где сохраняли книгу", _attr(el, "url"),
-                                 "Excel молча пишет полный путь к папке книги, обычно "
-                                 "C:\\Users\\ИМЯ\\...: в свойствах документа его не видно.")
+                                 tr("x15ac:absPath — folder where the workbook was saved"), _attr(el, "url"),
+                                 tr("Excel silently writes the full path of the workbook's "
+                                    "folder, usually C:\\Users\\NAME\\...: it is not visible in "
+                                    "the document properties."))
             for el in _iter_tag(root, "fileSharing"):
                 rep.add_nonempty(Risk.IDENTITY, "xl/workbook.xml",
-                                 "fileSharing — кто зарезервировал книгу", _attr(el, "userName"),
-                                 "Имя пользователя, включившего «рекомендовать только чтение» "
-                                 "или пароль на изменение.")
+                                 tr("fileSharing — who reserved the workbook"), _attr(el, "userName"),
+                                 tr("The name of the user who turned on 'read-only recommended' "
+                                    "or a password to modify."))
             hidden = []
             for el in _iter_tag(root, "sheet"):
                 state = (_attr(el, "state") or "").lower()
                 if state in ("hidden", "veryhidden"):
                     hidden.append("%s (%s)" % (_attr(el, "name") or "?", state))
             if hidden:
-                rep.add(Risk.PROVENANCE, "xl/workbook.xml", "Скрытые листы",
+                rep.add(Risk.PROVENANCE, "xl/workbook.xml", tr("Hidden sheets"),
                         "; ".join(hidden[:MAX_LISTED]),
-                        "Скрытые и особо скрытые листы обычно содержат "
-                        "черновые расчёты и исходные данные.")
+                        tr("Hidden and very hidden sheets usually contain draft calculations and "
+                           "source data."))
             for el in _iter_tag(root, "definedName"):
                 value = _text(el)
                 if _is_path(value) or "[" in value:
                     rep.add(Risk.ENVIRONMENT, "xl/workbook.xml",
                             "definedName %s" % (_attr(el, "name") or "?"), value,
-                            "Именованный диапазон ссылается на внешнюю книгу — "
-                            "нередко с полным локальным путём.")
+                            tr("A named range refers to an external workbook — often with a full "
+                               "local path."))
 
     for name in ctx["names"]:
         if re.match(r"^xl/pivotCache/pivotCacheDefinition\d*\.xml$", name):
@@ -1409,25 +1431,26 @@ def _sec_excel(zf, rep, ctx):
             who = _attr(root, "refreshedBy")
             when = _attr(root, "refreshedDate")
             if who is not None:
-                rep.add(Risk.IDENTITY, name, "refreshedBy — кто обновлял сводную",
+                rep.add(Risk.IDENTITY, name, tr("refreshedBy — who refreshed the pivot"),
                         who,
-                        "Классическая утечка Excel: имя человека, обновившего "
-                        "кэш сводной таблицы, лежит вне docProps и переживает "
-                        "чистку свойств документа.")
+                        tr("A classic Excel leak: the name of the person who refreshed the pivot "
+                           "table cache sits outside docProps and survives the cleaning of the "
+                           "document properties."))
             if when is not None:
-                rep.add(Risk.PROVENANCE, name, "refreshedDate — когда обновляли",
-                        when, "Серийная дата Excel обновления кэша.")
+                rep.add(Risk.PROVENANCE, name, tr("refreshedDate — when it was refreshed"),
+                        when, tr("The Excel serial date of the cache refresh."))
             for key in ("createdVersion", "refreshedVersion", "minRefreshableVersion"):
                 val = _attr(root, key)
                 if val is not None:
                     rep.add(Risk.PROVENANCE, name, key, val,
-                            "Версия Excel, работавшая со сводной.")
+                            tr("The Excel version that worked with the pivot."))
             for el in _iter_tag(root, "worksheetSource", "webPr"):
                 parts = ["%s=%s" % (_ln(k), v) for k, v in el.attrib.items()]
                 if parts:
                     rep.add(Risk.ENVIRONMENT, name,
-                            "Источник кэша (%s)" % _ln(el.tag), "; ".join(parts),
-                            "Откуда сводная берёт данные: книга, лист или URL.")
+                            tr("Cache source (%s)") % _ln(el.tag), "; ".join(parts),
+                            tr("Where the pivot takes its data from: a workbook, a sheet or a "
+                               "URL."))
 
     if "xl/connections.xml" in names:
         root = _try(rep, "xl/connections.xml", _read_xml, zf, "xl/connections.xml")
@@ -1439,8 +1462,8 @@ def _sec_excel(zf, rep, ctx):
                                   "credentials", "sourceFile")
                 )
                 rep.add(Risk.ENVIRONMENT, "xl/connections.xml",
-                        "Подключение к данным", head,
-                        "Имя и описание внешнего подключения.")
+                        tr("Data connection"), head,
+                        tr("The name and description of an external connection."))
                 for kid in el.iter():
                     for attr in ("connection", "command", "url", "sourceFile",
                                  "serverCommand"):
@@ -1448,8 +1471,8 @@ def _sec_excel(zf, rep, ctx):
                         if val:
                             rep.add(Risk.ENVIRONMENT, "xl/connections.xml",
                                     "%s/@%s" % (_ln(kid.tag), attr), val,
-                                    "Строка подключения ODBC/OLEDB или запрос: "
-                                    "содержит адрес сервера, имя базы и логин.")
+                                    tr("An ODBC/OLEDB connection string or a query: contains the "
+                                       "server address, the database name and the login."))
 
     for name in ctx["names"]:
         if re.match(r"^xl/externalLinks/externalLink\d*\.xml$", name):
@@ -1461,14 +1484,14 @@ def _sec_excel(zf, rep, ctx):
             if root is not None:
                 for el in _iter_tag(root, "sheetName"):
                     sheets.append(_attr(el, "val") or "")
-            rep.add(Risk.ENVIRONMENT, name, "Связь с внешней книгой",
-                    target or "цель не разрешена",
-                    "Путь к внешнему файлу Excel, часто полный локальный или "
-                    "UNC. Листы: %s" % (", ".join(s for s in sheets if s)[:200]))
+            rep.add(Risk.ENVIRONMENT, name, tr("External workbook link"),
+                    target or tr("target not resolved"),
+                    tr("The path to an external Excel file, often a full local or UNC one. "
+                       "Sheets: %s") % (", ".join(s for s in sheets if s)[:200]))
         elif re.match(r"^xl/queryTables/.*\.xml$", name):
-            rep.add(Risk.ENVIRONMENT, name, "Таблица запроса (Power Query)",
-                    "присутствует",
-                    "Power Query хранит источник данных и путь к нему.")
+            rep.add(Risk.ENVIRONMENT, name, tr("Query table (Power Query)"),
+                    tr("present"),
+                    tr("Power Query stores the data source and the path to it."))
         elif name.startswith("customXml/"):
             if "itemProps" in name:
                 _try(rep, name, _customxml_props, zf, rep, name)
@@ -1476,7 +1499,7 @@ def _sec_excel(zf, rep, ctx):
                 _try(rep, name, _customxml_item, zf, rep, name)
 
 
-# === Н. анализ отсутствующих частей =======================================
+# === analysis of missing parts ==============================================
 
 
 def _sec_missing(zf, rep, ctx):
@@ -1485,38 +1508,38 @@ def _sec_missing(zf, rep, ctx):
     app = ctx["props"]["app"].get("Application", "")
     missing = [p for p in WORD_REQUIRED if p not in ctx["nameset"]]
     if missing:
-        rep.add(Risk.PROVENANCE, "ZIP", "Отсутствуют обязательные части Word",
+        rep.add(Risk.PROVENANCE, "ZIP", tr("Required Word parts are missing"),
                 ", ".join(missing),
-                "Word всегда кладёт эти части в .docx. Их нет — пакет собран "
-                "программно.")
+                tr("Word always puts these parts into a .docx. They are missing — the package "
+                   "was built programmatically."))
     no_rsid = (ctx.get("rsid_count", 0) == 0 and ctx.get("rsid_attrs", 0) == 0)
     if no_rsid:
-        rep.add(Risk.PROVENANCE, "word/", "rsid отсутствуют полностью", "0",
-                "Ни одного идентификатора сессии правки: Word такого не пишет.")
+        rep.add(Risk.PROVENANCE, "word/", tr("rsid entirely absent"), "0",
+                tr("Not a single edit session identifier: Word does not write that."))
 
     if missing or no_rsid:
         conf = "high" if (missing and no_rsid) else "medium"
         why = []
         if missing:
-            why.append("нет частей: %s" % ", ".join(missing))
+            why.append(tr("missing parts: %s") % ", ".join(missing))
         if no_rsid:
-            why.append("нет ни одного rsid")
+            why.append(tr("no rsid at all"))
         suite = _stock_suite(app)
         if suite:
-            # Другой офисный пакет -- не библиотека и не генератор ИИ. Его
-            # файлы законно не содержат вордовских частей и rsid.
+            # Another office suite -- not a library and not an AI generator. Its files
+            # legitimately lack Word's parts and rsids.
             rep.signal("producer",
-                       "Пакет собран в %s, а не в Word: %s. Для этого пакета "
-                       "это штатно." % (suite, "; ".join(why)), "high")
+                       tr("The package was built in %s, not in Word: %s. This is normal for that "
+                          "suite.") % (suite, "; ".join(why)), "high")
         else:
-            detail = ("Пакет собран библиотекой (python-docx/docxtpl или генератором "
-                      "ИИ), а не Word: %s." % "; ".join(why))
+            detail = (tr("The package was built by a library (python-docx/docxtpl or an AI "
+                         "generator), not by Word: %s.") % "; ".join(why))
             if app:
-                detail += " При этом app.xml заявляет Application=%s." % app
+                detail += tr(" Meanwhile app.xml claims Application=%s.") % app
             rep.signal("ai", detail, conf)
 
 
-# === О. выводы и противоречия =============================================
+# === conclusions and contradictions =========================================
 
 
 def _to_int(value):
@@ -1544,83 +1567,82 @@ def _sec_conclusions(zf, rep, ctx):
 
     if ms and ctx.get("zip_real"):
         rep.signal("inconsistent",
-                   "app.xml заявляет продукт Microsoft (%s), но записи ZIP "
-                   "помечены реальным временем (последняя %s) вместо "
-                   "1980-01-01. Office так не сохраняет."
+                   tr("app.xml claims a Microsoft product (%s), but the ZIP entries are stamped "
+                      "with a real time (the latest is %s) instead of 1980-01-01. Office does "
+                      "not save like that.")
                    % (appname, ctx.get("zip_real_max", "?")), "high")
         rep.signal("ai",
-                   "Пакет пересобран библиотекой поверх шаблона Office: "
-                   "реальное время сохранения утекло через таймстемпы ZIP.",
+                   tr("The package was rebuilt by a library on top of an Office template: the "
+                      "real save time leaked through the ZIP timestamps."),
                    "high")
 
-    # Совпадение created и modified САМО ПО СЕБЕ ни о чём не говорит, и раньше
-    # здесь был ложный плюс на подлинных файлах. Две причины, обе проверены на
-    # файле от Word 16:
-    #   * Word пишет эти даты с точностью до МИНУТЫ -- секунды всегда 00.
-    #     Поэтому «совпадают до секунды» у него означает лишь «создан и сохранён
-    #     в пределах одной минуты», а это рядовой случай для любого документа,
-    #     сделанного одним заходом.
-    #   * cp:revision в улику не годится: Word насчитал 2 ревизии на четырёх
-    #     сохранениях подряд, и все они попали в ту же минуту.
-    # Настоящее противоречие даёт только TotalTime: если заявлено N минут
-    # активного редактирования, а вся жизнь документа уложилась в одну минуту,
-    # то одно из двух неправда. Порог 3 минуты -- запас на округление минут
-    # вверх и вниз на границе.
+    # A match between created and modified means NOTHING BY ITSELF, and there
+    # used to be a false positive here on genuine files. Two reasons, both
+    # verified on a file from Word 16:
+    #   * Word writes these dates to the MINUTE -- the seconds are always 00.
+    #     So for Word "match to the second" only means "created and saved
+    #     within one minute", which is routine for any document made in one
+    #     sitting.
+    #   * cp:revision is no good as evidence: Word counted 2 revisions over four
+    #     consecutive saves, and all of them fell within the same minute.
+    # Only TotalTime gives a real contradiction: if N minutes of active editing
+    # are claimed while the whole life of the document fit into one minute, one
+    # of the two is untrue. The threshold of 3 minutes leaves slack for minutes
+    # being rounded up and down at the boundary.
     created = core.get("created", "")
     modified = core.get("modified", "")
     if (created and modified and created == modified
             and total is not None and total >= 3):
         rep.signal("inconsistent",
-                   "dcterms:created и dcterms:modified совпадают (%s), то есть "
-                   "документ создан и сохранён в пределах одной минуты, а "
-                   "TotalTime заявляет %d минут редактирования. Одно из двух "
-                   "неправда: обычно это подставленные даты."
+                   tr("dcterms:created and dcterms:modified match (%s), meaning the document was "
+                      "created and saved within one minute, while TotalTime claims %d minutes of "
+                      "editing. One of the two is untrue: usually the dates were substituted.")
                    % (created, total), "high")
 
     if words >= 200 and (total is None or total == 0):
         rep.signal("inconsistent",
-                   "В документе %d слов, а TotalTime %s: время редактирования "
-                   "обнулено или не проставлялось."
-                   % (words, "отсутствует" if total is None else "равен 0"),
+                   tr("The document has %d words, but TotalTime %s: the editing time was zeroed "
+                      "or never set.")
+                   % (words, tr("is absent") if total is None else tr("is 0")),
                    "medium")
 
     if rev == 1 and words >= 200:
         rep.signal("inconsistent",
-                   "cp:revision=1 при объёме %d слов: документ такого размера "
-                   "за одно сохранение не делают." % words, "medium")
+                   tr("cp:revision=1 with a volume of %d words: a document of that size is not "
+                      "made in a single save.") % words, "medium")
 
     scrub_bits = []
     if "docProps/core.xml" in ctx["nameset"]:
         if not core.get("creator"):
-            scrub_bits.append("пустой dc:creator")
+            scrub_bits.append(tr("empty dc:creator"))
         if not core.get("lastModifiedBy"):
-            scrub_bits.append("пустой cp:lastModifiedBy")
+            scrub_bits.append(tr("empty cp:lastModifiedBy"))
     if not app.get("Company") and "Company" in app:
-        scrub_bits.append("пустой Company")
+        scrub_bits.append(tr("empty Company"))
     if len(scrub_bits) >= 2:
-        # Асимметрия, которую нельзя игнорировать: Word спрашивает имя при
-        # первом запуске, а LibreOffice ставится с ПУСТЫМИ данными пользователя
-        # и пишет пустого автора по умолчанию. Для такого пакета пустые поля --
-        # штатное состояние, а не след чистки, поэтому уверенность низкая.
+        # An asymmetry that cannot be ignored: Word asks for a name at first launch,
+        # while LibreOffice is installed with EMPTY user data and writes an empty
+        # author by default. For such a package empty fields are the normal state,
+        # not a trace of cleaning, hence the low confidence.
         _suite = _stock_suite(app.get("Application", ""))
         if _suite:
             rep.signal("scrubbed",
-                       "Пустые поля личности (%s). Для %s это состояние по "
-                       "умолчанию: пакет ставится с незаполненными данными "
-                       "пользователя, так что следом чистки это не является."
+                       tr("Empty identity fields (%s). For %s this is the default state: the "
+                          "suite is installed with blank user data, so this is not a trace of "
+                          "cleaning.")
                        % (", ".join(scrub_bits), _suite), "low")
         else:
             rep.signal("scrubbed",
-                   "Признаки предыдущей чистки: %s. Проверьте остальные "
-                   "площадки (ZIP, settings.xml, rels) — их обычно забывают."
+                   tr("Signs of earlier cleaning: %s. Check the other places (ZIP, settings.xml, "
+                      "rels) — they are usually forgotten.")
                    % ", ".join(scrub_bits), "medium")
 
 
-# === необязательное обогащение exiftool ===================================
+# === optional exiftool enrichment ===========================================
 
 
 def _exiftool_path():
-    """exiftool строго опционален: нет — работаем без него и молчим."""
+    """exiftool is strictly optional: if it is absent we work without it and stay quiet."""
     found = shutil.which("exiftool")
     if found:
         return found
@@ -1638,7 +1660,7 @@ def _sec_exiftool(path, rep, ctx):
             capture_output=True, timeout=25, shell=False,
         )
     except Exception as exc:  # noqa: BLE001
-        rep.err("exiftool не отработал: %s" % exc)
+        rep.err(tr("exiftool failed: %s") % exc)
         return
     try:
         data = json.loads(out.stdout.decode("utf-8", "replace"))
@@ -1656,77 +1678,78 @@ def _sec_exiftool(path, rep, ctx):
             continue
         text = str(value)
         risk = Risk.PROVENANCE
-        # \b, а не голая подстрока: иначе "CreatorTool" (имя ПРИЛОЖЕНИЯ, тег
-        # XMP CreatorTool) ловится по "creator" и уезжает в IDENTITY, хотя
-        # это чистый PROVENANCE.
+        # \b, not a bare substring: otherwise "CreatorTool" (the name of an
+        # APPLICATION, the XMP tag CreatorTool) is caught by "creator" and goes to
+        # IDENTITY, although it is pure PROVENANCE.
         if _emails(text) or re.search(r"\b(author|creator|owner|manager)\b", tag, re.I):
             risk = Risk.IDENTITY
         elif _is_path(text):
             risk = Risk.ENVIRONMENT
         rep.add(risk, "exiftool:%s" % group, tag, text,
-                "Дополнено exiftool (необязательное обогащение).")
+                tr("Added by exiftool (optional enrichment)."))
         added += 1
 
 
-# === точка входа ==========================================================
+# === entry point ============================================================
 
 
 def inspect_ooxml(path, fmt="docx") -> Report:
-    """Инспектировать OOXML-пакет. Никогда не бросает наружу.
+    """Inspect an OOXML package. Never raises outward.
 
-    Любая беда с частью пакета попадает в report.errors, а не в трассировку:
-    нам присылают и повреждённые, и намеренно кривые файлы.
+    Any trouble with a package part goes to report.errors, not to a traceback:
+    we are sent both damaged and deliberately malformed files.
     """
     rep = Report(path=str(path), fmt=fmt)
     try:
         rep.size = os.path.getsize(path)
     except OSError as exc:
-        rep.err("Не удалось получить размер файла: %s" % exc)
+        rep.err(tr("Could not get the file size: %s") % exc)
 
     try:
-        zf = zipfile.ZipFile(path, "r")   # строго на чтение
+        zf = zipfile.ZipFile(path, "r")   # strictly read-only
     except Exception as exc:  # noqa: BLE001
-        rep.err("ZIP-контейнер не открывается: %s: %s" % (type(exc).__name__, exc))
+        rep.err(tr("The ZIP container cannot be opened: %s: %s") % (type(exc).__name__, exc))
         return rep
 
     ctx = {"fmt": fmt, "names": [], "nameset": set(), "safe": True,
            "props": {"core": {}, "app": {}, "custom": []}, "rels": {}}
     try:
         with zf:
-            _section(rep, "ZIP-контейнер", _sec_zip, zf, rep, ctx)
+            _section(rep, tr("ZIP container"), _sec_zip, zf, rep, ctx)
             if ctx.get("safe", True):
                 ctx["props"] = parse_props(zf)
                 _section(rep, "docProps/core.xml", _sec_core, zf, rep, ctx)
                 _section(rep, "docProps/app.xml", _sec_app, zf, rep, ctx)
                 _section(rep, "docProps/custom.xml", _sec_custom, zf, rep, ctx)
-                _section(rep, "Превью", _sec_thumbnail, zf, rep, ctx)
-                _section(rep, "Отношения .rels", _sec_rels, zf, rep, ctx)
+                _section(rep, tr("Preview"), _sec_thumbnail, zf, rep, ctx)
+                _section(rep, tr("Relationships (.rels)"), _sec_rels, zf, rep, ctx)
                 _section(rep, "word/settings.xml", _sec_settings, zf, rep, ctx)
-                _section(rep, "Тело документа", _sec_document, zf, rep, ctx)
-                _section(rep, "Комментарии и авторы", _sec_people, zf, rep, ctx)
-                _section(rep, "Медиа и вложения", _sec_media, zf, rep, ctx)
-                _section(rep, "Настройки принтера", _sec_printer, zf, rep, ctx)
-                _section(rep, "Специфика Excel", _sec_excel, zf, rep, ctx)
-                _section(rep, "Отсутствующие части", _sec_missing, zf, rep, ctx)
-                _section(rep, "Выводы", _sec_conclusions, zf, rep, ctx)
+                _section(rep, tr("Document body"), _sec_document, zf, rep, ctx)
+                _section(rep, tr("Comments and authors"), _sec_people, zf, rep, ctx)
+                _section(rep, tr("Media and attachments"), _sec_media, zf, rep, ctx)
+                _section(rep, tr("Printer settings"), _sec_printer, zf, rep, ctx)
+                _section(rep, tr("Excel specifics"), _sec_excel, zf, rep, ctx)
+                _section(rep, tr("Missing parts"), _sec_missing, zf, rep, ctx)
+                _section(rep, tr("Conclusions"), _sec_conclusions, zf, rep, ctx)
     except Exception as exc:  # noqa: BLE001
-        rep.err("Непредвиденный сбой инспекции: %s: %s" % (type(exc).__name__, exc))
+        rep.err(tr("Unexpected inspection failure: %s: %s") % (type(exc).__name__, exc))
 
     _section(rep, "exiftool", _sec_exiftool, path, rep, ctx)
     return rep
 
 
-# === самопроверка =========================================================
+# === self-test ==============================================================
 
 
 def _build_sample(dest):
-    """Собрать синтетический .docx с заранее известными значениями."""
+    """Build a synthetic .docx with known values."""
     import datetime
 
     now = datetime.datetime.now().timetuple()[:6]
-    # Правдоподобный DEVMODEW: заполнены dmDeviceName, dmSize, dmDriverExtra,
-    # dmPaperSize и dmFormName, плюс приватный хвост драйвера с UNC-путём --
-    # иначе разбор полей за пределами имени принтера проверять нечем.
+    # A plausible DEVMODEW: dmDeviceName, dmSize, dmDriverExtra, dmPaperSize and
+    # dmFormName are filled in, plus the driver's private tail with a UNC path --
+    # otherwise there is nothing to check the parsing of fields beyond the
+    # printer name against.
     _dm_tail = b"\x00\x00" + "\\\\PRINTSRV01\\HP4050-BUH".encode("utf-16le")
     _devmode_buf = bytearray(_DEVMODEW_SIZE)
     _dev = "HP LaserJet M404 (BUH-01)".encode("utf-16le")
@@ -1803,8 +1826,9 @@ def _build_sample(dest):
          '<w15:presenceInfo w15:providerId="AD" '
          'w15:userId="a.kuznetsova@company.ru"/></w15:person></w15:people>'),
         ("word/printerSettings/printerSettings1.bin", devmode),
-        # Четыре площадки customXml разом: от корня зависит риск, и ровно здесь
-        # ошибка классификации отравляет оракул чистки (см. _customxml_item).
+        # All four customXml places at once: the risk depends on the root, and this
+        # is exactly where a classification mistake poisons the cleaning oracle (see
+        # _customxml_item).
         ("customXml/item1.xml",
          '<?xml version="1.0"?><p:properties xmlns:p="http://schemas.microsoft'
          '.com/office/2006/metadata/properties" xmlns:ma="http://schemas'
@@ -1838,14 +1862,14 @@ def _build_sample(dest):
         for name, body in parts:
             if isinstance(body, str):
                 body = body.encode("utf-8")
-            info = zipfile.ZipInfo(name, date_time=now)  # реальное время => сигнал
+            info = zipfile.ZipInfo(name, date_time=now)  # real time => signal
             info.compress_type = zipfile.ZIP_DEFLATED
             zf.writestr(info, body)
     return dest
 
 
 def demo():
-    """Прогон на синтетическом .docx с заранее известными значениями."""
+    """Run on a synthetic .docx with known values."""
     import tempfile
 
     tmp = tempfile.mkdtemp(prefix="ooxml_insp_")
@@ -1859,36 +1883,37 @@ def demo():
                    "HP LaserJet M404 (BUH-01)", "Otchet.dotm",
                    "a.kuznetsova@company.ru", "Кузнецова А.В.",
                    "_GoBack", "00A12B34",
-                   # DEVMODE за пределами имени принтера
+                   # DEVMODE beyond the printer name
                    "A4 210x297mm", "\\\\PRINTSRV01\\HP4050-BUH"):
-        assert expect in blob, "не найдено: %s" % expect
+        assert expect in blob, "not found: %s" % expect
     kinds = {s.kind for s in rep.signals}
     assert "inconsistent" in kinds and "producer" in kinds, kinds
-    assert "dating" in kinds, "формат бумаги A4 обязан дать сигнал dating: %s" % kinds
+    assert "dating" in kinds, "paper format A4 must produce a dating signal: %s" % kinds
     assert not rep.errors, rep.errors
 
-    # customXml: риск определяется корнем. Утечкой (а значит и предметом проверки
-    # оракулом в core/clean.py) считается только то, что чистильщик обязан убрать.
+    # customXml: the risk is determined by the root. Only what the cleaner must
+    # remove counts as a leak (and hence as a subject of the oracle check in
+    # core/clean.py).
     by_loc = {f.location: f for f in rep.findings if f.location.startswith("customXml/")}
     assert len(by_loc) == 5, sorted(by_loc)
     cx = by_loc["customXml/item1.xml"]
     assert cx.risk is Risk.ENVIRONMENT, cx
     assert "Кузнецова А.В." in cx.value, cx.value
     assert "0x010100DEADBEEF" in cx.value, (
-        "значения SharePoint бывают в атрибутах, а не только в тексте: %s" % cx.value)
-    assert by_loc["customXml/itemProps1.xml"].risk is Risk.ENVIRONMENT, "корпоративный URI схемы"
+        "SharePoint values can sit in attributes, not only in text: %s" % cx.value)
+    assert by_loc["customXml/itemProps1.xml"].risk is Risk.ENVIRONMENT, "corporate schema URI"
     assert by_loc["customXml/item2.xml"].risk is Risk.STRUCTURAL, (
-        "библиография -- содержимое документа, чистильщик её не убирает")
+        "the bibliography is document content, the cleaner does not remove it")
     assert by_loc["customXml/itemProps2.xml"].risk is Risk.STRUCTURAL, (
-        "публичный адрес схемы OOXML об организации не говорит ничего")
+        "the public OOXML schema address says nothing about the organization")
     assert by_loc["customXml/item3.xml"].risk is Risk.PROVENANCE, (
-        "пустая часть неизвестного происхождения -- провенанс, не утечка")
+        "an empty part of unknown origin is provenance, not a leak")
 
-    print("Файл: %s  (%d байт, fmt=%s)" % (rep.path, rep.size, rep.fmt))
-    print("Частей ZIP: %d | находок: %d (значимых: %d) | сигналов: %d | ошибок: %d"
+    print("File: %s  (%d bytes, fmt=%s)" % (rep.path, rep.size, rep.fmt))
+    print("ZIP parts: %d | findings: %d (significant: %d) | signals: %d | errors: %d"
           % (len(rep.parts), len(rep.findings), rep.sensitive,
              len(rep.signals), len(rep.errors)))
-    print("Пример записи parts: %s" % (rep.parts[0],))
+    print("Sample of a parts entry: %s" % (rep.parts[0],))
     print("-" * 78)
     for risk, items in rep.by_risk().items():
         if not items:
@@ -1896,12 +1921,12 @@ def demo():
         print("[%s]" % risk.value.upper())
         for f in items:
             print("  %-46s %s%s" % (
-                f.label[:46], f.value or "<пусто>",
-                "" if f.removable else "  (убрать нельзя)"))
+                f.label[:46], f.value or "<empty>",
+                "" if f.removable else "  (cannot be removed)"))
     print("-" * 78)
     for s in rep.signals:
         print("SIGNAL %-13s %-6s %s" % (s.kind, s.confidence, s.detail))
-    print("OK: самопроверка пройдена")
+    print("OK: self-test passed")
 
 
 if __name__ == "__main__":
