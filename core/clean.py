@@ -693,8 +693,11 @@ def _selftest() -> int:
         path, _exp = fx.make_pdf(os.path.join(tmp, "case_0"))
         before = _sha(path)
         d0 = os.path.dirname(path)
-        for variant in (path, os.path.join(d0, ".", os.path.basename(path)),
-                        path.upper(), os.path.join(d0, "out", "..", os.path.basename(path))):
+        variants = [path, os.path.join(d0, ".", os.path.basename(path)),
+                    os.path.join(d0, "out", "..", os.path.basename(path))]
+        if os.name == "nt":                            # only a case-insensitive FS makes it the same file
+            variants.append(path.upper())
+        for variant in variants:
             res = clean_file(path, variant)
             _check("refused: %s" % ("path variant"), not res.ok and "matches" in " ".join(res.errors), res.errors)
         link = os.path.join(d0, "hard.pdf")
@@ -799,12 +802,16 @@ def _selftest() -> int:
             fh.write(b"old")
         res = clean_file(path, dst)
         _check("on success dst is replaced", res.ok and open(dst, "rb").read()[:5] == b"%PDF-")
-        with open(dst, "rb") as held:                  # dst is locked: replacement impossible
-            res = clean_file(path, dst)
-            held_ok = held.read(5) == b"%PDF-"
-        _check("locked dst: file not handed over, no path leak and no junk",
-               held_ok and not res.ok and "locked" in " ".join(res.errors) and tmp not in " ".join(res.errors)
-               and not [n for n in os.listdir(tmp) if n.startswith(".clean_")], res.errors)
+        if os.name == "nt":                            # only Windows refuses to replace an open file
+            with open(dst, "rb") as held:              # dst is locked: replacement impossible
+                res = clean_file(path, dst)
+                held_ok = held.read(5) == b"%PDF-"
+            _check("locked dst: file not handed over, no path leak and no junk",
+                   held_ok and not res.ok and "locked" in " ".join(res.errors)
+                   and tmp not in " ".join(res.errors)
+                   and not [n for n in os.listdir(tmp) if n.startswith(".clean_")], res.errors)
+        else:
+            print("  [--] locked files are a Windows notion, skipped")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
