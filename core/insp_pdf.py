@@ -1,15 +1,15 @@
-"""Инспектор PDF: что именно течёт из файла и откуда.
+"""PDF inspector: what exactly leaks from the file, and from where.
 
-Фаза 0 -- только чтение. Файл открывается строго на чтение (pikepdf.open без
-allow_overwriting_input), ничего не сохраняется и не переписывается.
+Phase 0: read only. The file is opened strictly for reading (pikepdf.open
+without allow_overwriting_input); nothing is saved or rewritten.
 
-Инспектор не бросает исключений наружу: любая недоступная или битая секция --
-это запись в report.errors, а не падение. Нам присылают и повреждённые, и
-намеренно кривые файлы.
+The inspector never raises: any unreadable or broken section becomes an
+entry in report.errors, not a crash. We get both damaged files and
+deliberately malformed ones.
 
-Требует pikepdf (биндинги QPDF, отдельный qpdf CLI не нужен) и lxml.
-exiftool -- необязательное обогащение: если найден, дополняем находки; нет --
-молча работаем без него.
+Requires pikepdf (QPDF bindings; no separate qpdf CLI needed) and lxml.
+exiftool is optional enrichment: if found, it adds findings; if not, we
+quietly work without it.
 """
 
 from __future__ import annotations
@@ -24,24 +24,25 @@ import pikepdf
 from lxml import etree
 
 from .model import Report, Risk, clip
+from core.i18n import N_, tr
 
-# --- лимиты (защита от бомб и от файлов, собранных чтобы нас подвесить) ------
+# --- limits (protection against bombs and files built to hang us) ------
 
-MAX_PAGES = 300            # страниц, по которым ходим постранично
-MAX_ANNOTS = 400           # аннотаций всего
-MAX_FIELDS = 300           # полей формы всего
-MAX_FONTS = 300            # шрифтов всего
-MAX_ATTACH = 100           # вложений всего
-MAX_IMAGES = 2000          # картинок-JPEG, которые разбираем
-MAX_OCGS = 200             # слоёв optional content
-MAX_XMP_KEYS = 400         # ключей XMP
-MAX_HISTORY = 60           # событий xmpMM:History
-MAX_STREAM = 50 * 1024 * 1024   # больше 50 МБ в память не читаем
-MAX_XMP_PACKED = 8 * 1024 * 1024  # сжатый XMP больше 8 МБ не распаковываем
-SCAN_CHUNK = 4 * 1024 * 1024    # размер чанка сырого скана
-SCAN_OVERLAP = 512              # нахлёст между чанками, чтобы не терять совпадения
+MAX_PAGES = 300            # pages we walk page by page
+MAX_ANNOTS = 400           # annotations in total
+MAX_FIELDS = 300           # form fields in total
+MAX_FONTS = 300            # fonts in total
+MAX_ATTACH = 100           # attachments in total
+MAX_IMAGES = 2000          # JPEG images we parse
+MAX_OCGS = 200             # optional content layers
+MAX_XMP_KEYS = 400         # XMP keys
+MAX_HISTORY = 60           # xmpMM:History events
+MAX_STREAM = 50 * 1024 * 1024   # never read more than 50 MB into memory
+MAX_XMP_PACKED = 8 * 1024 * 1024  # compressed XMP larger than 8 MB is not decompressed
+SCAN_CHUNK = 4 * 1024 * 1024    # chunk size for the raw scan
+SCAN_OVERLAP = 512              # overlap between chunks so matches aren't lost
 
-# --- карты имён --------------------------------------------------------------
+# --- name maps ---------------------------------------------------------------
 
 _NS_PREFIX = {
     "http://www.w3.org/1999/02/22-rdf-syntax-ns#": "rdf",
@@ -76,20 +77,20 @@ _NS_PREFIX = {
 
 RDF = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}"
 
-# Ключи /Info: человеческое имя + категория риска.
+# /Info keys: human-readable name + risk category.
 _INFO_MAP = {
-    "/Author": ("Автор", Risk.IDENTITY),
-    "/Creator": ("Creator (приложение-автор)", Risk.PROVENANCE),
-    "/Producer": ("Producer (библиотека-писатель)", Risk.PROVENANCE),
-    "/CreationDate": ("Дата создания", Risk.PROVENANCE),
-    "/ModDate": ("Дата изменения", Risk.PROVENANCE),
-    "/Title": ("Заголовок", Risk.PROVENANCE),
-    "/Subject": ("Тема", Risk.PROVENANCE),
-    "/Keywords": ("Ключевые слова", Risk.PROVENANCE),
-    "/Trapped": ("Trapped (треппинг для печати)", Risk.PROVENANCE),
+    "/Author": (N_("Author"), Risk.IDENTITY),
+    "/Creator": (N_("Creator (authoring application)"), Risk.PROVENANCE),
+    "/Producer": (N_("Producer (writing library)"), Risk.PROVENANCE),
+    "/CreationDate": (N_("Creation date"), Risk.PROVENANCE),
+    "/ModDate": (N_("Modification date"), Risk.PROVENANCE),
+    "/Title": (N_("Title"), Risk.PROVENANCE),
+    "/Subject": (N_("Subject"), Risk.PROVENANCE),
+    "/Keywords": (N_("Keywords"), Risk.PROVENANCE),
+    "/Trapped": (N_("Trapped (trapping for print)"), Risk.PROVENANCE),
 }
 
-# Постоянные GUID XMP: связывают между собой ВСЕ версии документа.
+# Persistent XMP GUIDs: they link ALL versions of a document together.
 _XMP_GUID = {
     "xmpMM:DocumentID",
     "xmpMM:InstanceID",
@@ -97,7 +98,7 @@ _XMP_GUID = {
     "xmpMM:DerivedFrom",
 }
 
-# Ключи XMP, которые тянут на личность.
+# XMP keys that point to a person.
 _XMP_IDENTITY = {
     "dc:creator", "dc:rights", "dc:publisher", "dc:contributor",
     "photoshop:Credit", "photoshop:AuthorsPosition", "photoshop:Source",
@@ -105,44 +106,48 @@ _XMP_IDENTITY = {
     "xmpRights:UsageTerms", "pdfx:Company", "pdf:Author",
 }
 
-# Отпечатки продюсеров: (регексп, что это, библиотечный ли генератор).
+# Producer fingerprints: (regex, what it is, whether it's a library generator).
 _TOOL_MARKS = [
     (re.compile(r"Skia/PDF", re.I),
-     "печать из headless Chrome/Chromium (движок Skia/PDF) -- Puppeteer/Playwright или «Сохранить как PDF»", True),
-    (re.compile(r"ReportLab", re.I), "python-библиотека ReportLab", True),
-    (re.compile(r"(PyFPDF|fpdf2|FPDF\s)", re.I), "python-библиотека fpdf2/PyFPDF", True),
-    (re.compile(r"wkhtmltopdf", re.I), "wkhtmltopdf (HTML -> PDF через Qt WebKit)", True),
+     N_("printed from headless Chrome/Chromium (Skia/PDF engine): Puppeteer/Playwright or \"Save "
+        "as PDF\""), True),
+    (re.compile(r"ReportLab", re.I), N_("ReportLab Python library"), True),
+    (re.compile(r"(PyFPDF|fpdf2|FPDF\s)", re.I), N_("fpdf2/PyFPDF Python library"), True),
+    (re.compile(r"wkhtmltopdf", re.I), N_("wkhtmltopdf (HTML -> PDF via Qt WebKit)"), True),
     (re.compile(r"(WeasyPrint|Prince|dompdf|TCPDF|mPDF|iText|Apache FOP)", re.I),
-     "серверная библиотека генерации PDF", True),
+     N_("server-side PDF generation library"), True),
     (re.compile(r"(pikepdf|pypdf|PyPDF2|cpdf|MuPDF|mutool)", re.I),
-     "python/CLI-библиотека постобработки PDF", True),
+     N_("Python/CLI PDF post-processing library"), True),
     (re.compile(r"pdfTeX-1\.40", re.I), "LaTeX (pdfTeX 1.40.x)", False),
-    (re.compile(r"(XeTeX|LuaTeX|dvips|dvipdfm)", re.I), "TeX-тулчейн", False),
+    (re.compile(r"(XeTeX|LuaTeX|dvips|dvipdfm)", re.I), N_("TeX toolchain"), False),
     (re.compile(r"LibreOffice|OpenOffice", re.I), "LibreOffice/OpenOffice", False),
-    (re.compile(r"Microsoft.*Print To PDF", re.I), "виртуальный принтер «Microsoft Print to PDF»", False),
+    (re.compile(r"Microsoft.*Print To PDF", re.I), N_("the \"Microsoft Print to PDF\" virtual "
+                                                      "printer"), False),
     (re.compile(r"Microsoft.*(Word|Excel|PowerPoint)", re.I), "Microsoft Office", False),
     (re.compile(r"Adobe.*Distiller", re.I), "Adobe Distiller", False),
     (re.compile(r"(Adobe.*Acrobat|Adobe PDF Library|Acrobat Distiller)", re.I), "Adobe Acrobat", False),
     (re.compile(r"Ghostscript", re.I), "Ghostscript", True),
     (re.compile(r"\bqpdf\b", re.I), "qpdf", True),
     (re.compile(r"pandoc", re.I), "pandoc", True),
-    (re.compile(r"Quartz PDFContext", re.I), "macOS (Quartz PDFContext) -- файл сделан на Mac", False),
+    (re.compile(r"Quartz PDFContext", re.I), N_("macOS (Quartz PDFContext): the file was made on "
+                                                "a Mac"), False),
     (re.compile(r"Chromium", re.I), "Chromium", True),
-    (re.compile(r"Nitro|Foxit|PDF-XChange|Soda PDF", re.I), "сторонний PDF-редактор", False),
-    (re.compile(r"Canva|Figma|Google", re.I), "онлайн-сервис (Canva/Figma/Google)", False),
+    (re.compile(r"Nitro|Foxit|PDF-XChange|Soda PDF", re.I), N_("third-party PDF editor"), False),
+    (re.compile(r"Canva|Figma|Google", re.I), N_("online service (Canva/Figma/Google)"), False),
 ]
 
-# Продюсеры, которые появляются в файле только после ПОСТОБРАБОТКИ.
+# Producers that appear in a file only after POST-PROCESSING.
 _REWRITER = re.compile(r"(qpdf|Ghostscript|pikepdf|pypdf|PyPDF2|cpdf|mutool|MuPDF|exiftool)", re.I)
-# Приложения-авторы, которые пишут свой собственный Producer.
+# Authoring applications that write their own Producer.
 _AUTHORING = re.compile(r"(Microsoft|Word|Excel|PowerPoint|LibreOffice|OpenOffice|Acrobat|InDesign|Illustrator|Pages)", re.I)
 
-# Шрифты, которые датируют документ независимо от заявленных дат.
+# Fonts that date a document regardless of the declared dates.
 _FONT_ERA = [
-    ("aptos", "Aptos -- шрифт по умолчанию Microsoft 365 с 2023 года: документ создан НЕ РАНЬШЕ 2023-го, "
-              "чем бы ни были заявленные даты"),
-    ("calibri", "Calibri -- шрифт по умолчанию Office 2007-2023: документ из этого окна времени"),
-    ("aptos display", "Aptos Display -- гарнитура Microsoft 365 с 2023 года"),
+    ("aptos", N_("Aptos is the Microsoft 365 default font since 2023: the document was created "
+                 "NO EARLIER than 2023, whatever the declared dates")),
+    ("calibri", N_("Calibri is the Office 2007-2023 default font: the document comes from that "
+                   "time window")),
+    ("aptos display", N_("Aptos Display is a Microsoft 365 typeface since 2023")),
 ]
 
 _SUBSET = re.compile(r"^([A-Z]{6})\+(.+)$")
@@ -152,14 +157,14 @@ _PATHISH = re.compile(
     re.I,
 )
 
-# Стандартные форматы бумаги: мм -> имя (формат бумаги выдаёт страну).
+# Standard paper sizes: mm -> name (paper size gives away the country).
 _PAPER = [
-    (210.0, 297.0, "A4 (ISO, весь мир кроме Северной Америки)"),
-    (215.9, 279.4, "Letter (США/Канада)"),
-    (215.9, 355.6, "Legal (США)"),
+    (210.0, 297.0, N_("A4 (ISO, everywhere except North America)")),
+    (215.9, 279.4, N_("Letter (US/Canada)")),
+    (215.9, 355.6, N_("Legal (US)")),
     (297.0, 420.0, "A3 (ISO)"),
     (148.0, 210.0, "A5 (ISO)"),
-    (279.4, 431.8, "Tabloid (США)"),
+    (279.4, 431.8, N_("Tabloid (US)")),
 ]
 
 _PDF_DATE = re.compile(
@@ -167,11 +172,11 @@ _PDF_DATE = re.compile(
 )
 
 
-# --- мелкие утилиты ----------------------------------------------------------
+# --- small utilities ---------------------------------------------------------
 
 
 def _s(obj) -> str:
-    """Значение PDF-объекта в строку. Никогда не бросает."""
+    """A PDF object's value as a string. Never raises."""
     if obj is None:
         return ""
     try:
@@ -182,21 +187,21 @@ def _s(obj) -> str:
         if isinstance(obj, bytes):
             return obj.decode("utf-8", "replace")
         text = str(obj)
-        # У словарей и массивов str() даёт repr вида pikepdf.Array([...]):
-        # в отчёт идёт только содержимое, без обёртки.
+        # For dicts and arrays str() gives a repr like pikepdf.Array([...]):
+        # only the content goes into the report, without the wrapper.
         if text.startswith("pikepdf.") and "(" in text:
             text = text.split("(", 1)[1].rsplit(")", 1)[0].strip()
         return text
     except Exception:
-        return "<нечитаемое значение>"
+        return tr("<unreadable value>")
 
 
 def _get(dct, key):
-    """dct.get(key), не падающий на битых/чужих объектах."""
+    """dct.get(key) that doesn't fail on broken/foreign objects."""
     try:
         return dct.get(key)
     except TypeError:
-        # Ключ не в UTF-8 (/Auth#9Dor): get() такую строку не принимает, а [] -- да.
+        # A non-UTF-8 key (/Auth#9Dor): get() doesn't accept such a string, but [] does.
         try:
             return dct[key] if key in dct else None
         except Exception:
@@ -206,22 +211,22 @@ def _get(dct, key):
 
 
 def _stream_text(obj) -> str:
-    """Текст тела: /JS (и подобные поля) в PDF бывает и строкой, и потоком --
-    тело скрипта лежит в потоке ровно так же часто, как строкой. Сжатый размер
-    проверяем перед распаковкой -- та же защита от бомбы, что и для /Metadata."""
+    """Body text: /JS (and similar fields) in a PDF can be a string or a stream;
+    a script body sits in a stream just as often as in a string. The compressed
+    size is checked before decompression: the same bomb protection as for /Metadata."""
     if obj is None:
         return ""
     try:
         packed = len(obj.read_raw_bytes())
         if packed > MAX_XMP_PACKED:
-            return "<поток слишком велик для распаковки: %d байт сжатых>" % packed
+            return tr("<stream too large to decompress: %d compressed bytes>") % packed
         return obj.read_bytes()[:MAX_STREAM].decode("utf-8", "replace")
     except Exception:
         return _s(obj)
 
 
 def _pdf_date(raw: str) -> str:
-    """D:YYYYMMDDHHmmSS+TZ -> читаемый вид. Пустая строка, если не разобрали."""
+    """D:YYYYMMDDHHmmSS+TZ -> readable form. Empty string if it couldn't be parsed."""
     m = _PDF_DATE.match((raw or "").strip())
     if not m:
         return ""
@@ -241,7 +246,7 @@ def _looks_like_path(value: str) -> bool:
 
 
 def _qname(tag) -> str:
-    """{uri}Local -> prefix:Local по известным пространствам имён."""
+    """{uri}Local -> prefix:Local for known namespaces."""
     tag = str(tag)
     if not tag.startswith("{"):
         return tag
@@ -252,53 +257,54 @@ def _qname(tag) -> str:
     return "%s:%s" % (prefix, local)
 
 
-# --- А. вскрытие файла -------------------------------------------------------
+# --- A. opening the file -----------------------------------------------------
 
 
 def inspect_pdf(path) -> Report:
-    """Полная read-only инспекция PDF. Всегда возвращает Report, не бросает."""
+    """Full read-only inspection of a PDF. Always returns a Report, never raises."""
     report = Report(path=str(path), fmt="pdf")
     try:
         report.size = os.path.getsize(path)
     except OSError as exc:
-        report.err("Не удалось получить размер файла: %s" % exc)
+        report.err(tr("Could not get the file size: %s") % exc)
 
-    # Сырой скан работает даже на файле, который pikepdf открыть не сможет.
+    # The raw scan works even on a file pikepdf can't open.
     ctx = {}
     try:
         _sec_raw(path, report, ctx)
     except Exception as exc:
-        report.err("Сырой скан байтов не удался: %s: %s" % (type(exc).__name__, exc))
+        report.err(tr("Raw byte scan failed: %s: %s") % (type(exc).__name__, exc))
 
     pdf = None
     try:
-        pdf = pikepdf.open(path)   # пустой пароль пробуется автоматически
+        pdf = pikepdf.open(path)   # an empty password is tried automatically
     except pikepdf.PasswordError:
-        report.err("PDF зашифрован и НЕ открывается пустым паролем -- содержимое и "
-                   "метаданные недоступны без пароля владельца/пользователя.")
-        report.signal("hazard", "Файл защищён паролем пользователя: инспекция невозможна", "high")
+        report.err(tr("The PDF is encrypted and does NOT open with an empty password: content "
+                      "and metadata are unavailable without the owner/user password."))
+        report.signal("hazard", tr("The file is protected by a user password: inspection is "
+                                   "impossible"), "high")
         return report
     except Exception as exc:
-        report.err("pikepdf не смог открыть файл (%s): %s" % (type(exc).__name__, exc))
-        report.signal("hazard", "PDF структурно повреждён: QPDF отказался его разбирать", "high")
+        report.err(tr("pikepdf could not open the file (%s): %s") % (type(exc).__name__, exc))
+        report.signal("hazard", tr("The PDF is structurally damaged: QPDF refused to parse it"), "high")
         return report
 
     sections = (
-        _sec_encryption,   # А
-        _sec_docinfo,      # Б
-        _sec_xmp,          # В
-        _sec_object_xmp,   # В2
-        _sec_file_id,      # Г
-        _sec_annots,       # Е
-        _sec_acroform,     # Ж + К
-        _sec_attachments,  # З
-        _sec_active,       # И
-        _sec_layers,       # Л
-        _sec_fonts,        # М
-        _sec_pieceinfo,    # Н
-        _sec_images,       # Н2
-        _sec_structural,   # О
-        _sec_overview,     # П
+        _sec_encryption,   # A
+        _sec_docinfo,      # B
+        _sec_xmp,          # C
+        _sec_object_xmp,   # C2
+        _sec_file_id,      # D
+        _sec_annots,       # F
+        _sec_acroform,     # G + K
+        _sec_attachments,  # H
+        _sec_active,       # I
+        _sec_layers,       # L
+        _sec_fonts,        # M
+        _sec_pieceinfo,    # N
+        _sec_images,       # N2
+        _sec_structural,   # O
+        _sec_overview,     # P
     )
     try:
         with pdf:
@@ -306,55 +312,56 @@ def inspect_pdf(path) -> Report:
                 try:
                     fn(pdf, report, ctx)
                 except Exception as exc:
-                    report.err("Секция %s: %s: %s" % (fn.__name__, type(exc).__name__, exc))
+                    report.err(tr("Section %s: %s: %s") % (fn.__name__, type(exc).__name__, exc))
             try:
-                _sec_signals(pdf, report, ctx)   # Р
+                _sec_signals(pdf, report, ctx)   # R
             except Exception as exc:
-                report.err("Секция сигналов: %s: %s" % (type(exc).__name__, exc))
+                report.err(tr("Signals section: %s: %s") % (type(exc).__name__, exc))
     except Exception as exc:
-        report.err("Разбор прерван: %s: %s" % (type(exc).__name__, exc))
+        report.err(tr("Parsing interrupted: %s: %s") % (type(exc).__name__, exc))
 
     try:
         _enrich_exiftool(path, report, ctx)
     except Exception as exc:
-        report.err("Обогащение exiftool не удалось (не критично): %s" % exc)
+        report.err(tr("exiftool enrichment failed (not critical): %s") % exc)
 
     return report
 
 
 def _sec_encryption(pdf, report, ctx):
-    """А. Шифрование и права доступа."""
+    """A. Encryption and permissions."""
     if not pdf.is_encrypted:
         return
-    report.add(Risk.PROVENANCE, "/Encrypt", "Шифрование",
-               "есть, открывается пустым паролем",
-               note="Файл зашифрован, но пароль пользователя пустой: это типичная "
-                    "«защита от печати/копирования», которая ничего не защищает, зато "
-                    "фиксирует, что файл готовили в Acrobat или похожем редакторе.",
+    report.add(Risk.PROVENANCE, "/Encrypt", tr("Encryption"),
+               tr("present, opens with an empty password"),
+               note=tr("The file is encrypted, but the user password is empty: the typical "
+                       "\"print/copy protection\" that protects nothing but records that the "
+                       "file was prepared in Acrobat or a similar editor."),
                removable=True)
     try:
         enc = pdf.encryption
-        report.add(Risk.PROVENANCE, "/Encrypt", "Параметры шифрования",
+        report.add(Risk.PROVENANCE, "/Encrypt", tr("Encryption parameters"),
                    "R=%s V=%s P=%s %s" % (getattr(enc, "R", "?"), getattr(enc, "V", "?"),
                                           getattr(enc, "P", "?"), getattr(enc, "stream_method", "")),
-                   note="Ревизия и алгоритм шифрования косвенно датируют версию Acrobat.")
+                   note=tr("The encryption revision and algorithm indirectly date the Acrobat "
+                           "version."))
     except Exception as exc:
-        report.err("Параметры /Encrypt не читаются: %s" % exc)
+        report.err(tr("/Encrypt parameters can't be read: %s") % exc)
     try:
-        report.add(Risk.PROVENANCE, "/Encrypt", "Разрешённые операции", str(pdf.allow),
-                   note="Набор запретов (печать, извлечение текста, правка) -- это тоже "
-                        "отпечаток того, кто и чем готовил файл.")
+        report.add(Risk.PROVENANCE, "/Encrypt", tr("Allowed operations"), str(pdf.allow),
+                   note=tr("The set of restrictions (printing, text extraction, editing) is also "
+                           "a fingerprint of who prepared the file and with what."))
     except Exception as exc:
-        report.err("Права /Encrypt не читаются: %s" % exc)
+        report.err(tr("/Encrypt permissions can't be read: %s") % exc)
 
 
 def _sec_docinfo(pdf, report, ctx):
-    """Б. Словарь /Info со всеми ключами, включая нестандартные."""
+    """B. The /Info dictionary with all keys, including non-standard ones."""
     try:
         info = pdf.docinfo
         keys = list(info.keys())
     except Exception as exc:
-        report.err("/Info не читается: %s" % exc)
+        report.err(tr("/Info can't be read: %s") % exc)
         ctx["info"] = {}
         return
 
@@ -365,13 +372,14 @@ def _sec_docinfo(pdf, report, ctx):
         try:
             raw = _s(info[key])
         except Exception as exc:
-            report.err("/Info %s не читается: %s" % (key, exc))
+            report.err(tr("/Info %s can't be read: %s") % (key, exc))
             continue
         collected[key] = raw
         label, risk = _INFO_MAP.get(key, (None, None))
+        label = label and tr(label)
         if label is None:
-            # Нестандартный ключ: их пишут корпоративные DMS, плагины и скрипты.
-            label = "Нестандартный ключ %s" % key
+            # A non-standard key: corporate DMSs, plugins and scripts write these.
+            label = tr("Non-standard key %s") % key
             low = key.lower()
             if any(w in low for w in ("author", "user", "owner", "company", "operator", "signer")):
                 risk = Risk.IDENTITY
@@ -379,54 +387,55 @@ def _sec_docinfo(pdf, report, ctx):
                 risk = Risk.ENVIRONMENT
             else:
                 risk = Risk.PROVENANCE
-            note = ("Ключ вне спецификации PDF: его пишет конкретное приложение или "
-                    "корпоративная система документооборота, поэтому он особенно "
-                    "хорошо опознаёт источник файла.")
+            note = (tr("A key outside the PDF specification: a specific application or corporate "
+                       "document management system writes it, so it identifies the file's source "
+                       "especially well."))
         elif _looks_like_path(raw):
             risk = Risk.ENVIRONMENT
-            note = "Значение похоже на локальный путь: выдаёт имя пользователя и структуру диска."
+            note = tr("The value looks like a local path: it reveals the user name and disk "
+                      "layout.")
         else:
             note = ""
 
         if key in ("/CreationDate", "/ModDate"):
             human = _pdf_date(raw)
-            value = "%s   (оригинал: %s)" % (human, raw) if human else raw
-            note = note or ("Дата в формате PDF D:YYYYMMDDHHmmSS+TZ. Смещение часового "
-                            "пояса выдаёт географию автора.")
+            value = tr("%s   (original: %s)") % (human, raw) if human else raw
+            note = note or (tr("A date in PDF format D:YYYYMMDDHHmmSS+TZ. The time zone offset "
+                               "reveals the author's geography."))
             report.add(risk, "/Info", label, value, note=note)
         else:
             report.add(risk, "/Info", label, raw, note=note)
 
 
 def _sec_xmp(pdf, report, ctx):
-    """В. XMP: и через pikepdf, и сырым потоком /Metadata. Про него забывают."""
+    """C. XMP: both via pikepdf and as the raw /Metadata stream. People forget about it."""
     raw = b""
     try:
         meta = _get(pdf.Root, "/Metadata")
         if meta is not None:
             packed = len(meta.read_raw_bytes())
             if packed > MAX_XMP_PACKED:
-                report.err("Поток /Metadata слишком велик (%d байт в сжатом виде) -- "
-                           "не распаковываем, защита от бомбы." % packed)
+                report.err(tr("The /Metadata stream is too large (%d bytes compressed): not "
+                              "decompressed, bomb protection.") % packed)
             else:
                 raw = meta.read_bytes()[:MAX_STREAM]
     except Exception as exc:
-        report.err("Сырой поток /Metadata не читается: %s" % exc)
+        report.err(tr("The raw /Metadata stream can't be read: %s") % exc)
 
     pairs = []
     if raw:
-        report.add(Risk.PROVENANCE, "/Metadata", "XMP-пакет", "%d байт" % len(raw),
-                   note="XMP лежит отдельным потоком и переживает чистку /Info: чаще всего "
-                        "именно тут остаётся всё, что «уже удалили».")
+        report.add(Risk.PROVENANCE, "/Metadata", tr("XMP packet"), tr("%d bytes") % len(raw),
+                   note=tr("XMP lives in a separate stream and survives cleaning of /Info: this "
+                           "is most often where everything \"already deleted\" remains."))
         pairs = _parse_xmp(raw, report)
     else:
-        # Запасной путь -- через pikepdf, если сырой поток недоступен.
+        # Fallback via pikepdf if the raw stream is unavailable.
         try:
             md = pdf.open_metadata()
             pairs = [(_qname(k), _s(v if not isinstance(v, list) else "; ".join(map(str, v))))
                      for k, v in dict(md).items()]
         except Exception as exc:
-            report.err("pdf.open_metadata() не читается: %s" % exc)
+            report.err(tr("pdf.open_metadata() can't be read: %s") % exc)
 
     ctx["xmp_present"] = bool(pairs)
     ctx["xmp"] = {k: v for k, v in pairs}
@@ -439,43 +448,48 @@ def _sec_xmp(pdf, report, ctx):
         report.add(risk, "XMP", key, value, note=note)
 
     if len(pairs) > MAX_XMP_KEYS:
-        report.err("XMP: показаны первые %d ключей из %d." % (MAX_XMP_KEYS, len(pairs)))
+        report.err(tr("XMP: showing the first %d of %d keys.") % (MAX_XMP_KEYS, len(pairs)))
 
 
 def _xmp_class(key, value) -> tuple:
-    """Ключ XMP -> (Risk, пояснение). Общая оценка для корневого XMP и XMP объектов."""
+    """XMP key -> (Risk, explanation). A shared assessment for the root XMP and object XMP."""
     if key in _XMP_GUID:
-        return Risk.IDENTITY, ("Постоянный GUID документа. Он НЕ меняется при пересохранении и "
-                               "связывает между собой все версии файла и все файлы, сделанные из "
-                               "одного шаблона: по нему два разных на вид документа сводятся в один.")
+        return Risk.IDENTITY, (tr("A persistent document GUID. It does NOT change on re-save and "
+                                  "links all versions of the file and all files made from one "
+                                  "template: through it two different-looking documents are tied "
+                                  "together."))
     if key.startswith("xmpMM:History"):
-        return Risk.PROVENANCE, ("Событие журнала правок xmpMM:History -- фактическая история того, "
-                                 "чем и когда файл редактировали.")
+        return Risk.PROVENANCE, (tr("An xmpMM:History edit log event: the actual history of what "
+                                    "the file was edited with, and when."))
     if key in _XMP_IDENTITY or key.startswith(("xmpRights:", "photoshop:Author")):
-        return Risk.IDENTITY, "Имя/правообладатель в XMP: переживает чистку /Info."
+        return Risk.IDENTITY, tr("Name/rights holder in XMP: survives cleaning of /Info.")
     if _looks_like_path(value):
-        return Risk.ENVIRONMENT, "В значении локальный путь: выдаёт имя пользователя и структуру диска."
+        return Risk.ENVIRONMENT, tr("The value contains a local path: it reveals the user name "
+                                    "and disk layout.")
     if key in ("xmp:CreateDate", "xmp:ModifyDate", "xmp:MetadataDate"):
-        return Risk.PROVENANCE, ("Дата XMP. xmp:MetadataDate часто новее xmp:ModifyDate -- разница "
-                                 "показывает, что метаданные трогали отдельно от содержимого.")
+        return Risk.PROVENANCE, (tr("An XMP date. xmp:MetadataDate is often newer than "
+                                    "xmp:ModifyDate: the difference shows the metadata was "
+                                    "touched separately from the content."))
     if key.startswith("pdfaid:") or key.startswith("pdfuaid:"):
-        return Risk.STRUCTURAL, ("Декларация соответствия PDF/A или PDF/UA. При чистке обычно "
-                                 "сохраняем: без неё файл перестаёт быть архивным/доступным.")
+        return Risk.STRUCTURAL, (tr("A PDF/A or PDF/UA conformance declaration. Usually kept "
+                                    "when cleaning: without it the file stops being "
+                                    "archival/accessible."))
     return Risk.PROVENANCE, ""
 
 
-MAX_OBJ_XMP = 200       # объектов со своим XMP, которые разбираем
-MAX_OBJ_SCAN = 200000   # объектов файла, которые просматриваем в поисках /Metadata
+MAX_OBJ_XMP = 200       # objects with their own XMP that we parse
+MAX_OBJ_SCAN = 200000   # file objects we scan for /Metadata
 
 
 def _sec_object_xmp(pdf, report, ctx):
-    """В2. XMP, привязанный не к документу, а к странице, форме или картинке.
+    """C2. XMP attached not to the document but to a page, form or image.
 
-    Такие пакеты приезжают вместе с вставленной картинкой из Photoshop или
-    страницей, собранной из другого PDF, и несут чужие автора, GUID и пути.
-    Чистильщик их снимает (обход объектов в clean_pdf), а инспектор раньше не
-    видел -- отчёт «до» был неполон. Обычные служебные ключи не выводим, чтобы
-    не утопить отчёт: только личность, GUID, пути и приложение-источник."""
+    Such packets come along with an image pasted from Photoshop or a page
+    assembled from another PDF, and carry someone else's author, GUID and
+    paths. The cleaner removes them (an object walk in clean_pdf), but the
+    inspector used to miss them, so the "before" report was incomplete.
+    Ordinary service keys aren't listed, to avoid drowning the report: only
+    identity, GUIDs, paths and the source application."""
     try:
         root_gen = pdf.Root.objgen
     except Exception:
@@ -484,7 +498,7 @@ def _sec_object_xmp(pdf, report, ctx):
     for obj in pdf.objects:
         scanned += 1
         if scanned > MAX_OBJ_SCAN:
-            report.err("Объектов больше %d: XMP объектов разобран не во всём файле." % MAX_OBJ_SCAN)
+            report.err(tr("More than %d objects: object XMP was not parsed across the whole file.") % MAX_OBJ_SCAN)
             break
         try:
             if not isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)) or obj.objgen == root_gen:
@@ -496,23 +510,23 @@ def _sec_object_xmp(pdf, report, ctx):
             continue
         holders += 1
         if holders > MAX_OBJ_XMP:
-            report.err("Объектов со своим XMP больше %d: разобраны первые." % MAX_OBJ_XMP)
+            report.err(tr("More than %d objects with their own XMP: the first ones were parsed.") % MAX_OBJ_XMP)
             break
-        kind = {"/Page": "страница", "/XObject": "объект"}.get(_s(_get(obj, "/Type")), "объект")
+        kind = {"/Page": tr("page"), "/XObject": tr("object")}.get(_s(_get(obj, "/Type")), tr("object"))
         sub = _s(_get(obj, "/Subtype"))
         if sub == "/Image":
-            kind = "картинка"
+            kind = tr("image")
         elif sub == "/Form":
-            kind = "форма"
+            kind = tr("form")
         where = "XMP: %s %d" % (kind, obj.objgen[0])
         try:
             packed = len(meta.read_raw_bytes())
             if packed > MAX_XMP_PACKED:
-                report.err("%s: поток слишком велик (%d байт сжатых), не распаковываем." % (where, packed))
+                report.err(tr("%s: stream too large (%d compressed bytes), not decompressed.") % (where, packed))
                 continue
             pairs = _parse_xmp(meta.read_bytes()[:MAX_STREAM], report)
         except Exception as exc:
-            report.err("%s не читается: %s" % (where, exc))
+            report.err(tr("%s can't be read: %s") % (where, exc))
             continue
         for key, value in pairs[:MAX_XMP_KEYS]:
             risk, note = _xmp_class(key, value)
@@ -520,20 +534,21 @@ def _sec_object_xmp(pdf, report, ctx):
                 continue
             report.add(risk, where, key, value, note=note)
         if pairs:
-            report.add(Risk.PROVENANCE, where, "Свой XMP-пакет у объекта",
-                       "ключей: %d" % len(pairs),
-                       note="Метаданные вставленной картинки или страницы из другого файла. "
-                            "Переживают чистку /Info и корневого XMP, если их не снять отдельно.")
+            report.add(Risk.PROVENANCE, where, tr("Object has its own XMP packet"),
+                       tr("keys: %d") % len(pairs),
+                       note=tr("Metadata of a pasted image or a page from another file. Survives "
+                               "cleaning of /Info and the root XMP unless removed separately."))
     ctx["object_xmp"] = holders
 
 
 def _xmp_fromstring(raw: bytes):
-    """XMP -> корень lxml (или None). Общий для инспектора и чистильщика.
+    """XMP -> lxml root (or None). Shared by the inspector and the cleaner.
 
-    XMP в Latin-1/cp1252 при заявленном UTF-8 -- частая ошибка старых
-    продюсеров, и lxml такой пакет не берёт даже с recover=True. Тогда битые
-    байты заменяются на U+FFFD и разбор повторяется: иначе весь пакет вместе с
-    автором и путями был бы невидим инспектору и нетронут чисткой."""
+    XMP in Latin-1/cp1252 while declaring UTF-8 is a common bug of old
+    producers, and lxml won't take such a packet even with recover=True. Then
+    the bad bytes are replaced with U+FFFD and parsing is retried: otherwise
+    the whole packet, author and paths included, would be invisible to the
+    inspector and untouched by cleaning."""
     parser = etree.XMLParser(recover=True, resolve_entities=False,
                              no_network=True, huge_tree=False)
     try:
@@ -546,14 +561,14 @@ def _xmp_fromstring(raw: bytes):
 
 
 def _parse_xmp(raw: bytes, report) -> list:
-    """Разбор XMP-пакета в плоский список (ключ, значение), включая History."""
+    """Parse an XMP packet into a flat list of (key, value), History included."""
     try:
         root = _xmp_fromstring(raw)
     except Exception as exc:
-        report.err("XMP не разбирается как XML: %s" % exc)
+        report.err(tr("XMP doesn't parse as XML: %s") % exc)
         return []
     if root is None:
-        report.err("XMP пуст или полностью нечитаем.")
+        report.err(tr("XMP is empty or completely unreadable."))
         return []
 
     out = []
@@ -567,13 +582,13 @@ def _parse_xmp(raw: bytes, report) -> list:
         out.append((key, value))
 
     for desc in root.iter(RDF + "Description"):
-        # Компактная форма: свойства сидят атрибутами на rdf:Description.
+        # Compact form: properties sit as attributes on rdf:Description.
         for attr, value in desc.attrib.items():
             key = _qname(attr)
             if key.startswith("rdf:"):
                 continue
             push(key, value)
-        # Развёрнутая форма: каждое свойство -- отдельный дочерний элемент.
+        # Expanded form: each property is a separate child element.
         for child in desc:
             key = _qname(child.tag)
             if key == "xmpMM:History":
@@ -586,7 +601,7 @@ def _parse_xmp(raw: bytes, report) -> list:
 
 
 def _flatten(elem) -> str:
-    """Значение узла XMP: текст, склейка rdf:li или разложенная структура."""
+    """Value of an XMP node: text, joined rdf:li, or an unfolded structure."""
     text = (elem.text or "").strip()
     if text:
         return text
@@ -611,7 +626,7 @@ def _flatten(elem) -> str:
 
 
 def _parse_history(node, push):
-    """xmpMM:History -> по событию на запись. Это и есть журнал правок."""
+    """xmpMM:History -> one entry per event. This is the edit log."""
     events = node.findall(".//" + RDF + "li") or [node]
     for idx, ev in enumerate(events[:MAX_HISTORY]):
         fields = []
@@ -629,20 +644,20 @@ def _parse_history(node, push):
 
 
 def _sec_file_id(pdf, report, ctx):
-    """Г. trailer /ID -- пара 16-байтовых идентификаторов файла."""
+    """D. trailer /ID: a pair of 16-byte file identifiers."""
     ids = _get(pdf.trailer, "/ID")
     if ids is None:
-        report.add(Risk.PROVENANCE, "trailer", "/ID", "отсутствует",
-                   note="Трейлер без /ID: либо файл собран вручную, либо его уже переписывали "
-                        "инструментом, который /ID не восстановил.")
+        report.add(Risk.PROVENANCE, "trailer", "/ID", tr("absent"),
+                   note=tr("A trailer without /ID: either the file was built by hand, or it was "
+                           "already rewritten by a tool that didn't restore /ID."))
         return
     try:
         items = list(ids)
     except Exception as exc:
-        report.err("trailer /ID не читается: %s" % exc)
+        report.err(tr("trailer /ID can't be read: %s") % exc)
         return
-    labels = ["/ID[0] (постоянный, задаётся при создании)",
-              "/ID[1] (меняется при каждом сохранении)"]
+    labels = [tr("/ID[0] (permanent, set at creation)"),
+              tr("/ID[1] (changes on every save)")]
     hexes = []
     for i, item in enumerate(items[:2]):
         try:
@@ -651,20 +666,20 @@ def _sec_file_id(pdf, report, ctx):
             hx = _s(item)
         hexes.append(hx)
         report.add(Risk.IDENTITY, "trailer", labels[i] if i < 2 else "/ID[%d]" % i, hx,
-                   note="У многих продюсеров /ID[0] выводится из полного пути и имени исходного "
-                        "файла: одинаковый /ID[0] у двух PDF означает общий источник.")
+                   note=tr("Many producers derive /ID[0] from the full path and name of the "
+                           "source file: the same /ID[0] in two PDFs means a common source."))
     ctx["id_equal"] = len(hexes) == 2 and hexes[0] == hexes[1]
     if ctx.get("id_equal"):
         report.add(Risk.PROVENANCE, "trailer", "/ID[0] == /ID[1]", hexes[0],
-                   note="Оба идентификатора совпадают: файл ни разу не пересохраняли после "
-                        "создания, либо его собрали одним проходом (типично для генераторов).")
+                   note=tr("Both identifiers match: the file was never re-saved after creation, "
+                           "or it was built in a single pass (typical of generators)."))
 
 
 def _sec_raw(path, report, ctx):
-    """Д. Сырой скан байтов: инкрементальные апдейты, версия, ObjStm, TeX-баннер.
+    """E. Raw byte scan: incremental updates, version, ObjStm, TeX banner.
 
-    Работает на любом файле, в том числе на таком, который pikepdf не открывает.
-    Читаем чанками с нахлёстом, ничего крупного в память не тянем.
+    Works on any file, including one pikepdf can't open.
+    Reads in overlapping chunks; nothing large is pulled into memory.
     """
     needles = re.compile(rb"%%EOF|startxref|/Prev|/ObjStm|/Linearized|/Encrypt|/XFA|trailer")
     banner = re.compile(rb"/PTEX\.Fullbanner\s*\(([^)]{0,400})\)")
@@ -694,18 +709,18 @@ def _sec_raw(path, report, ctx):
                 offset += len(chunk)
                 prev = buf[-SCAN_OVERLAP:]
     except OSError as exc:
-        report.err("Сырой скан: файл не читается: %s" % exc)
+        report.err(tr("Raw scan: the file can't be read: %s") % exc)
         return
 
     n_eof = len(hits.get(b"%%EOF", ()))
     n_startxref = len(hits.get(b"startxref", ()))
-    # /Prev НЕЛЬЗЯ считать по всему файлу: это штатный ключ элемента
-    # оглавления (ссылка на предыдущую закладку того же уровня), а не только
-    # ключ трейлера. На настоящем документе с 62 закладками голый счётчик
-    # давал 62 и поднимал ложный сигнал «в файле лежат прошлые версии
-    # страниц» на КАЖДОМ PDF с оглавлением.
-    # Считаем только те /Prev, что стоят вскоре после ключевого слова
-    # trailer, то есть внутри словаря трейлера.
+    # /Prev must NOT be counted across the whole file: it's a regular key of
+    # an outline item (a link to the previous bookmark at the same level), not
+    # only a trailer key. On a real document with 62 bookmarks a bare counter
+    # gave 62 and raised a false "previous page versions are in the file"
+    # signal on EVERY PDF with an outline.
+    # Only /Prev entries shortly after the trailer keyword are counted,
+    # i.e. inside the trailer dictionary.
     prev_all = hits.get(b"/Prev", ())
     trailers = hits.get(b"trailer", ())
     n_prev_raw = len(prev_all)
@@ -718,67 +733,67 @@ def _sec_raw(path, report, ctx):
     ctx["raw_linearized"] = bool(hits.get(b"/Linearized"))
 
     if version:
-        report.add(Risk.PROVENANCE, "заголовок", "Версия PDF (%%PDF-)", version,
-                   note="Версия в заголовке часто расходится с возможностями файла: её "
-                        "выставляет конкретный продюсер и по ней он опознаётся.")
+        report.add(Risk.PROVENANCE, tr("header"), tr("PDF version (%%PDF-)"), version,
+                   note=tr("The header version often disagrees with the file's features: a "
+                           "specific producer sets it, and it identifies that producer."))
 
-    report.add(Risk.PROVENANCE, "сырые байты", "Маркеров %%EOF / startxref",
+    report.add(Risk.PROVENANCE, tr("raw bytes"), tr("%%EOF / startxref markers"),
                "%d / %d" % (n_eof, n_startxref),
-               note="Один %%EOF -- файл писали одним проходом.")
-    report.add(Risk.PROVENANCE, "сырые байты", "Вхождений /Prev",
-               "%d всего, из них в трейлере: %d" % (n_prev_raw, n_prev),
-               note="/Prev -- штатный ключ элемента оглавления (ссылка на предыдущую "
-                    "закладку), поэтому его вхождения по всему файлу о ревизиях НЕ "
-                    "говорят. О ревизиях говорит только /Prev внутри трейлера.")
+               note=tr("One %%EOF: the file was written in a single pass."))
+    report.add(Risk.PROVENANCE, tr("raw bytes"), tr("/Prev occurrences"),
+               tr("%d in total, %d of them in the trailer") % (n_prev_raw, n_prev),
+               note=tr("/Prev is a regular outline-item key (a link to the previous bookmark), "
+                       "so its occurrences across the file say NOTHING about revisions. Only "
+                       "/Prev inside the trailer does."))
 
-    # Решающий признак -- число %%EOF/startxref. /Prev в трейлере лишь
-    # подтверждает. Одна ревизия инкрементальным апдейтом не является.
+    # The deciding sign is the number of %%EOF/startxref. /Prev in the trailer
+    # only confirms it. A single revision is not an incremental update.
     revisions = max(n_eof, n_startxref)
     if revisions > 1 or n_prev > 0:
-        report.add(Risk.IDENTITY, "сырые байты", "Инкрементальные апдейты",
-                   "%d ревизий (по %%EOF), /Prev в трейлере: %d" % (revisions, n_prev),
-                   note="В файле ФИЗИЧЕСКИ ЛЕЖАТ ПРЕДЫДУЩИЕ ВЕРСИИ документа: старые объекты, "
-                        "старые xref и, в частности, текст под «заредактированными» чёрными "
-                        "прямоугольниками -- прямоугольник рисуется поверх, а текст остаётся "
-                        "в предыдущей ревизии и достаётся обычным текстовым поиском. "
-                        "Пересохранение с linearize (или полная перезапись объектов) выбрасывает "
-                        "все прошлые ревизии -- это и есть способ их убрать.")
+        report.add(Risk.IDENTITY, tr("raw bytes"), tr("Incremental updates"),
+                   tr("%d revisions (by %%EOF), /Prev in the trailer: %d") % (revisions, n_prev),
+                   note=tr("PREVIOUS VERSIONS of the document PHYSICALLY REMAIN in the file: old "
+                           "objects, old xrefs and, in particular, text under \"redacted\" black "
+                           "boxes: the box is drawn on top, while the text stays in the previous "
+                           "revision and can be found with an ordinary text search. Re-saving "
+                           "with linearize (or a full rewrite of the objects) drops all previous "
+                           "revisions; that's how to remove them."))
         report.signal("hazard",
-                      "PDF содержит %d ревизий: прошлые версии страниц и «зачёркнутый» "
-                      "текст извлекаются из файла напрямую" % revisions,
+                      tr("The PDF contains %d revisions: earlier page versions and "
+                         "\"crossed-out\" text can be extracted straight from the file") % revisions,
                       "high")
 
     if ctx["objstm"]:
-        report.add(Risk.PROVENANCE, "сырые байты", "Object streams (/ObjStm)", "есть",
-                   note="Объекты упакованы в сжатые потоки (PDF 1.5+). Простым grep-ом по файлу "
-                        "метаданные не видны, но при разборе достаются полностью.")
+        report.add(Risk.PROVENANCE, tr("raw bytes"), "Object streams (/ObjStm)", tr("present"),
+                   note=tr("Objects are packed into compressed streams (PDF 1.5+). A plain grep "
+                           "won't show the metadata, but parsing extracts it completely."))
 
     for b in banners[:10]:
-        report.add(Risk.ENVIRONMENT, "/PTEX.Fullbanner", "Баннер TeX", b,
-                   note="Полная строка версии TeX Live с датой сборки дистрибутива: датирует "
-                        "рабочую машину автора и выдаёт его ОС/дистрибутив.")
+        report.add(Risk.ENVIRONMENT, "/PTEX.Fullbanner", tr("TeX banner"), b,
+                   note=tr("The full TeX Live version string with the distribution's build date: "
+                           "it dates the author's machine and reveals their OS/distribution."))
     if banners:
-        report.signal("producer", "pdfTeX/LaTeX: в файле есть /PTEX.Fullbanner -- %s" % banners[0], "high")
+        report.signal("producer", tr("pdfTeX/LaTeX: the file has /PTEX.Fullbanner: %s") % banners[0], "high")
 
 
 def _pages(pdf, report):
-    """Безопасный итератор по страницам с лимитом."""
+    """A safe page iterator with a limit."""
     try:
         total = len(pdf.pages)
     except Exception as exc:
-        report.err("Список страниц не читается: %s" % exc)
+        report.err(tr("The page list can't be read: %s") % exc)
         return
     if total > MAX_PAGES:
-        report.err("Страниц %d, постранично разобраны первые %d." % (total, MAX_PAGES))
+        report.err(tr("%d pages, the first %d were parsed page by page.") % (total, MAX_PAGES))
     for i in range(min(total, MAX_PAGES)):
         try:
             yield i, pdf.pages[i]
         except Exception as exc:
-            report.err("Страница %d не читается: %s" % (i + 1, exc))
+            report.err(tr("Page %d can't be read: %s") % (i + 1, exc))
 
 
 def _sec_annots(pdf, report, ctx):
-    """Е. Аннотации: /T -- это имя автора комментария."""
+    """F. Annotations: /T is the name of the comment's author."""
     count = 0
     for idx, page in _pages(pdf, report):
         annots = _get(page, "/Annots")
@@ -787,82 +802,84 @@ def _sec_annots(pdf, report, ctx):
         try:
             items = list(annots)
         except Exception as exc:
-            report.err("Стр. %d: /Annots не читается: %s" % (idx + 1, exc))
+            report.err(tr("Page %d: /Annots can't be read: %s") % (idx + 1, exc))
             continue
         for a in items:
             if count >= MAX_ANNOTS:
-                report.err("Аннотаций больше %d, остальные не разобраны." % MAX_ANNOTS)
+                report.err(tr("More than %d annotations; the rest were not parsed.") % MAX_ANNOTS)
                 return
             count += 1
             try:
                 _one_annot(a, idx, report, ctx)
             except Exception as exc:
-                report.err("Стр. %d: аннотация не читается: %s" % (idx + 1, exc))
+                report.err(tr("Page %d: an annotation can't be read: %s") % (idx + 1, exc))
     ctx["annots"] = count
 
 
 def _one_annot(a, page_idx, report, ctx):
-    where = "стр. %d /Annots" % (page_idx + 1)
+    where = tr("p. %d /Annots") % (page_idx + 1)
     sub = _s(_get(a, "/Subtype"))
     author = _s(_get(a, "/T"))
     if author:
-        report.add(Risk.IDENTITY, where, "Автор аннотации %s /T" % sub, author,
-                   note="Имя, под которым человек залогинен в Acrobat/Reader. Обычно это "
-                        "настоящее ФИО или доменная учётка, и её никто не чистит.")
+        report.add(Risk.IDENTITY, where, tr("Annotation author %s /T") % sub, author,
+                   note=tr("The name the person is logged in with in Acrobat/Reader. Usually a "
+                           "real full name or a domain account, and nobody cleans it."))
     for key, label, risk, note in (
-        ("/M", "Дата изменения /M", Risk.PROVENANCE, "Когда комментарий правили в последний раз."),
-        ("/CreationDate", "Дата создания", Risk.PROVENANCE, ""),
-        ("/Contents", "Текст комментария", Risk.IDENTITY,
-         "Тело комментария целиком: рабочая переписка, которую не видно при обычном просмотре."),
-        ("/RC", "Форматированный текст /RC", Risk.IDENTITY,
-         "Дубль комментария в RTF/HTML: остаётся, даже если /Contents почистили."),
-        ("/Subj", "Тема", Risk.PROVENANCE, ""),
+        ("/M", tr("Modification date /M"), Risk.PROVENANCE, tr("When the comment was last edited.")),
+        ("/CreationDate", tr("Creation date"), Risk.PROVENANCE, ""),
+        ("/Contents", tr("Comment text"), Risk.IDENTITY,
+         tr("The whole comment body: working correspondence that's invisible in normal viewing.")),
+        ("/RC", tr("Rich text /RC"), Risk.IDENTITY,
+         tr("A duplicate of the comment in RTF/HTML: it stays even if /Contents was cleaned.")),
+        ("/Subj", tr("Subject"), Risk.PROVENANCE, ""),
     ):
         raw = _s(_get(a, key))
         if not raw:
             continue
         if key in ("/M", "/CreationDate"):
             human = _pdf_date(raw)
-            raw = "%s   (оригинал: %s)" % (human, raw) if human else raw
+            raw = tr("%s   (original: %s)") % (human, raw) if human else raw
         report.add(risk, where, label, raw, note=note)
     if _get(a, "/Popup") is not None:
-        report.add(Risk.PROVENANCE, where, "Popup-окно аннотации %s" % sub, "есть",
-                   note="Всплывающее окно комментария: отдельный объект, который тащит за собой "
-                        "те же /T и /Contents.")
+        report.add(Risk.PROVENANCE, where, tr("Annotation popup %s") % sub, tr("present"),
+                   note=tr("The comment's popup window: a separate object that drags along the "
+                           "same /T and /Contents."))
     if sub == "/FileAttachment":
         fs = _get(a, "/FS")
         if fs is not None:
-            _one_filespec(fs, "стр. %d /FileAttachment" % (page_idx + 1), report)
+            _one_filespec(fs, tr("p. %d /FileAttachment") % (page_idx + 1), report)
 
 
 def _sec_acroform(pdf, report, ctx):
-    """Ж + К. Поля формы, XFA и цифровые подписи."""
+    """G + K. Form fields, XFA and digital signatures."""
     form = _get(pdf.Root, "/AcroForm")
     if form is None:
         return
-    report.add(Risk.PROVENANCE, "/AcroForm", "Интерактивная форма", "есть")
+    report.add(Risk.PROVENANCE, "/AcroForm", tr("Interactive form"), tr("present"))
 
     if _get(form, "/NeedAppearances") is not None:
         report.add(Risk.PROVENANCE, "/AcroForm", "/NeedAppearances",
                    _s(_get(form, "/NeedAppearances")),
-                   note="Просмотрщику приказано перерисовать поля по их значениям: значения "
-                        "полей в файле есть даже там, где визуально пусто.")
+                   note=tr("The viewer is told to redraw fields from their values: field values "
+                           "exist in the file even where it looks empty."))
 
     xfa = _get(form, "/XFA")
     if xfa is not None:
-        report.add(Risk.IDENTITY, "/AcroForm", "XFA-форма", "есть",
-                   note="XFA -- это полная XML-копия формы вместе с введёнными данными. Она живёт "
-                        "параллельно обычным полям: даже если /V вычистить, данные останутся в XFA.")
-        report.signal("hazard", "В файле XFA-форма: данные дублируются в XML и переживают чистку полей", "high")
+        report.add(Risk.IDENTITY, "/AcroForm", tr("XFA form"), tr("present"),
+                   note=tr("XFA is a full XML copy of the form together with the entered data. "
+                           "It lives in parallel with the regular fields: even if /V is cleaned, "
+                           "the data remains in XFA."))
+        report.signal("hazard", tr("The file has an XFA form: the data is duplicated in XML and "
+                                   "survives cleaning of the fields"), "high")
 
     sigflags = _get(form, "/SigFlags")
     if sigflags is not None:
         report.add(Risk.PROVENANCE, "/AcroForm", "/SigFlags", _s(sigflags),
-                   note="Флаг наличия подписей в форме.", removable=False)
+                   note=tr("Flag that the form contains signatures."), removable=False)
     if _get(pdf.Root, "/Perms") is not None:
-        report.add(Risk.IDENTITY, "/Perms", "Сертифицирующая подпись документа", "есть",
-                   note="Документ сертифицирован. ЛЮБАЯ правка метаданных ломает подпись: "
-                        "чистка и подпись взаимоисключающи.", removable=False)
+        report.add(Risk.IDENTITY, "/Perms", tr("Document certification signature"), tr("present"),
+                   note=tr("The document is certified. ANY metadata edit breaks the signature: "
+                           "cleaning and the signature are mutually exclusive."), removable=False)
 
     fields = _get(form, "/Fields")
     if fields is None:
@@ -872,8 +889,8 @@ def _sec_acroform(pdf, report, ctx):
     ctx["sig_fields"] = state["sig"]
     if state["sig"]:
         report.signal("hazard",
-                      "PDF подписан электронной подписью (%d поле/полей /FT /Sig): чистка "
-                      "метаданных ГАРАНТИРОВАННО сделает подпись недействительной" % state["sig"],
+                      tr("The PDF is digitally signed (%d /FT /Sig field(s)): cleaning the "
+                         "metadata WILL invalidate the signature") % state["sig"],
                       "high")
 
 
@@ -883,11 +900,11 @@ def _walk_fields(fields, prefix, report, state, depth):
     try:
         items = list(fields)
     except Exception as exc:
-        report.err("/Fields не читается: %s" % exc)
+        report.err(tr("/Fields can't be read: %s") % exc)
         return
     for f in items:
         if state["n"] >= MAX_FIELDS:
-            report.err("Полей формы больше %d, остальные не разобраны." % MAX_FIELDS)
+            report.err(tr("More than %d form fields; the rest were not parsed.") % MAX_FIELDS)
             return
         state["n"] += 1
         try:
@@ -900,67 +917,69 @@ def _walk_fields(fields, prefix, report, state, depth):
             else:
                 value = _get(f, "/V")
                 if value is not None:
-                    report.add(Risk.IDENTITY, "/AcroForm /Fields", "Поле «%s» (%s)" % (full, ftype or "?"),
+                    report.add(Risk.IDENTITY, "/AcroForm /Fields", tr("Field \"%s\" (%s)") % (full, ftype or "?"),
                                _s(value),
-                               note="Значение поля формы. Поля, визуально «очищенные» стиранием "
-                                    "внешнего вида, обычно сохраняют /V -- данные остаются в файле.")
+                               note=tr("A form field value. Fields visually \"cleared\" by "
+                                       "erasing their appearance usually keep /V: the data stays "
+                                       "in the file."))
                 dv = _get(f, "/DV")
                 if dv is not None:
-                    report.add(Risk.PROVENANCE, "/AcroForm /Fields", "Значение по умолчанию «%s»" % full,
+                    report.add(Risk.PROVENANCE, "/AcroForm /Fields", tr("Default value \"%s\"") % full,
                                _s(dv))
             kids = _get(f, "/Kids")
             if kids is not None:
                 _walk_fields(kids, full, report, state, depth + 1)
         except Exception as exc:
-            report.err("Поле формы не читается: %s" % exc)
+            report.err(tr("A form field can't be read: %s") % exc)
 
 
 def _one_signature(field, name, report):
-    """К. Подписант и параметры подписи. Убрать нельзя -- сломается подпись.
+    """K. Signer and signature parameters. Can't be removed without breaking the signature.
 
-    Возвращает True, если поле РЕАЛЬНО подписано (есть /V) -- только такие
-    поля считаются в сигнале-предупреждении и получают removable=False.
-    Пустое поле-заготовку ломать нечем: убрать можно как обычное поле формы.
+    Returns True if the field is REALLY signed (has /V): only such fields count
+    toward the warning signal and get removable=False. An empty placeholder
+    field has nothing to break: it can be removed like a regular form field.
     """
     v = _get(field, "/V")
     if v is None:
-        report.add(Risk.PROVENANCE, "/AcroForm /Sig", "Поле подписи «%s»" % name,
-                   "пустое (подпись не поставлена)",
-                   note="Подготовленное, но не подписанное поле: подписи ещё нет, ломать "
-                        "нечего, можно убирать как обычное поле формы.", removable=True)
+        report.add(Risk.PROVENANCE, "/AcroForm /Sig", tr("Signature field \"%s\"") % name,
+                   tr("empty (not signed)"),
+                   note=tr("A prepared but unsigned field: there's no signature yet, nothing to "
+                           "break; it can be removed like a regular form field."), removable=True)
         return False
-    note = ("Цифровая подпись. Метаданные подписи входят в подписанный диапазон: любая "
-            "чистка файла ломает подпись. Чистка и сохранение подписи -- взаимоисключающие "
-            "операции, выбирать должен пользователь.")
-    report.add(Risk.IDENTITY, "/AcroForm /Sig", "Поле подписи «%s»" % name, "есть",
+    note = (tr("A digital signature. Signature metadata is inside the signed range: any cleaning "
+               "of the file breaks the signature. Cleaning and keeping the signature are "
+               "mutually exclusive; the user has to choose."))
+    report.add(Risk.IDENTITY, "/AcroForm /Sig", tr("Signature field \"%s\"") % name, tr("present"),
                note=note, removable=False)
     for key, label, risk in (
-        ("/Name", "Подписант", Risk.IDENTITY),
-        ("/M", "Время подписания", Risk.PROVENANCE),
-        ("/Reason", "Причина подписания", Risk.IDENTITY),
-        ("/Location", "Место подписания", Risk.ENVIRONMENT),
-        ("/ContactInfo", "Контакты подписанта", Risk.IDENTITY),
-        ("/Filter", "Обработчик подписи", Risk.PROVENANCE),
-        ("/SubFilter", "Формат подписи", Risk.PROVENANCE),
+        ("/Name", tr("Signer"), Risk.IDENTITY),
+        ("/M", tr("Signing time"), Risk.PROVENANCE),
+        ("/Reason", tr("Signing reason"), Risk.IDENTITY),
+        ("/Location", tr("Signing location"), Risk.ENVIRONMENT),
+        ("/ContactInfo", tr("Signer contact"), Risk.IDENTITY),
+        ("/Filter", tr("Signature handler"), Risk.PROVENANCE),
+        ("/SubFilter", tr("Signature format"), Risk.PROVENANCE),
     ):
         raw = _s(_get(v, key))
         if not raw:
             continue
         if key == "/M":
             human = _pdf_date(raw)
-            raw = "%s   (оригинал: %s)" % (human, raw) if human else raw
+            raw = tr("%s   (original: %s)") % (human, raw) if human else raw
         report.add(risk, "/AcroForm /Sig", "%s («%s»)" % (label, name), raw,
                    note=note, removable=False)
     br = _get(v, "/ByteRange")
     if br is not None:
         report.add(Risk.PROVENANCE, "/AcroForm /Sig", "/ByteRange («%s»)" % name, _s(br),
-                   note="Диапазон байт, накрытый подписью. Всё, что внутри него, изменить нельзя. "
+                   note=tr("Byte range covered by the signature. Nothing inside it can be "
+                           "changed. ")
                         + note, removable=False)
     return True
 
 
 def _sec_attachments(pdf, report, ctx):
-    """З. Вложенные файлы: у PDF/A-3 и е-счетов внутри лежит исходник целиком."""
+    """H. Embedded files: PDF/A-3 and e-invoices carry the whole source inside."""
     names = _get(pdf.Root, "/Names")
     if names is None:
         return
@@ -973,24 +992,23 @@ def _sec_attachments(pdf, report, ctx):
         try:
             _one_filespec(spec, "/Names /EmbeddedFiles", report, label)
         except Exception as exc:
-            report.err("Вложение %s не читается: %s" % (label, exc))
+            report.err(tr("Attachment %s can't be read: %s") % (label, exc))
     if found:
         report.signal("hazard",
-                      "В PDF вложено файлов: %d. Вложение -- это отдельный документ со своими "
-                      "метаданными, инспекция PDF его метаданные не вскрывает" % len(found),
+                      tr("Files embedded in the PDF: %d. An attachment is a separate document "
+                         "with its own metadata; PDF inspection doesn't open its metadata") % len(found),
                       "high")
     ctx["attachments"] = len(found)
 
 
 def _walk_name_tree(node, out, report, depth, _seen=None, _budget=None):
-    """Обход дерева имён (/EmbeddedFiles, /JavaScript). Глубина ограничена, но
-    этого недостаточно: /Kids может много раз ссылаться на ОДИН И ТОТ ЖЕ
-    индиректный объект (шаред-ссылки вместо отдельных узлов), и тогда без
-    защиты обход раздувается экспоненциально (branching^depth вызовов) на
-    файле в несколько объектов -- классическая DAG-бомба. Поэтому вдобавок к
-    глубине: не заходим повторно в уже посещённый объект (_seen по objgen) и
-    жёстко ограничиваем суммарное число вызовов (_budget), а не только число
-    найденных записей."""
+    """Walk a name tree (/EmbeddedFiles, /JavaScript). Depth is bounded, but
+    that's not enough: /Kids can reference THE SAME indirect object many times
+    (shared references instead of separate nodes), and without protection the
+    walk blows up exponentially (branching^depth calls) on a file of a few
+    objects: the classic DAG bomb. So on top of depth: an already visited
+    object isn't entered again (_seen by objgen), and the total number of
+    calls is hard-capped (_budget), not just the number of entries found."""
     if _seen is None:
         _seen = set()
     if _budget is None:
@@ -1017,17 +1035,17 @@ def _walk_name_tree(node, out, report, depth, _seen=None, _budget=None):
             for kid in list(kids)[:64]:
                 _walk_name_tree(kid, out, report, depth + 1, _seen, _budget)
     except Exception as exc:
-        report.err("Дерево имён вложений не читается: %s" % exc)
+        report.err(tr("The attachments name tree can't be read: %s") % exc)
 
 
 def _one_filespec(spec, where, report, label=""):
     fname = _s(_get(spec, "/UF")) or _s(_get(spec, "/F")) or label
-    report.add(Risk.IDENTITY, where, "Вложенный файл", fname,
-               note="Имя вложения. Само вложение -- полноценный документ со своими метаданными "
-                    "(у PDF/A-3 и электронных счетов внутри лежит исходный XML/xlsx целиком).")
+    report.add(Risk.IDENTITY, where, tr("Embedded file"), fname,
+               note=tr("Attachment name. The attachment itself is a full document with its own "
+                       "metadata (PDF/A-3 and e-invoices carry the whole source XML/xlsx inside)."))
     desc = _s(_get(spec, "/Desc"))
     if desc:
-        report.add(Risk.PROVENANCE, where, "Описание вложения «%s»" % fname, desc)
+        report.add(Risk.PROVENANCE, where, tr("Attachment description \"%s\"") % fname, desc)
     ef = _get(spec, "/EF")
     if ef is None:
         return
@@ -1037,21 +1055,21 @@ def _one_filespec(spec, where, report, label=""):
     params = _get(stream, "/Params")
     if params is None:
         return
-    for key, lbl, risk in (("/Size", "Размер вложения", Risk.PROVENANCE),
-                           ("/CreationDate", "Дата создания вложения", Risk.PROVENANCE),
-                           ("/ModDate", "Дата изменения вложения", Risk.PROVENANCE),
-                           ("/CheckSum", "Контрольная сумма вложения", Risk.PROVENANCE)):
+    for key, lbl, risk in (("/Size", tr("Attachment size"), Risk.PROVENANCE),
+                           ("/CreationDate", tr("Attachment creation date"), Risk.PROVENANCE),
+                           ("/ModDate", tr("Attachment modification date"), Risk.PROVENANCE),
+                           ("/CheckSum", tr("Attachment checksum"), Risk.PROVENANCE)):
         raw = _s(_get(params, key))
         if not raw:
             continue
         if key.endswith("Date"):
             human = _pdf_date(raw)
-            raw = "%s   (оригинал: %s)" % (human, raw) if human else raw
+            raw = tr("%s   (original: %s)") % (human, raw) if human else raw
         report.add(risk, where, "%s «%s»" % (lbl, fname), raw)
 
 
 def _sec_active(pdf, report, ctx):
-    """И. Активное содержимое: JS, автодействия, запуск программ, внешние ссылки."""
+    """I. Active content: JS, auto-actions, launching programs, external links."""
     hazards = 0
     names = _get(pdf.Root, "/Names")
     if names is not None and _get(names, "/JavaScript") is not None:
@@ -1059,30 +1077,30 @@ def _sec_active(pdf, report, ctx):
         _walk_name_tree(_get(names, "/JavaScript"), js, report, 0)
         for label, entry in js[:50]:
             body = _get(entry, "/JS")
-            report.add(Risk.ENVIRONMENT, "/Names /JavaScript", "Скрипт уровня документа «%s»" % label,
-                       _stream_text(body) or "есть",
-                       note="JavaScript выполняется при открытии файла. Код часто содержит имена "
-                            "полей, адреса серверов и внутренние идентификаторы системы.")
+            report.add(Risk.ENVIRONMENT, "/Names /JavaScript", tr("Document-level script \"%s\"") % label,
+                       _stream_text(body) or tr("present"),
+                       note=tr("JavaScript runs when the file is opened. The code often contains "
+                               "field names, server addresses and internal system identifiers."))
             hazards += 1
         if js:
-            report.signal("hazard", "В документе %d JavaScript-скрипт(ов) уровня документа" % len(js), "high")
+            report.signal("hazard", tr("The document has %d document-level JavaScript script(s)") % len(js), "high")
 
     if _get(pdf.Root, "/OpenAction") is not None:
         oa = _get(pdf.Root, "/OpenAction")
-        report.add(Risk.ENVIRONMENT, "/OpenAction", "Действие при открытии", _s(oa)[:400],
-                   note="Что файл делает сам, как только его открыли.")
+        report.add(Risk.ENVIRONMENT, "/OpenAction", tr("Open action"), _s(oa)[:400],
+                   note=tr("What the file does by itself as soon as it's opened."))
         hazards += 1
     if _get(pdf.Root, "/AA") is not None:
-        report.add(Risk.ENVIRONMENT, "/AA", "Дополнительные действия документа", _s(_get(pdf.Root, "/AA"))[:400],
-                   note="Обработчики событий документа (печать, сохранение, закрытие).")
+        report.add(Risk.ENVIRONMENT, "/AA", tr("Additional document actions"), _s(_get(pdf.Root, "/AA"))[:400],
+                   note=tr("Document event handlers (print, save, close)."))
         hazards += 1
 
     for idx, page in _pages(pdf, report):
         try:
             if _get(page, "/AA") is not None:
-                report.add(Risk.ENVIRONMENT, "стр. %d /AA" % (idx + 1), "Действия страницы",
+                report.add(Risk.ENVIRONMENT, tr("p. %d /AA") % (idx + 1), tr("Page actions"),
                            _s(_get(page, "/AA"))[:400],
-                           note="Скрипты, срабатывающие при открытии/закрытии страницы.")
+                           note=tr("Scripts that fire when a page is opened/closed."))
                 hazards += 1
             annots = _get(page, "/Annots")
             if annots is None:
@@ -1093,32 +1111,35 @@ def _sec_active(pdf, report, ctx):
                     continue
                 stype = _s(_get(act, "/S"))
                 if stype == "/Launch":
-                    report.add(Risk.ENVIRONMENT, "стр. %d /Annots /A" % (idx + 1),
-                               "Запуск внешней программы /Launch", _s(_get(act, "/F")) or _s(act)[:300],
-                               note="Аннотация пытается запустить программу или открыть файл по "
-                                    "локальному пути -- путь выдаёт машину автора.")
+                    report.add(Risk.ENVIRONMENT, tr("p. %d /Annots /A") % (idx + 1),
+                               tr("Launch external program /Launch"), _s(_get(act, "/F")) or _s(act)[:300],
+                               note=tr("The annotation tries to launch a program or open a file "
+                                       "by a local path: the path reveals the author's machine."))
                     hazards += 1
                 elif stype == "/URI":
                     uri = _s(_get(act, "/URI"))
                     risk = Risk.ENVIRONMENT if _looks_like_path(uri) else Risk.PROVENANCE
-                    report.add(risk, "стр. %d /Annots /A" % (idx + 1), "Ссылка /URI", uri,
-                               note="Внешняя ссылка. file:// и UNC-пути выдают внутреннюю сеть; "
-                                    "трекинговые ссылки выдают корпоративные системы.")
+                    report.add(risk, tr("p. %d /Annots /A") % (idx + 1), tr("/URI link"), uri,
+                               note=tr("An external link. file:// and UNC paths reveal the "
+                                       "internal network; tracking links reveal corporate "
+                                       "systems."))
                 elif stype in ("/JavaScript", "/SubmitForm", "/ImportData"):
-                    report.add(Risk.ENVIRONMENT, "стр. %d /Annots /A" % (idx + 1),
-                               "Действие %s" % stype, _s(act)[:300],
-                               note="Активное действие в аннотации: отправка данных или исполнение кода.")
+                    report.add(Risk.ENVIRONMENT, tr("p. %d /Annots /A") % (idx + 1),
+                               tr("Action %s") % stype, _s(act)[:300],
+                               note=tr("An active action in an annotation: submitting data or "
+                                       "executing code."))
                     hazards += 1
         except Exception as exc:
-            report.err("Стр. %d: активное содержимое не читается: %s" % (idx + 1, exc))
+            report.err(tr("Page %d: active content can't be read: %s") % (idx + 1, exc))
 
     if hazards:
-        report.signal("hazard", "Активное содержимое в PDF: %d объект(ов) (JS/OpenAction/AA/Launch)" % hazards,
+        report.signal("hazard", tr("Active content in the PDF: %d object(s) "
+                                   "(JS/OpenAction/AA/Launch)") % hazards,
                       "high")
 
 
 def _sec_layers(pdf, report, ctx):
-    """Л. Скрытые слои: выключенный слой может содержать невидимый текст."""
+    """L. Hidden layers: a layer that's turned off may contain invisible text."""
     ocp = _get(pdf.Root, "/OCProperties")
     if ocp is None:
         return
@@ -1130,46 +1151,47 @@ def _sec_layers(pdf, report, ctx):
             except Exception:
                 pass
     except Exception as exc:
-        report.err("/OCProperties /OCGs не читается: %s" % exc)
+        report.err(tr("/OCProperties /OCGs can't be read: %s") % exc)
     for key, name in groups.items():
-        report.add(Risk.PROVENANCE, "/OCProperties", "Слой (optional content)", name or "без имени",
-                   note="Именованный слой. Имена слоёв часто выдают внутренние названия версий, "
-                        "заказчиков и черновиков («Draft», «Клиент А», «Правки юриста»).")
+        report.add(Risk.PROVENANCE, "/OCProperties", tr("Layer (optional content)"), name or tr("unnamed"),
+                   note=tr("A named layer. Layer names often reveal internal version names, "
+                           "clients and drafts (\"Draft\", \"Client A\", \"Lawyer's edits\")."))
     d = _get(ocp, "/D")
     if d is None:
         return
     try:
         off = list(_get(d, "/OFF") or [])
     except Exception as exc:
-        report.err("/OCProperties /D /OFF не читается: %s" % exc)
+        report.err(tr("/OCProperties /D /OFF can't be read: %s") % exc)
         return
     for g in off[:MAX_OCGS]:
         try:
             name = groups.get(g.objgen) or _s(_get(g, "/Name"))
         except Exception:
-            name = "без имени"
-        report.add(Risk.IDENTITY, "/OCProperties /D /OFF", "ВЫКЛЮЧЕННЫЙ слой", name or "без имени",
-                   note="Слой выключен по умолчанию: его содержимое ЕСТЬ в файле, но не отображается. "
-                        "Так прячут черновики, комментарии и служебные пометки -- включается одним "
-                        "кликом в любом просмотрщике.")
+            name = tr("unnamed")
+        report.add(Risk.IDENTITY, "/OCProperties /D /OFF", tr("Layer TURNED OFF"), name or tr("unnamed"),
+                   note=tr("The layer is off by default: its content IS in the file but isn't "
+                           "displayed. That's how drafts, comments and service notes get hidden; "
+                           "one click in any viewer turns it on."))
     if off:
-        report.signal("hazard", "В PDF %d выключенных слоёв: скрытое содержимое включается одним кликом" % len(off),
+        report.signal("hazard", tr("The PDF has %d layers turned off: the hidden content is one "
+                                   "click away") % len(off),
                       "high")
 
 
-MAX_RES_NODES = 3000   # словарей /Resources, которые обходим вглубь (на весь файл)
-MAX_RES_DEPTH = 12     # вложенность Form XObject в Form XObject
+MAX_RES_NODES = 3000   # /Resources dictionaries we walk recursively (for the whole file)
+MAX_RES_DEPTH = 12     # Form XObject nesting inside Form XObject
 
 
 def _page_resources(page, report, idx, budget, seen):
-    """Все словари /Resources страницы: свои, вложенных Form XObject и
-    тайловых /Pattern, внешних видов аннотаций (/AP). Шрифт, использованный
-    только в форме или в штампе, на странице не объявлен -- без обхода вглубь
-    список шрифтов неполон по построению.
+    """All /Resources dictionaries of a page: its own, those of nested Form
+    XObjects and tiling /Patterns, and annotation appearances (/AP). A font used
+    only in a form or a stamp isn't declared on the page, so without a deep
+    walk the font list is incomplete by construction.
 
-    budget -- [остаток узлов] на весь файл, seen -- уже обойдённые объекты
-    (общие формы встречаются на каждой странице, и цикл в битом файле не
-    должен зациклить разбор)."""
+    budget is [remaining nodes] for the whole file, seen holds already visited
+    objects (shared forms appear on every page, and a cycle in a broken file
+    must not loop the parser)."""
     stack = [(_get(page, "/Resources"), 0)]
     try:
         for annot in list(_get(page, "/Annots") or [])[:MAX_ANNOTS]:
@@ -1186,14 +1208,14 @@ def _page_resources(page, report, idx, budget, seen):
                     for k in list(view.keys())[:20]:
                         stack.append((_get(view[k], "/Resources"), 1))
     except Exception as exc:
-        report.err("Стр. %d: внешний вид аннотаций (/AP) не читается: %s" % (idx + 1, exc))
+        report.err(tr("Page %d: annotation appearance (/AP) can't be read: %s") % (idx + 1, exc))
     while stack and budget[0] > 0:
         res, depth = stack.pop()
         if res is None or depth > MAX_RES_DEPTH:
             continue
-        # Цикл возможен только через косвенные ссылки, поэтому помним только их.
-        # id() прямых объектов не годится: pikepdf создаёт обёртку на каждое
-        # обращение, и id освобождённой обёртки достаётся следующей.
+        # A cycle is only possible through indirect references, so only those are
+        # remembered. id() of direct objects won't do: pikepdf creates a wrapper on
+        # every access, and a freed wrapper's id goes to the next one.
         try:
             key = res.objgen if res.is_indirect else None
         except Exception:
@@ -1212,15 +1234,15 @@ def _page_resources(page, report, idx, budget, seen):
                 for k in list(group.keys())[:200]:
                     obj = group[k]
                     if sub == "/XObject" and _s(_get(obj, "/Subtype")) != "/Form":
-                        continue  # картинки ресурсов не несут
+                        continue  # images carry no resources
                     stack.append((_get(obj, "/Resources"), depth + 1))
             except Exception as exc:
-                report.err("Стр. %d: %s не читается: %s" % (idx + 1, sub, exc))
+                report.err(tr("Page %d: %s can't be read: %s") % (idx + 1, sub, exc))
 
 
 def _sec_fonts(pdf, report, ctx):
-    """М. Шрифты: сабсеты и гарнитуры, датирующие документ. Включая шрифты
-    вложенных форм, узоров и внешних видов аннотаций."""
+    """M. Fonts: subsets and typefaces that date the document. Includes fonts of
+    nested forms, patterns and annotation appearances."""
     seen = {}
     budget, visited = [MAX_RES_NODES], set()
     for idx, page in _pages(pdf, report):
@@ -1236,9 +1258,9 @@ def _sec_fonts(pdf, report, ctx):
                     if base:
                         seen.setdefault(base, idx + 1)
         except Exception as exc:
-            report.err("Стр. %d: /Resources /Font не читается: %s" % (idx + 1, exc))
+            report.err(tr("Page %d: /Resources /Font can't be read: %s") % (idx + 1, exc))
     if budget[0] <= 0:
-        report.err("Ресурсов больше %d: шрифты вложенных форм разобраны не все." % MAX_RES_NODES)
+        report.err(tr("More than %d resources: not all fonts of nested forms were parsed.") % MAX_RES_NODES)
     ctx["fonts"] = set(seen)
     if not seen:
         return
@@ -1248,32 +1270,33 @@ def _sec_fonts(pdf, report, ctx):
         m = _SUBSET.match(clean)
         if m:
             subsets.append(m.group(1))
-            report.add(Risk.PROVENANCE, "/Resources /Font", "Шрифт (сабсет)", clean,
-                       note="Префикс %s -- метка подмножества глифов. Префиксы генерируются "
-                            "детерминированно конкретным продюсером и совпадают у файлов, "
-                            "собранных одной установкой." % m.group(1))
+            report.add(Risk.PROVENANCE, "/Resources /Font", tr("Font (subset)"), clean,
+                       note=tr("The %s prefix tags a glyph subset. Prefixes are generated "
+                               "deterministically by a specific producer and match across files "
+                               "built by the same installation.") % m.group(1))
         else:
-            report.add(Risk.PROVENANCE, "/Resources /Font", "Шрифт", clean)
+            report.add(Risk.PROVENANCE, "/Resources /Font", tr("Font"), clean)
         low = clean.split("+")[-1].lower()
         for marker, note in _FONT_ERA:
             if low.startswith(marker):
-                report.add(Risk.PROVENANCE, "/Resources /Font", "Шрифт, датирующий документ", clean,
+                note = tr(note)
+                report.add(Risk.PROVENANCE, "/Resources /Font", tr("Font that dates the document"), clean,
                            note=note)
-                # kind="dating", а НЕ "producer": шрифт датирует документ, но
-                # не является приложением, которым он сделан. С "producer"
-                # сводка выдавала «PDF, сделан через Calibri» -- бессмыслица.
+                # kind="dating", NOT "producer": a font dates the document but
+                # isn't the application that made it. With "producer" the summary
+                # said "PDF, made with Calibri", which is nonsense.
                 report.signal("dating", note, "medium")
                 ctx.setdefault("era_fonts", []).append((marker, clean))
                 break
     if subsets:
-        report.add(Risk.PROVENANCE, "/Resources /Font", "Префиксы сабсетов",
+        report.add(Risk.PROVENANCE, "/Resources /Font", tr("Subset prefixes"),
                    ", ".join(sorted(set(subsets))[:40]),
-                   note="Набор префиксов сабсетов -- устойчивый отпечаток связки «продюсер + "
-                        "набор шрифтов»: совпадение у двух файлов указывает на общий источник.")
+                   note=tr("The set of subset prefixes is a stable fingerprint of a \"producer + "
+                           "font set\" pair: a match between two files points to a common source."))
 
 
 def _sec_pieceinfo(pdf, report, ctx):
-    """Н. /PieceInfo -- приватные данные приложения, иногда с исходником внутри."""
+    """N. /PieceInfo: an application's private data, sometimes with the source inside."""
     def dump(holder, where):
         pi = _get(holder, "/PieceInfo")
         if pi is None:
@@ -1281,7 +1304,7 @@ def _sec_pieceinfo(pdf, report, ctx):
         try:
             apps = list(pi.keys())
         except Exception as exc:
-            report.err("%s /PieceInfo не читается: %s" % (where, exc))
+            report.err(tr("%s /PieceInfo can't be read: %s") % (where, exc))
             return
         for app in apps[:50]:
             entry = _get(pi, app)
@@ -1290,21 +1313,22 @@ def _sec_pieceinfo(pdf, report, ctx):
             value = app.lstrip("/")
             if last:
                 value += "  (LastModified: %s)" % (human or last)
-            report.add(Risk.PROVENANCE, "%s /PieceInfo" % where, "Приватные данные приложения", value,
-                       note="Приложение (Acrobat, Distiller, Illustrator, InDesign) хранит тут свои "
-                            "служебные данные -- вплоть до редактируемого исходника документа. "
-                            "Наличие ключа однозначно называет приложение, которым файл правили.")
+            report.add(Risk.PROVENANCE, "%s /PieceInfo" % where, tr("Application private data"), value,
+                       note=tr("The application (Acrobat, Distiller, Illustrator, InDesign) "
+                               "stores its service data here, up to an editable source of the "
+                               "document. The key's presence unambiguously names the application "
+                               "the file was edited with."))
 
     dump(pdf.Root, "/Root")
     for idx, page in _pages(pdf, report):
         try:
-            dump(page, "стр. %d" % (idx + 1))
+            dump(page, tr("p. %d") % (idx + 1))
         except Exception as exc:
-            report.err("Стр. %d: /PieceInfo не читается: %s" % (idx + 1, exc))
+            report.err(tr("Page %d: /PieceInfo can't be read: %s") % (idx + 1, exc))
 
 
 def is_jpeg_image(obj) -> bool:
-    """Картинка, чей поток -- JPEG-файл целиком (единственный фильтр /DCTDecode)."""
+    """An image whose stream is a whole JPEG file (a single /DCTDecode filter)."""
     if not isinstance(obj, pikepdf.Stream) or _s(_get(obj, "/Subtype")) != "/Image":
         return False
     flt = _get(obj, "/Filter")
@@ -1314,55 +1338,57 @@ def is_jpeg_image(obj) -> bool:
 
 
 def _sec_images(pdf, report, ctx):
-    """Н2. Картинки-JPEG внутри PDF: поток /DCTDecode -- это JPEG-файл байт в байт,
-    со всем его EXIF (GPS, серийник камеры, дата съёмки). img2pdf и сканер-приложения
-    кладут фото без перекодирования. Метаданные документа этого не касаются."""
-    from .insp_image import _jpeg, _signals   # разбор JPEG из инспектора картинок
+    """N2. JPEG images inside a PDF: a /DCTDecode stream is a JPEG file byte for
+    byte, with all its EXIF (GPS, camera serial, capture date). img2pdf and
+    scanner apps embed photos without re-encoding. Document metadata has
+    nothing to do with it."""
+    from .insp_image import _jpeg, _signals   # JPEG parsing from the image inspector
     n = 0
     for obj in pdf.objects:
         if not is_jpeg_image(obj):
             continue
         n += 1
         if n > MAX_IMAGES:
-            report.err("Картинок-JPEG больше %d: остальные не разобраны." % MAX_IMAGES)
+            report.err(tr("More than %d JPEG images; the rest were not parsed.") % MAX_IMAGES)
             return
         try:
             data = obj.read_raw_bytes()
             if len(data) > MAX_STREAM:
-                report.err("Картинка (объект %d) больше %d МБ: не разобрана." % (obj.objgen[0], MAX_STREAM >> 20))
+                report.err(tr("Image (object %d) is larger than %d MB: not parsed.") % (obj.objgen[0], MAX_STREAM >> 20))
                 continue
             sub, sctx = Report(path="", fmt="pdf-image"), {}
             _jpeg(sub, data, sctx)
             _signals(sub, sctx)
         except Exception as exc:
-            report.err("Картинка (объект %d): %s: %s" % (obj.objgen[0], type(exc).__name__, exc))
+            report.err(tr("Image (object %d): %s: %s") % (obj.objgen[0], type(exc).__name__, exc))
             continue
-        where = "картинка (объект %d) " % obj.objgen[0]
+        where = tr("image (object %d) ") % obj.objgen[0]
         for f in sub.findings:
-            if f.risk is not Risk.STRUCTURAL:   # карта сегментов, JFIF, ICC -- шум для PDF
+            if f.risk is not Risk.STRUCTURAL:   # segment map, JFIF, ICC: noise for a PDF
                 report.add(f.risk, where + f.location, f.label, f.value, f.note, f.removable)
         for s in sub.signals:
-            report.signal(s.kind, "картинка внутри PDF: " + s.detail, s.confidence)
+            report.signal(s.kind, tr("image inside the PDF: ") + s.detail, s.confidence)
 
 
 def _sec_structural(pdf, report, ctx):
-    """О. Структурное: при чистке обычно СОХРАНЯЕМ."""
+    """O. Structural: usually KEPT when cleaning."""
     root = pdf.Root
     checks = (
-        ("/StructTreeRoot", "Дерево структуры (тегированный PDF)",
-         "Теги доступности: без них скринридер не читает документ. При чистке сохраняем."),
-        ("/MarkInfo", "/MarkInfo (пометка о тегировании)",
-         "Объявление, что PDF тегированный. Сохраняем вместе с /StructTreeRoot."),
-        ("/Outlines", "Оглавление (закладки)",
-         "Навигация по документу. Сохраняем, но заголовки разделов сами по себе могут "
-         "выдавать внутреннюю структуру проекта."),
-        ("/PageLabels", "Нумерация страниц (/PageLabels)",
-         "Пользовательская нумерация (i, ii, 1, 2...). Сохраняем."),
-        ("/ViewerPreferences", "Настройки просмотрщика",
-         "Как открывать документ. Безобидно, сохраняем."),
-        ("/OutputIntents", "Цветовой профиль (/OutputIntents, ICC)",
-         "ICC-профиль печати. Сохраняем: без него ломается цветопередача. Имя профиля при этом "
-         "иногда называет типографию."),
+        ("/StructTreeRoot", tr("Structure tree (tagged PDF)"),
+         tr("Accessibility tags: without them a screen reader can't read the document. Kept when "
+            "cleaning.")),
+        ("/MarkInfo", tr("/MarkInfo (tagging declaration)"),
+         tr("Declares that the PDF is tagged. Kept together with /StructTreeRoot.")),
+        ("/Outlines", tr("Outline (bookmarks)"),
+         tr("Document navigation. Kept, but section headings by themselves may reveal the "
+            "internal structure of a project.")),
+        ("/PageLabels", tr("Page numbering (/PageLabels)"),
+         tr("Custom numbering (i, ii, 1, 2...). Kept.")),
+        ("/ViewerPreferences", tr("Viewer preferences"),
+         tr("How to open the document. Harmless, kept.")),
+        ("/OutputIntents", tr("Color profile (/OutputIntents, ICC)"),
+         tr("Print ICC profile. Kept: without it color rendering breaks. The profile name "
+            "sometimes names the print shop, though.")),
     )
     has_struct = False
     for key, label, note in checks:
@@ -1371,14 +1397,15 @@ def _sec_structural(pdf, report, ctx):
         if _get(root, key) is not None:
             if key == "/StructTreeRoot":
                 has_struct = True
-            report.add(Risk.STRUCTURAL, "/Root", label, "есть", note=note)
+            report.add(Risk.STRUCTURAL, "/Root", label, tr("present"), note=note)
     ctx["struct_tree"] = has_struct
 
     lang = _s(_get(root, "/Lang"))
     if lang:
-        report.add(Risk.STRUCTURAL, "/Root", "Язык документа /Lang", lang,
-                   note="Язык нужен скринридерам и переносам -- сохраняем. Но сам по себе он "
-                        "выдаёт языковые настройки машины автора (ru-RU, en-GB).")
+        report.add(Risk.STRUCTURAL, "/Root", tr("Document language /Lang"), lang,
+                   note=tr("Screen readers and hyphenation need the language, so it's kept. But "
+                           "by itself it reveals the language settings of the author's machine "
+                           "(ru-RU, en-GB)."))
 
     try:
         page = pdf.pages[0]
@@ -1392,20 +1419,21 @@ def _sec_structural(pdf, report, ctx):
                 if (abs(w - pw) < 3 and abs(h - ph) < 3) or (abs(w - ph) < 3 and abs(h - pw) < 3):
                     name = pname
                     break
-            report.add(Risk.STRUCTURAL, "стр. 1 /MediaBox", "Формат страницы",
-                       "%.1f x %.1f мм%s" % (w, h, "  -> %s" % name if name else ""),
-                       note="Формат бумаги выдаёт страну: Letter -- США/Канада, A4 -- всё остальное. "
-                            "Это работает, даже если все даты и имена вычищены.")
-            if "США" in name:
-                # Формат бумаги -- геолокация, не продюсер.
-                report.signal("dating", "Формат бумаги %s -- документ готовили под "
-                                        "североамериканский стандарт" % name, "medium")
+            report.add(Risk.STRUCTURAL, tr("p. 1 /MediaBox"), tr("Page size"),
+                       tr("%.1f x %.1f mm%s") % (w, h, "  -> %s" % tr(name) if name else ""),
+                       note=tr("Paper size gives away the country: Letter means US/Canada, A4 "
+                               "everywhere else. This works even if every date and name has been "
+                               "removed."))
+            if "US" in name:
+                # Paper size is geolocation, not a producer.
+                report.signal("dating", tr("Paper size %s: the document was prepared for the "
+                                           "North American standard") % tr(name), "medium")
     except Exception as exc:
-        report.err("/MediaBox первой страницы не читается: %s" % exc)
+        report.err(tr("/MediaBox of the first page can't be read: %s") % exc)
 
 
 def _sec_overview(pdf, report, ctx):
-    """П. Общая структура файла."""
+    """P. Overall file structure."""
     try:
         npages = len(pdf.pages)
     except Exception:
@@ -1420,29 +1448,29 @@ def _sec_overview(pdf, report, ctx):
     except Exception:
         lin = ctx.get("raw_linearized", False)
     ctx["linearized"] = lin
-    report.add(Risk.PROVENANCE, "структура", "Страниц / объектов",
+    report.add(Risk.PROVENANCE, tr("structure"), tr("Pages / objects"),
                "%d / %d" % (npages, nobj),
-               note="Число объектов относительно числа страниц -- грубый отпечаток продюсера: "
-                    "генераторы дают предсказуемо мало объектов на страницу.")
-    report.add(Risk.PROVENANCE, "структура", "Линеаризован (fast web view)",
-               "да" if lin else "нет",
-               note="Линеаризация -- признак сохранения через Acrobat или явного qpdf --linearize. "
-                    "Заодно она выбрасывает все инкрементальные ревизии.")
+               note=tr("The number of objects relative to pages is a rough producer fingerprint: "
+                       "generators produce predictably few objects per page."))
+    report.add(Risk.PROVENANCE, tr("structure"), tr("Linearized (fast web view)"),
+               tr("yes") if lin else tr("no"),
+               note=tr("Linearization is a sign of saving through Acrobat or an explicit qpdf "
+                       "--linearize. It also drops all incremental revisions."))
     try:
-        report.add(Risk.PROVENANCE, "структура", "Версия PDF (по разбору)", str(pdf.pdf_version),
-                   note="Версия, которую видит QPDF. Расхождение с заголовком %%PDF- означает, что "
-                        "файл переписывали.")
+        report.add(Risk.PROVENANCE, tr("structure"), tr("PDF version (as parsed)"), str(pdf.pdf_version),
+                   note=tr("The version QPDF sees. A mismatch with the %%PDF- header means the "
+                           "file was rewritten."))
         if ctx.get("header_version") and str(pdf.pdf_version) != ctx["header_version"]:
             report.signal("inconsistent",
-                          "Версия в заголовке (%s) не совпадает с версией по разбору (%s): файл "
-                          "переписывали сторонним инструментом" % (ctx["header_version"], pdf.pdf_version),
+                          tr("The header version (%s) doesn't match the parsed version (%s): the "
+                             "file was rewritten by a third-party tool") % (ctx["header_version"], pdf.pdf_version),
                           "medium")
     except Exception as exc:
-        report.err("Версия PDF не читается: %s" % exc)
+        report.err(tr("PDF version can't be read: %s") % exc)
 
 
 def _sec_signals(pdf, report, ctx):
-    """Р. Выводы: чем сделан файл и где метаданные противоречат сами себе."""
+    """R. Signals: what produced the file and where the metadata contradicts itself."""
     info = ctx.get("info", {})
     xmp = ctx.get("xmp", {})
     creator = info.get("/Creator", "") or xmp.get("xmp:CreatorTool", "")
@@ -1454,72 +1482,78 @@ def _sec_signals(pdf, report, ctx):
         m = rx.search(blob)
         if not m:
             continue
-        detail = human
+        detail = tr(human)
         if "Skia" in rx.pattern:
             ms = re.search(r"Skia/PDF\s*m(\d+)", blob, re.I)
             if ms:
-                detail += " -- майлстоун Chrome %s" % ms.group(1)
+                detail += tr(" -- Chrome milestone %s") % ms.group(1)
         named.append((detail, is_lib))
         report.signal("producer", "%s (Creator=%r, Producer=%r)" % (detail, creator, producer), "high")
         if is_lib:
-            report.signal("ai", "Файл сгенерирован программно, а не «напечатан» человеком из "
-                                "редактора: %s. Для документа, который выдают за офисный, это "
-                                "само по себе аномалия." % detail, "high")
+            report.signal("ai", tr("The file was generated programmatically, not \"printed\" by "
+                                   "a person from an editor: %s. For a document presented as an "
+                                   "office one, that alone is an anomaly.") % detail, "high")
 
     if not named and (creator or producer):
-        report.signal("producer", "Продюсер не опознан по базе отпечатков: Creator=%r, Producer=%r"
+        report.signal("producer", tr("Producer not recognized by the fingerprint database: "
+                                     "Creator=%r, Producer=%r")
                       % (creator, producer), "low")
     if not creator and not producer:
-        report.signal("scrubbed", "Ни /Creator, ни /Producer не заполнены: так не делает ни один "
-                                  "известный продюсер -- файл почти наверняка уже чистили", "high")
+        report.signal("scrubbed", tr("Neither /Creator nor /Producer is set: no known producer "
+                                     "does that, so the file has almost certainly been scrubbed "
+                                     "already"), "high")
 
-    # Постобработка поверх офисного приложения.
+    # Post-processing on top of an office application.
     if producer and _REWRITER.search(producer) and creator and _AUTHORING.search(creator):
         report.signal("scrubbed",
-                      "Creator заявляет авторское приложение (%r), а Producer -- служебный "
-                      "переписыватель (%r): файл уже прогоняли через постобработку" % (creator, producer),
+                      tr("Creator claims an authoring application (%r), while Producer is a "
+                         "service rewriter (%r): the file has already been post-processed") % (creator, producer),
                       "high")
 
-    # Word без XMP и без тегов -- так Word не экспортирует.
+    # Word without XMP and without tags: that's not how Word exports.
     word = bool(re.search(r"Microsoft|Word", creator or "", re.I))
     if word and not ctx.get("xmp_present"):
         report.signal("scrubbed",
-                      "Creator = Microsoft Word, но XMP в файле нет. Экспорт Word всегда пишет "
-                      "XMP-пакет -- значит, метаданные уже вычищали", "high")
+                      tr("Creator = Microsoft Word, but there's no XMP in the file. A Word "
+                         "export always writes an XMP packet, so the metadata has already been "
+                         "scrubbed"), "high")
     if word and not ctx.get("struct_tree"):
         report.signal("scrubbed",
-                      "Creator = Microsoft Word, но нет /StructTreeRoot. Word всегда тегирует "
-                      "экспортируемый PDF -- файл переписывали сторонним инструментом", "medium")
+                      tr("Creator = Microsoft Word, but there's no /StructTreeRoot. Word always "
+                         "tags an exported PDF, so the file was rewritten by a third-party tool"), "medium")
 
-    # /Info и XMP должны существовать вместе.
+    # /Info and XMP should exist together.
     if ctx.get("xmp_present") and not ctx.get("info_present"):
-        report.signal("scrubbed", "/Info пуст, а XMP на месте: чистили только словарь /Info, "
-                                  "а XMP забыли -- там всё осталось", "high")
+        report.signal("scrubbed", tr("/Info is empty but XMP is in place: only the /Info "
+                                     "dictionary was cleaned and XMP was forgotten; everything "
+                                     "is still there"), "high")
     if ctx.get("info_present") and not ctx.get("xmp_present"):
-        report.signal("inconsistent", "/Info заполнен, а XMP отсутствует: либо очень старый "
-                                      "продюсер, либо XMP вырезали отдельно", "medium")
+        report.signal("inconsistent", tr("/Info is filled in but XMP is missing: either a very "
+                                         "old producer, or XMP was cut out separately"), "medium")
 
-    # Даты.
+    # Dates.
     c_date = info.get("/CreationDate", "")
     m_date = info.get("/ModDate", "")
     if c_date and m_date:
         if c_date == m_date:
             report.signal("inconsistent",
-                          "CreationDate == ModDate (%s): файл не редактировали после создания -- "
-                          "либо это одноразовая машинная генерация, либо даты переписали скопом"
+                          tr("CreationDate == ModDate (%s): the file wasn't edited after "
+                             "creation; either it's one-off machine generation, or the dates "
+                             "were rewritten wholesale")
                           % (_pdf_date(c_date) or c_date), "low")
         elif m_date < c_date:
             report.signal("inconsistent",
-                          "ModDate (%s) РАНЬШЕ CreationDate (%s): даты правили вручную"
+                          tr("ModDate (%s) is EARLIER than CreationDate (%s): the dates were "
+                             "edited by hand")
                           % (_pdf_date(m_date) or m_date, _pdf_date(c_date) or c_date), "high")
     x_create = xmp.get("xmp:CreateDate", "")
     if c_date and x_create and _pdf_date(c_date)[:10] and x_create[:10] != _pdf_date(c_date)[:10]:
         report.signal("inconsistent",
-                      "Дата создания в /Info (%s) не совпадает с xmp:CreateDate (%s): один из "
-                      "источников правили" % (_pdf_date(c_date), x_create), "high")
+                      tr("The creation date in /Info (%s) doesn't match xmp:CreateDate (%s): one "
+                         "of the sources was edited") % (_pdf_date(c_date), x_create), "high")
 
-    # Шрифт против заявленной даты: Aptos физически не мог попасть в документ
-    # раньше 2023 года, каким бы старым файл себя ни объявлял.
+    # Font vs. declared date: Aptos physically couldn't have gotten into a
+    # document before 2023, however old the file claims to be.
     year = ""
     m_year = re.match(r"D?:?(\d{4})", c_date or "")
     if m_year:
@@ -1528,30 +1562,30 @@ def _sec_signals(pdf, report, ctx):
     if any(m.startswith("aptos") for m in markers) and "calibri" in markers:
         report.signal(
             "inconsistent",
-            "В файле одновременно Calibri и Aptos. Calibri -- окно 2007–2023, "
-            "Aptos -- не раньше 2023. Вместе документ правили уже после появления "
-            "Aptos, поверх более старой основы.",
+            tr("The file has both Calibri and Aptos. Calibri belongs to 2007–2023, Aptos to 2023 "
+               "or later. Together: the document was edited after Aptos appeared, on top of an "
+               "older base."),
             "medium")
     for marker, name in ctx.get("era_fonts", []):
         if marker.startswith("aptos") and year and year < "2023":
             report.signal("inconsistent",
-                          "Заявленная дата создания %s противоречит шрифту %s: Aptos появился "
-                          "только в 2023 году -- дату переписали" % (year, name), "high")
+                          tr("The declared creation date %s contradicts the font %s: Aptos only "
+                             "appeared in 2023, so the date was rewritten") % (year, name), "high")
         if marker == "calibri" and year and year < "2007":
             report.signal("inconsistent",
-                          "Заявленная дата создания %s противоречит шрифту %s: Calibri появился "
-                          "только в 2007 году -- дату переписали" % (year, name), "high")
+                          tr("The declared creation date %s contradicts the font %s: Calibri "
+                             "only appeared in 2007, so the date was rewritten") % (year, name), "high")
 
-    # Автор в одном месте есть, в другом нет.
+    # The author is present in one place but not the other.
     if info.get("/Author") and not xmp.get("dc:creator"):
-        report.signal("inconsistent", "Автор есть в /Info, но dc:creator в XMP пуст", "low")
+        report.signal("inconsistent", tr("The author is in /Info, but dc:creator in XMP is empty"), "low")
     if xmp.get("dc:creator") and not info.get("/Author"):
-        report.signal("scrubbed", "dc:creator в XMP заполнен (%s), а /Author в /Info вычищен: "
-                                  "классическая половинчатая чистка" % xmp["dc:creator"], "high")
+        report.signal("scrubbed", tr("dc:creator in XMP is set (%s), while /Author in /Info is "
+                                     "cleaned out: a classic half-done scrub") % xmp["dc:creator"], "high")
 
 
 def _enrich_exiftool(path, report, ctx):
-    """Необязательное обогащение. Нет exiftool -- молча идём дальше."""
+    """Optional enrichment. No exiftool: quietly move on."""
     exe = shutil.which("exiftool")
     if not exe:
         local = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1564,7 +1598,7 @@ def _enrich_exiftool(path, report, ctx):
                               capture_output=True, timeout=30, shell=False)
         data = json.loads(proc.stdout.decode("utf-8", "replace"))
     except Exception as exc:
-        report.err("exiftool не отработал (не критично): %s" % exc)
+        report.err(tr("exiftool failed (not critical): %s") % exc)
         return
     if not data:
         return
@@ -1583,6 +1617,6 @@ def _enrich_exiftool(path, report, ctx):
             continue
         added += 1
         report.add_nonempty(Risk.PROVENANCE, "exiftool", tag, _s(value),
-                            note="Дополнительно найдено exiftool (необязательное обогащение).")
+                            note=tr("Additionally found by exiftool (optional enrichment)."))
     if added:
-        report.signal("producer", "exiftool добавил %d полей, не покрытых разбором pikepdf" % added, "low")
+        report.signal("producer", tr("exiftool added %d fields not covered by pikepdf parsing") % added, "low")

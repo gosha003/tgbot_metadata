@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Настройки бота.
+"""Bot settings.
 
-Импорт этого модуля НЕ должен требовать токен -- при отсутствии TG_BOT_TOKEN
-TG_BOT_TOKEN просто будет None. Требовать токен (и завершать процесс) имеет
-право только точка входа (bot.main()), а не импорт модуля.
+Importing this module must NOT require a token: without TG_BOT_TOKEN,
+TG_BOT_TOKEN is simply None. Only the entry point (bot.main()) may demand
+the token and exit, not a module import.
 """
 
 from __future__ import annotations
@@ -14,25 +14,25 @@ import sys
 ROOT = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(ROOT, ".env")
 
-# Жёсткий лимит Telegram Bot API на скачивание файла ботом (не наш лимит).
+# Hard Telegram Bot API limit on a bot downloading a file (not our limit).
 MAX_FILE_BYTES = 20 * 1024 * 1024
-# И жёсткий лимит на ОТПРАВКУ файла ботом: результат пакетной чистки крупнее
-# этого уйти в чат не может.
+# And a hard limit on a bot SENDING a file: a batch-cleaning result larger
+# than this can't go to the chat.
 MAX_SEND_BYTES = 50 * 1024 * 1024
 
-# Кому можно пользоваться ботом.
+# Who may use the bot.
 #
-# Раньше пустой список означал «можно всем, кто знает бота», и это расходилось
-# с CLAUDE.md («только для владельца»). Последствия не теоретические: любой,
-# кто нашёл бота, грузил файлы в разбор и в LibreOffice НА МАШИНЕ ВЛАДЕЛЬЦА и
-# мог заставить её ходить в сеть по своему адресу (см. нейтрализацию внешних
-# ссылок в clean_regen). Поэтому умолчание перевёрнуто: НИКОМУ, пока владелец
-# не назвал себя. Бот при этом не молчит, а подсказывает незнакомцу его
-# собственный user_id и что с ним делать.
+# An empty list used to mean "anyone who knows the bot", contradicting the
+# owner-only design. The consequences weren't theoretical: anyone who found
+# the bot could push files through the parsers and LibreOffice ON THE OWNER'S
+# MACHINE and make it fetch an address of their choice (see external-link
+# defusing in clean_regen). So the default is flipped: NOBODY until the owner
+# identifies themselves. The bot doesn't stay silent, though: it tells a
+# stranger their own user_id and what to do with it.
 #
-# Владелец задаётся в .env (или переменной окружения):
+# The owner is set in .env (or an environment variable):
 #     TG_OWNER_ID=123456789
-# Несколько человек -- через запятую:
+# Several people, comma-separated:
 #     TG_ALLOWED_IDS=123456789,987654321
 def _ids(raw) -> list:
     out = []
@@ -50,17 +50,17 @@ def _load_ids() -> list:
     return sorted(set(ids))
 
 
-# Сами значения вычисляются ниже, после определения парсера .env.
+# The values themselves are computed below, after the .env parser.
 
-# Необязательное обогащение через exiftool: сначала PATH, потом локальная
-# копия в ./tools. Отсутствие обоих -- штатный режим, а не ошибка.
+# Optional enrichment via exiftool: PATH first, then a local copy in ./tools.
+# Having neither is normal operation, not an error.
 EXIFTOOL_CANDIDATES = ("exiftool", os.path.join(ROOT, "tools", "exiftool.exe"))
 
 
-#  BOM -> кодировка. Windows PowerShell 5.1 на `>` и `Out-File` пишет UTF-16 LE,
-#  поэтому созданный там .env приезжает не в UTF-8. Читать его как UTF-8 значит
-#  получить UnicodeDecodeError трейсбеком вместо внятного «токен не найден» --
-#  именно так этот проект и спотыкнулся при первом живом запуске.
+#  BOM -> encoding. Windows PowerShell 5.1 writes UTF-16 LE for `>` and
+#  `Out-File`, so a .env created there isn't UTF-8. Reading it as UTF-8 means a
+#  UnicodeDecodeError traceback instead of a clear "token not found", which is
+#  exactly how this project tripped on its first live run.
 _BOMS = (
     (b"\xff\xfe\x00\x00", "utf-32-le"),
     (b"\x00\x00\xfe\xff", "utf-32-be"),
@@ -71,26 +71,26 @@ _BOMS = (
 
 
 def _decode_env(raw: bytes) -> str:
-    """Байты .env -> текст. Кодировку определяем по BOM, иначе пробуем UTF-8,
-    затем UTF-16 без BOM (признак -- NUL-байты), затем cp1251."""
+    """.env bytes -> text. The encoding is detected by BOM, otherwise try UTF-8,
+    then BOM-less UTF-16 (sign: NUL bytes), then cp1251."""
     for bom, enc in _BOMS:
         if raw.startswith(bom):
             return raw.decode(enc, "replace").replace("﻿", "")
     try:
         text = raw.decode("utf-8")
-        # UTF-16 без BOM декодируется как UTF-8 УСПЕШНО: NUL -- валидный
-        # символ UTF-8. На выходе мусор вида 'T\x00G\x00_\x00', и запасной
-        # путь ниже без этой проверки недостижим.
+        # BOM-less UTF-16 decodes as UTF-8 SUCCESSFULLY: NUL is a valid UTF-8
+        # character. The result is garbage like 'T\x00G\x00_\x00', and the
+        # fallback below is unreachable without this check.
         if "\x00" not in text:
             return text
     except UnicodeDecodeError:
         pass
-    # ponytail: берём первую кодировку, которая декодировалась. UTF-16 BE и
-    # UTF-32 БЕЗ BOM так не опознаются (decode как utf-16-le на них не бросает,
-    # а отдаёт мусор), и это осознанно: ни один редактор и ни одна оболочка
-    # такого .env не пишут, а деградация безопасная -- токен просто не найдётся
-    # и пользователь увидит инструкцию, а не трейсбек. Понадобится -- выбирать
-    # по позициям NUL-байтов (чётные/нечётные), а не по первому успеху.
+    # ponytail: take the first encoding that decodes. UTF-16 BE and UTF-32
+    # WITHOUT a BOM aren't recognized this way (decoding them as utf-16-le
+    # doesn't raise, it returns garbage), and that's deliberate: no editor or
+    # shell writes such a .env, and the failure is safe: the token just isn't
+    # found and the user sees instructions, not a traceback. If ever needed,
+    # choose by NUL byte positions (even/odd) instead of the first success.
     if b"\x00" in raw:
         for enc in ("utf-16-le", "utf-16-be"):
             try:
@@ -101,10 +101,10 @@ def _decode_env(raw: bytes) -> str:
 
 
 def _parse_dotenv(path: str) -> dict:
-    """Простой парсер .env: строки KEY=VALUE, без python-dotenv.
+    """Minimal .env parser: KEY=VALUE lines, no python-dotenv.
 
-    Никогда не бросает: нечитаемый или кривой .env -- это пустой словарь и
-    затем честное сообщение про отсутствующий токен, а не трейсбек.
+    Never raises: an unreadable or malformed .env is an empty dict followed
+    by an honest message about the missing token, not a traceback.
     """
     values: dict = {}
     try:
@@ -137,18 +137,18 @@ TG_BOT_TOKEN = _load_token()
 
 ALLOWED_USER_IDS: list[int] = _load_ids()
 
-# Пустой список больше НЕ значит «всем». Если владелец не назвал себя, бот
-# не обслуживает никого: инструмент приватности, открытый по умолчанию,
-# опаснее, чем неудобный.
+# An empty list no longer means "everyone". If the owner hasn't identified
+# themselves, the bot serves nobody: a privacy tool that is open by default
+# is more dangerous than an inconvenient one.
 ACCESS_CONFIGURED: bool = bool(ALLOWED_USER_IDS)
 
 
 def _load_ttl() -> int:
-    """Через сколько минут бот сам удаляет свои отчёты из чата. 0 -- не удалять.
+    """After how many minutes the bot deletes its own reports from the chat. 0 means never.
 
-    Отчёт несёт найденные значения (под спойлером, но текстом на серверах
-    Telegram), поэтому умолчание -- удалять. Удалить своё сообщение бот может
-    только в течение 48 часов, отсюда потолок.
+    A report carries found values (spoilered, but stored as text on Telegram's
+    servers), so the default is to delete. A bot can only delete its own
+    messages within 48 hours, hence the cap.
     """
     raw = os.environ.get("REPORT_TTL_MIN") or _parse_dotenv(ENV_PATH).get("REPORT_TTL_MIN")
     try:
@@ -159,23 +159,39 @@ def _load_ttl() -> int:
 
 REPORT_TTL_MIN: int = _load_ttl()
 
-# Файл-замок: второй экземпляр бота с тем же токеном не запускается. Иначе
-# Telegram раздаёт сообщения то одному, то другому, и ответ приходит от
-# экземпляра со старыми настройками.
+
+def _load_lang() -> str:
+    """Default language of the bot's replies: "ru" (default) or "en".
+
+    Each user can switch with /lang; that choice is stored in LANG_PATH.
+    """
+    raw = os.environ.get("BOT_LANG") or _parse_dotenv(ENV_PATH).get("BOT_LANG") or ""
+    lang = raw.strip().lower()
+    return lang if lang in ("ru", "en") else "ru"
+
+
+BOT_LANG: str = _load_lang()
+
+# Per-user language choice (/lang): local state next to the bot, git-ignored.
+LANG_PATH = os.path.join(ROOT, ".bot_lang.json")
+
+# Lock file: a second bot instance with the same token won't start.
+# Otherwise Telegram hands messages to one instance or the other, and replies
+# come from the one with stale settings.
 LOCK_PATH = os.path.join(ROOT, ".bot.lock")
 
 
 def require_token() -> str:
-    """Вызывается только из точки входа. Без трейсбека объясняет, что делать."""
+    """Called only from the entry point. Explains what to do, without a traceback."""
     if TG_BOT_TOKEN:
         return TG_BOT_TOKEN
     sys.stderr.write(
-        "Не найден TG_BOT_TOKEN.\n\n"
-        "Задайте его одним из способов:\n"
-        "  1) переменная окружения:\n"
+        "TG_BOT_TOKEN not found.\n\n"
+        "Set it in one of these ways:\n"
+        "  1) environment variable:\n"
         "       PowerShell:  $env:TG_BOT_TOKEN = \"123:ABC...\"\n"
         "       Bash:        export TG_BOT_TOKEN=123:ABC...\n"
-        "  2) файл .env в корне проекта ({env}):\n"
+        "  2) a .env file in the project root ({env}):\n"
         "       TG_BOT_TOKEN=123:ABC...\n".format(env=ENV_PATH)
     )
     sys.exit(1)

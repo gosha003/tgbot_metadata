@@ -1,19 +1,19 @@
-"""Чистка RTF на месте: правка control words, без пересборки документа.
+"""In-place RTF cleaning: editing control words without rebuilding the document.
 
-Фаза 2. Вызывает диспетчер core.clean по семейству "rtf". Сам вызывает
-разбор групп из core.insp_legacy (тот же обход скобок, что у инспектора:
-другой разошёлся бы на \\{ и \\u).
+Phase 2. Called by the core.clean dispatcher for the "rtf" family. Uses the
+group parsing from core.insp_legacy (the same brace walk as the inspector;
+a different one would drift on \\{ and \\u).
 
-Публичный API:
+Public API:
     clean_rtf(src, dst, profile, keep, force_signed=False) -> CleanResult
 
-Исключений наружу не бросает. Входной файл не изменяется. При отказе
-выходной файл не создаётся.
+Never raises. The input file is not modified. On refusal no output file is
+created.
 
-STEALTH убирает личность и окружение (автор, организация, шаблон, пути,
-таблицу правок, пользовательские свойства) и оставляет генератор, даты и
-rsid: это правда о файле, а их отсутствие -- след чистки. PARANOID убирает
-и их.
+STEALTH removes identity and environment (author, company, template, paths,
+revision table, custom properties) and keeps generator, dates and rsid:
+they're the truth about the file, and their absence is a cleaning trace.
+PARANOID removes those too.
 """
 
 from __future__ import annotations
@@ -31,13 +31,14 @@ from core.insp_legacy import (
     _rtf_plain,
     _subgroups,
 )
+from core.i18n import tr
 
 __all__ = ["clean_rtf"]
 
 _MAX = 32 * 1024 * 1024
 
-# Группы внутри \info. Личность и окружение -- всегда; провенанс -- только
-# PARANOID, иначе файл без заголовка и дат сам выглядит обработанным.
+# Groups inside \info. Identity and environment always; provenance only in
+# PARANOID, otherwise a file without a title and dates looks processed by itself.
 _LEAK = frozenset(("author", "operator", "company", "manager", "hlinkbase"))
 _PROV = frozenset(("title", "subject", "keywords", "category", "doccomm",
                    "comment", "creatim", "revtim", "printim", "buptim"))
@@ -82,7 +83,7 @@ def _balanced(text) -> bool:
 
 
 def _find(text, dest):
-    """Первая группа {\\dest или {\\*\\dest. Возврат (start, end) включая скобки."""
+    """First {\\dest or {\\*\\dest group. Returns (start, end) including braces."""
     m = re.search(r"\{\\\*?\\?%s(?![a-zA-Z])" % dest, text)
     if not m:
         return None
@@ -91,11 +92,11 @@ def _find(text, dest):
 
 
 def _blank_span(text, start, end):
-    """{\\word содержимое} -> {\\word}. Содержимое -- всё после управляющего слова."""
+    """{\\word content} -> {\\word}. The content is everything after the control word."""
     inner = text[start + 1:end - 1]
-    # {\*\template ...} -- это «\*\» плюс «template», а не «\*\» плюс «\template».
-    # Второй вариант жадный шаблон съедает обратный слэш самого слова и не
-    # совпадает: проверено на {\*\generator ...}.
+    # {\*\template ...} is "\*\" plus "template", not "\*\" plus "\template".
+    # With the second variant the greedy pattern eats the word's own backslash and
+    # fails to match: verified on {\*\generator ...}.
     m = re.match(r"\\\*\\[a-zA-Z]+|\\[a-zA-Z]+", inner)
     if not m:
         return None
@@ -116,13 +117,13 @@ def _info_edits(text, paranoid, keep, res, enc):
     for name, content, inner in _info_groups(body):
         if name not in drop or _kept(keep, name):
             continue
-        # Позиция подгруппы в body: inner -- её тело без скобок, ищем его.
+        # Position of the subgroup in body: inner is its body without braces; search for it.
         at = body.find("{" + inner + "}")
         if at < 0:
             continue
         gs, ge = base + at, base + at + len(inner) + 2
         if re.match(r"\s*\\upr(?![a-zA-Z])", inner):
-            blank = "{\\%s}" % name      # {\upr ANSI+Юникод} целиком -> одно пустое поле
+            blank = "{\\%s}" % name      # the whole {\upr ANSI+Unicode} -> one empty field
         else:
             blank = _blank_span(text, gs, ge)
         if blank is None:
@@ -130,8 +131,8 @@ def _info_edits(text, paranoid, keep, res, enc):
         edits.append((gs, ge, blank))
         res.act(Act.BLANKED, "\\info\\%s" % name, name,
                 _rtf_plain(content, enc), "",
-                "Группа осталась пустой: отсутствие самого поля заметнее, "
-                "чем пустое значение.")
+                tr("The group was left empty: a missing field is more conspicuous than an empty "
+                   "value."))
         body = body[:at] + " " * (len(inner) + 2) + body[at + len(inner) + 2:]
     if paranoid:
         for word in _NUMS:
@@ -140,7 +141,7 @@ def _info_edits(text, paranoid, keep, res, enc):
             for m in re.finditer(r"\\%s-?\d+" % word, text[start:end]):
                 edits.append((start + m.start(), start + m.end(), ""))
                 res.act(Act.REMOVED, "\\info\\%s" % word, word, m.group(0), "",
-                        "Числовое свойство \\info. PARANOID его убирает.")
+                        tr("Numeric \\info property. PARANOID removes it."))
     return edits
 
 
@@ -182,9 +183,9 @@ def _revtbl(text, res, enc):
         if at < 0:
             continue
         edits.append((base + at, base + at + len(inner) + 2, ""))
-        res.act(Act.REMOVED, "\\*\\revtbl", "Автор правки", value, "",
-                "Имя из таблицы правок. Служебная запись Unknown остаётся: "
-                "Word пишет её всегда, и пустая таблица заметнее.")
+        res.act(Act.REMOVED, "\\*\\revtbl", tr("Revision author"), value, "",
+                tr("A name from the revision table. The service entry Unknown stays: Word always "
+                   "writes it, and an empty table is more conspicuous."))
     return edits
 
 
@@ -196,9 +197,9 @@ def _paths(text, res, enc):
         if not _PATH_DECODED_RE.match(value or ""):
             continue
         edits.append((m.start(), m.end(), ""))
-        res.act(Act.REMOVED, "поток RTF", "Абсолютный путь", value, "",
-                "Путь в теле или в поле. После декодирования это всё ещё путь, "
-                "а не огрызок управляющего слова.")
+        res.act(Act.REMOVED, tr("RTF stream"), tr("Absolute path"), value, "",
+                tr("A path in the body or in a field. After decoding it's still a path, not a "
+                   "fragment of a control word."))
     return edits
 
 
@@ -208,52 +209,54 @@ def _clean(res, src, dst, profile, keep):
         with open(src, "rb") as fh:
             raw = fh.read(_MAX + 1)
     except OSError as exc:
-        res.err("файл не открылся: %s" % type(exc).__name__)
+        res.err(tr("the file didn't open: %s") % type(exc).__name__)
         return
     if len(raw) > _MAX:
-        res.err("файл больше %d МБ: чистить частично нельзя, выход не создан."
+        res.err(tr("the file is larger than %d MB: partial cleaning isn't allowed, no output "
+                   "created.")
                 % (_MAX // (1024 * 1024)))
         return
     if not raw.lstrip()[:5] == b"{\\rtf":
-        res.err("это не RTF: нет сигнатуры {\\rtf. Выход не создан.")
+        res.err(tr("this is not RTF: no {\\rtf signature. No output created."))
         return
     text = raw.decode("latin-1")
     enc = _enc(text)
     edits = []
     edits += _info_edits(text, paranoid, keep, res, enc)
     if not _kept(keep, "userprops"):
-        edits += _drop_group(text, "userprops", res, "Пользовательские свойства",
-                             "Произвольные поля организации. Группы нет у обычного "
-                             "файла, поэтому удаление целиком ничем не выделяется.")
+        edits += _drop_group(text, "userprops", res, tr("Custom properties"),
+                             tr("Arbitrary organization fields. An ordinary file has no such "
+                                "group, so removing it entirely stands out in no way."))
     edits += _revtbl(text, res, enc)
     if not _kept(keep, "template"):
-        edits += _blank_dest(text, "template", res, "Шаблон",
-                             "Путь к шаблону. Пустая группа -- как у файла без шаблона.")
+        edits += _blank_dest(text, "template", res, tr("Template"),
+                             tr("Template path. An empty group looks like a file without a "
+                                "template."))
     if not _kept(keep, "atrfstart"):
-        edits += _blank_dest(text, "atrfstart", res, "Метка аннотации",
-                             "Инициалы автора примечания.")
+        edits += _blank_dest(text, "atrfstart", res, tr("Annotation tag"),
+                             tr("Initials of the comment's author."))
     if paranoid and not _kept(keep, "generator"):
-        edits += _blank_dest(text, "generator", res, "Генератор",
-                             "PARANOID убирает строку приложения.")
+        edits += _blank_dest(text, "generator", res, tr("Generator"),
+                             tr("PARANOID removes the application string."))
     elif _find(text, "generator"):
-        res.act(Act.KEPT, "\\*\\generator", "Генератор", "", "",
-                "STEALTH: приложение и версия -- правда о файле. Пустой "
-                "генератор читается как след чистки.")
+        res.act(Act.KEPT, "\\*\\generator", tr("Generator"), "", "",
+                tr("STEALTH: the application and version are the truth about the file. An empty "
+                   "generator reads as a cleaning trace."))
     if paranoid and not _kept(keep, "rsidtbl"):
-        edits += _blank_dest(text, "rsidtbl", res, "Таблица сеансов",
-                             "PARANOID убирает rsid. Файл после этого может "
-                             "выглядеть собранным библиотекой, а не Word.")
-    # Пути -- после групп: шаблон уже вырезан, и одно и то же место не
-    # режется дважды. Отрезки групп и пути не должны пересекаться; если
-    # путь лежит внутри уже вырезанной группы, второй проход его не видит,
-    # потому что правки применяются к исходному тексту разом. Поэтому пути
-    # считаем по тексту ПОСЛЕ групповых правок.
+        edits += _blank_dest(text, "rsidtbl", res, tr("Session table"),
+                             tr("PARANOID removes rsid. The file may then look built by a "
+                                "library rather than Word."))
+    # Paths come after groups: the template is already cut, and the same spot
+    # isn't cut twice. Group spans and paths must not overlap; if a path lies
+    # inside a group that's already cut, the second pass doesn't see it,
+    # because edits are applied to the source text all at once. So paths are
+    # computed on the text AFTER the group edits.
     staged = _apply(text, edits)
     out = _apply(staged, _paths(staged, res, enc))
     if not _balanced(out) or not out.lstrip().startswith("{\\rtf"):
         res.errors.clear()
         res.actions.clear()
-        res.err("правка сломала структуру RTF. Выход не создан.")
+        res.err(tr("the edit broke the RTF structure. No output created."))
         return
     tmp = str(dst) + ".part"
     try:
@@ -261,7 +264,7 @@ def _clean(res, src, dst, profile, keep):
             fh.write(out.encode("latin-1"))
         os.replace(tmp, dst)
     except OSError as exc:
-        res.err("не удалось записать результат: %s" % type(exc).__name__)
+        res.err(tr("could not write the result: %s") % type(exc).__name__)
         return
     finally:
         if os.path.exists(tmp):
@@ -273,14 +276,14 @@ def _clean(res, src, dst, profile, keep):
 
 
 def clean_rtf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) -> CleanResult:
-    """Очистить RTF src -> dst. Вход не меняется. Не бросает.
+    """Clean RTF src -> dst. The input is not changed. Never raises.
 
-    src, dst: пути. dst не должен совпадать с src -- это проверяет диспетчер.
-    profile: Profile.STEALTH или Profile.PARANOID.
-    keep: имена полей, которые оставить (author, template, ...).
-    force_signed: не используется, RTF подписи не несёт. Есть, чтобы сигнатура
-        совпадала с остальными чистильщиками.
-    Возврат: CleanResult. ok=False -- файла нет.
+    src, dst: paths. dst must not equal src; the dispatcher checks that.
+    profile: Profile.STEALTH or Profile.PARANOID.
+    keep: names of fields to keep (author, template, ...).
+    force_signed: unused, RTF carries no signatures. Present so the signature
+        matches the other cleaners.
+    Returns a CleanResult. ok=False means there is no file.
     """
     del force_signed
     res = CleanResult(src=str(src), dst=str(dst), fmt="rtf",
@@ -288,13 +291,13 @@ def clean_rtf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) 
     try:
         prof = Profile(str(getattr(profile, "value", profile)).lower())
     except ValueError:
-        res.err("Неизвестный профиль чистки.")
+        res.err(tr("Unknown cleaning profile."))
         return res
     try:
         _clean(res, str(src), str(dst), prof, keep)
     except Exception as exc:  # noqa: BLE001
         res.ok = False
-        res.err("Внутренняя ошибка чистки RTF: %s" % type(exc).__name__)
+        res.err(tr("Internal RTF cleaning error: %s") % type(exc).__name__)
         if os.path.exists(dst):
             try:
                 os.remove(dst)
@@ -323,7 +326,7 @@ def _selftest():
         assert not survived_values(inspect_file(src), rep), survived_values(inspect_file(src), rep)
         blob = " ".join(f.value or "" for f in rep.findings)
         assert RTF_AUTHOR not in blob
-        assert RTF_GENERATOR in blob, "STEALTH обязан оставить генератор"
+        assert RTF_GENERATOR in blob, "STEALTH must keep the generator"
         dst2 = os.path.join(tmp, "out2.rtf")
         res2 = clean_rtf(src, dst2, Profile.PARANOID)
         assert res2.ok, res2.errors

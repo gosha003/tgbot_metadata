@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Самопроверка фазы 0 на синтетических фикстурах с заранее известными
-метаданными. Единственная защита от регрессий во всех инспекторах сразу.
+"""Phase 0 self-test on synthetic fixtures with metadata known in advance. The
+only guard against regressions in all the inspectors at once.
 
-Без pytest (на машине его нет), но совместимо с ним: обычные функции test_*
-с assert-ами внутри. Запуск:
+No pytest (the machine doesn't have it), but compatible with it: plain test_*
+functions with asserts inside. Run:
 
     PYTHONIOENCODING=utf-8 python -m tests.test_inspect
 
-PYTHONIOENCODING=utf-8 обязателен на Windows -- иначе консоль (cp866/cp1251)
-калечит кириллицу в выводе, и это выглядит как баг в коде, а не артефакт
-консоли.
+PYTHONIOENCODING=utf-8 is required on Windows: otherwise the console
+(cp866/cp1251) mangles Cyrillic in the output, and that looks like a bug in
+the code rather than a console artifact.
 
-Печатает по строке на проверку и сводку в конце; код возврата 1 при любом
-провале хотя бы одной проверки.
+Prints one line per check and a summary at the end; exit code 1 if even one
+check fails.
 """
 
 from __future__ import annotations
@@ -39,15 +39,15 @@ from core.insp_legacy import inspect_ole
 from core.inspect import inspect_file
 from core.model import Report, Risk
 from core.report import render_plain, render_telegram, summary_line, TG_LIMIT
-from core.report import _tg_len  # приватный хелпер, но именно так считает Telegram
+from core.report import _tg_len  # a private helper, but this is exactly how Telegram counts
 
 from tests import fixtures
 
 # ---------------------------------------------------------------------------
-# учёт результатов
+# result bookkeeping
 # ---------------------------------------------------------------------------
 
-_RESULTS = []  # (имя проверки, прошла?, пояснение)
+_RESULTS = []  # (check name, passed?, explanation)
 
 
 def _check(name, condition, detail=""):
@@ -61,7 +61,7 @@ def _check(name, condition, detail=""):
 
 
 # ---------------------------------------------------------------------------
-# мелкие помощники теста
+# small test helpers
 # ---------------------------------------------------------------------------
 
 
@@ -92,64 +92,64 @@ def _check_idempotent(tag, path):
     before = _sha256(path)
     inspect_file(path)
     after = _sha256(path)
-    _check("%s: файл не изменён инспекцией (sha256 до==после)" % tag, before == after)
+    _check("%s: the file was not modified by inspection (sha256 before==after)" % tag, before == after)
 
 
 def _check_fixture(tag, path, expected, fmt_hint):
-    """Общая обвязка для одной "здоровой" фикстуры: sniff, идемпотентность,
-    заложенные значения, категории риска, сигналы. Возвращает Report, чтобы
-    вызывающий тест мог дописать свои специфичные проверки."""
+    """Common harness for one "healthy" fixture: sniff, idempotence, planted
+    values, risk categories, signals. Returns the Report so the calling test can
+    add its own specific checks."""
     before = _sha256(path)
     sniffed = sniff.sniff(path)
-    _check("%s: sniff определил формат (%s)" % (tag, fmt_hint),
-           sniffed == fmt_hint, "sniff вернул %r" % sniffed)
+    _check("%s: sniff detected the format (%s)" % (tag, fmt_hint),
+           sniffed == fmt_hint, "sniff returned %r" % sniffed)
 
     rep = inspect_file(path)
     after = _sha256(path)
-    _check("%s: read-only -- sha256 файла не изменился" % tag, before == after)
-    _check("%s: inspect_file не бросил исключение, Report вернулся" % tag,
+    _check("%s: read-only -- the file's sha256 did not change" % tag, before == after)
+    _check("%s: inspect_file did not raise, a Report came back" % tag,
            rep is not None and rep.fmt == fmt_hint or rep is not None)
 
     blob = " | ".join(f.value for f in rep.findings)
     for v in expected.get("values", []):
-        _check("%s: найдено заложенное значение %r" % (tag, v[:50]), v in blob)
+        _check("%s: planted value found %r" % (tag, v[:50]), v in blob)
 
     identity_vals = _risk_values(rep, Risk.IDENTITY)
     for v in expected.get("identity", []):
-        _check("%s: %r классифицировано как IDENTITY" % (tag, v[:40]),
+        _check("%s: %r classified as IDENTITY" % (tag, v[:40]),
                any(v in iv for iv in identity_vals))
 
     env_vals = _risk_values(rep, Risk.ENVIRONMENT)
     for v in expected.get("environment", []):
-        _check("%s: %r классифицировано как ENVIRONMENT" % (tag, v[:40]),
+        _check("%s: %r classified as ENVIRONMENT" % (tag, v[:40]),
                any(v in ev for ev in env_vals))
 
     sig_kinds = {s.kind for s in rep.signals}
     for k in expected.get("signals", []):
-        _check("%s: присутствует сигнал kind=%s" % (tag, k), k in sig_kinds,
-               "сигналы отчёта: %s" % sorted(sig_kinds))
+        _check("%s: signal kind=%s is present" % (tag, k), k in sig_kinds,
+               "report signals: %s" % sorted(sig_kinds))
     for k in expected.get("not_signals", []):
-        _check("%s: НЕТ ложного сигнала kind=%s (защита от false positive)" % (tag, k),
-               k not in sig_kinds, "сигналы отчёта: %s" % sorted(sig_kinds))
+        _check("%s: NO false signal kind=%s (false positive guard)" % (tag, k),
+               k not in sig_kinds, "report signals: %s" % sorted(sig_kinds))
 
     if expected.get("gps"):
         lat, lon = expected["gps"]
-        _check("%s: GPS пересчитан в десятичные верно (допуск)" % tag,
+        _check("%s: GPS converted to decimal correctly (within tolerance)" % tag,
                _gps_match(rep, lat, lon))
 
     return rep
 
 
 # ---------------------------------------------------------------------------
-# тесты по фикстурам
+# fixture tests
 # ---------------------------------------------------------------------------
 
 
 def _with_tmp(fn):
-    """Каждый test_* сам заводит и убирает свой временный каталог -- так
-    функции вызываются без аргументов и остаются совместимы с pytest
-    (которого тут нет, но функции названы test_* на случай, если он
-    появится), а не только с самодельным раннером ниже."""
+    """Each test_* creates and removes its own temporary directory, so the
+    functions are called without arguments and stay compatible with pytest
+    (which isn't here, but the functions are named test_* in case it shows up),
+    not only with the home-made runner below."""
 
     def wrapper():
         tmp = tempfile.mkdtemp(prefix="tgbot_meta_test_")
@@ -182,32 +182,32 @@ def test_xlsx(tmp):
 
 @_with_tmp
 def test_pptx(tmp):
-    """pptx -- третий формат OOXML, и до этой фикстуры он не инспектировался
-    ни одной: покрытие шло только общими путями через docx и xlsx. Здесь же
-    единственная проверка DEVMODE на уровне фикстур."""
+    """pptx is the third OOXML format, and before this fixture none of them
+    inspected it: coverage came only through the shared paths via docx and xlsx.
+    This is also the only DEVMODE check at the fixture level."""
     path, expected = fixtures.make_pptx(tmp)
     rep = _check_fixture("pptx", path, expected, "pptx")
-    _check("pptx: имя принтера найдено именно в printerSettings*.bin",
+    _check("pptx: the printer name was found in printerSettings*.bin specifically",
            any("printerSettings" in f.location and fixtures.PPTX_PRINTER in f.value
                for f in rep.findings),
            [f.location for f in rep.findings][:12])
-    _check("pptx: автор комментария найден в ppt/commentAuthors.xml",
+    _check("pptx: the comment author was found in ppt/commentAuthors.xml",
            any("commentAuthors" in f.location and fixtures.PPTX_CM_AUTHOR in f.value
                for f in rep.findings),
            [f.location for f in rep.findings][:12])
-    # DEVMODE разобран не только до имени принтера: имя формы, код формата и
-    # приватный хвост драйвера с UNC-путём к серверу печати.
+    # DEVMODE is parsed beyond the printer name: the form name, the paper code and
+    # the driver's private tail with the UNC path to the print server.
     labels = {f.label: f.value for f in rep.findings if "printerSettings" in f.location}
-    _check("pptx: dmFormName прочитан", fixtures.PPTX_FORM in
-           labels.get("dmFormName — формат бумаги", ""), labels)
-    _check("pptx: dmPaperSize прочитан и расшифрован",
-           str(fixtures.PPTX_PAPER_CODE) in labels.get("dmPaperSize — код формата бумаги", ""),
+    _check("pptx: dmFormName was read", fixtures.PPTX_FORM in
+           labels.get("dmFormName — paper format", ""), labels)
+    _check("pptx: dmPaperSize was read and decoded",
+           str(fixtures.PPTX_PAPER_CODE) in labels.get("dmPaperSize — paper size code", ""),
            labels)
-    _check("pptx: UNC-путь к серверу печати найден в приватном хвосте драйвера",
-           fixtures.PPTX_PRINT_UNC in labels.get("UNC-путь в данных драйвера печати", ""),
+    _check("pptx: the UNC path to the print server was found in the driver's private tail",
+           fixtures.PPTX_PRINT_UNC in labels.get("UNC path in the print driver data", ""),
            labels)
-    _check("pptx: формат бумаги дал сигнал dating о регионе",
-           any(s.kind == "dating" and "регион" in s.detail for s in rep.signals),
+    _check("pptx: the paper format produced a dating signal about the region",
+           any(s.kind == "dating" and "region" in s.detail for s in rep.signals),
            [(s.kind, s.detail[:60]) for s in rep.signals])
 
 
@@ -222,17 +222,18 @@ def test_pdf_incremental(tmp):
     path, expected = fixtures.make_pdf_incremental(tmp)
     rep = _check_fixture("pdf_incremental", path, expected, "pdf")
     detail_blob = " | ".join(s.detail for s in rep.signals)
-    _check("pdf_incremental: сигнал hazard явно говорит про инкрементальные ревизии",
-           any(s.kind == "hazard" and ("ревизи" in s.detail or "инкремент" in s.detail)
+    _check("pdf_incremental: the hazard signal explicitly mentions incremental revisions",
+           any(s.kind == "hazard" and ("revision" in s.detail or "incremental" in s.detail)
                for s in rep.signals),
            detail_blob[:200])
 
 
 @_with_tmp
 def test_pdf_nested(tmp):
-    """Шрифт, объявленный только во вложенной форме, и XMP у картинки: раньше
-    инспектор смотрел лишь /Resources страницы и корневой XMP и не видел ни то,
-    ни другое. Чистильщик XMP объектов снимал, а отчёт «до» о нём молчал."""
+    """A font declared only inside a nested form, and XMP on an image: the
+    inspector used to look only at the page /Resources and the root XMP and saw
+    neither. The cleaner removed object XMP, while the "before" report said
+    nothing about it."""
     import pikepdf
 
     path = os.path.join(tmp, "nested.pdf")
@@ -243,7 +244,7 @@ def test_pdf_nested(tmp):
     inner = pikepdf.Stream(pdf, b"BT /F1 12 Tf (x) Tj ET")
     inner.Type, inner.Subtype, inner.BBox = pikepdf.Name.XObject, pikepdf.Name.Form, [0, 0, 9, 9]
     inner.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=font))
-    outer = pikepdf.Stream(pdf, b"/Fm2 Do")  # форма в форме: шрифт на два уровня глубже страницы
+    outer = pikepdf.Stream(pdf, b"/Fm2 Do")  # a form within a form: the font is two levels below the page
     outer.Type, outer.Subtype, outer.BBox = pikepdf.Name.XObject, pikepdf.Name.Form, [0, 0, 9, 9]
     outer.Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Fm2=pdf.make_indirect(inner)))
     xmp = (b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/'
@@ -263,17 +264,17 @@ def test_pdf_nested(tmp):
 
     before = _sha256(path)
     rep = inspect_file(path)
-    _check("pdf_nested: вход не изменён", _sha256(path) == before)
-    _check("pdf_nested: шрифт из формы в форме найден",
+    _check("pdf_nested: the input was not modified", _sha256(path) == before)
+    _check("pdf_nested: the font from the form within a form was found",
            any("QWERTY+Aptos" in f.value for f in rep.findings),
            [f.value for f in rep.findings if "Font" in f.location])
-    xmp_found = {f.value: f for f in rep.findings if f.location.startswith("XMP: картинка")}
-    _check("pdf_nested: автор из XMP картинки найден и это IDENTITY",
+    xmp_found = {f.value: f for f in rep.findings if f.location.startswith("XMP: image")}
+    _check("pdf_nested: the author from the image XMP was found and it is IDENTITY",
            "Nested Author" in xmp_found and xmp_found["Nested Author"].risk is Risk.IDENTITY,
            list(xmp_found))
-    _check("pdf_nested: GUID из XMP картинки найден",
+    _check("pdf_nested: the GUID from the image XMP was found",
            "xmp.did:NESTED-GUID-77" in xmp_found, list(xmp_found))
-    _check("pdf_nested: без ошибок разбора", not rep.errors, rep.errors)
+    _check("pdf_nested: no parse errors", not rep.errors, rep.errors)
 
 
 @_with_tmp
@@ -301,9 +302,9 @@ def test_odt(tmp):
 
 
 def _mini_docx(path, created, modified, total, words=23):
-    """Минимальный .docx только с core.xml и app.xml -- ровно то, на чём стоит
-    эвристика совпадающих дат. Фикстуры целиком для этого слишком крупные:
-    у них свои TotalTime и объём, и подкрутить одно поле в них нельзя."""
+    """A minimal .docx with only core.xml and app.xml: exactly what the matching
+    dates heuristic rests on. Whole fixtures are too big for this: they have
+    their own TotalTime and size, and one field in them can't be tweaked."""
     core_xml = (
         '<?xml version="1.0"?><cp:coreProperties '
         'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
@@ -334,46 +335,46 @@ def _mini_docx(path, created, modified, total, words=23):
 
 @_with_tmp
 def test_equal_dates_need_corroboration(tmp):
-    """created == modified само по себе не противоречие.
+    """created == modified is not a contradiction by itself.
 
-    Word пишет эти даты с точностью до минуты (секунды всегда 00), поэтому у
-    любого документа, сделанного одним заходом, они совпадают -- проверено на
-    файле от настоящего Word 16, где прежняя эвристика давала ложный плюс.
-    Улику даёт только TotalTime: заявленные минуты редактирования не влезают
-    в одну минуту жизни документа.
+    Word writes these dates to the minute (the seconds are always 00), so any
+    document made in one sitting has them equal. Verified on a file from a real
+    Word 16, where the old heuristic gave a false positive. Only TotalTime gives
+    evidence: the claimed editing minutes don't fit into one minute of the
+    document's life.
     """
     def dates_signal(rep):
         return [s for s in rep.signals
-                if s.kind == "inconsistent" and "TotalTime заявляет" in s.detail]
+                if s.kind == "inconsistent" and "TotalTime claims" in s.detail]
 
     same = "2024-03-01T10:00:00Z"
     innocent = _mini_docx(os.path.join(tmp, "fresh.docx"), same, same, total=1)
     rep = inspect_file(innocent)
-    _check("даты равны, TotalTime=1: подлинный свежий файл Word -- не сигнал",
+    _check("equal dates, TotalTime=1: a genuine fresh Word file -- not a signal",
            not dates_signal(rep), [s.detail for s in rep.signals])
 
     guilty = _mini_docx(os.path.join(tmp, "faked.docx"), same, same, total=137)
     rep = inspect_file(guilty)
     sig = dates_signal(rep)
-    _check("даты равны, TotalTime=137: противоречие названо", len(sig) == 1,
+    _check("equal dates, TotalTime=137: the contradiction is named", len(sig) == 1,
            [s.detail for s in rep.signals])
     if sig:
-        _check("в тексте сигнала есть и дата, и заявленные минуты",
+        _check("the signal text has both the date and the claimed minutes",
                same in sig[0].detail and "137" in sig[0].detail, sig[0].detail)
-        _check("уверенность высокая: противоречие арифметическое, не вкусовое",
+        _check("high confidence: the contradiction is arithmetic, not a matter of taste",
                sig[0].confidence == "high", sig[0].confidence)
 
     moved = _mini_docx(os.path.join(tmp, "normal.docx"), same,
                        "2024-03-05T14:30:00Z", total=137)
-    _check("даты разные при том же TotalTime: не сигнал",
+    _check("different dates with the same TotalTime: not a signal",
            not dates_signal(inspect_file(moved)))
 
 
 @_with_tmp
 def test_broken(tmp):
-    """Патологии: inspect_file не бросает исключение ни на одном битом файле,
-    zip-бомба не распаковывается (быстрый возврат), идемпотентность тоже
-    проверяем -- read-only обязан быть read-only даже на мусоре."""
+    """Pathologies: inspect_file doesn't raise on any broken file, a zip bomb is
+    not decompressed (fast return), and idempotence is checked too: read-only
+    has to be read-only even on garbage."""
     broken = fixtures.make_broken(tmp)
 
     for name, path in broken.items():
@@ -382,58 +383,58 @@ def test_broken(tmp):
             t0 = time.time()
             rep = inspect_file(path)
             elapsed = time.time() - t0
-        except Exception as exc:  # noqa: BLE001 -- именно это и проверяем
-            _check("broken[%s]: inspect_file не бросил исключение" % name, False,
+        except Exception as exc:  # noqa: BLE001 -- this is exactly what we test
+            _check("broken[%s]: inspect_file did not raise" % name, False,
                    "%s: %s" % (type(exc).__name__, exc))
             continue
-        _check("broken[%s]: inspect_file вернул Report" % name, rep is not None)
+        _check("broken[%s]: inspect_file returned a Report" % name, rep is not None)
         after = _sha256(path)
-        _check("broken[%s]: файл не изменён (read-only даже на мусоре)" % name,
+        _check("broken[%s]: the file was not modified (read-only even on garbage)" % name,
                before == after)
         if name == "zip_bomb":
-            _check("zip_bomb: инспекция не распаковывала содержимое (вернулась быстро)",
-                   elapsed < 5.0, "заняло %.2f с" % elapsed)
-            _check("zip_bomb: есть сигнал или ошибка про подозрение на бомбу",
+            _check("zip_bomb: inspection did not decompress the content (returned quickly)",
+                   elapsed < 5.0, "took %.2f s" % elapsed)
+            _check("zip_bomb: there is a signal or an error about a suspected bomb",
                    any(s.kind == "hazard" for s in rep.signals)
-                   or any("бомб" in e for e in rep.errors))
+                   or any("bomb" in e for e in rep.errors))
         if name == "png_ztxt_bomb":
-            # Килобайт сжатых данных -> 200 МБ. Разбор текстовых чанков PNG
-            # обязан распаковывать с ограничением, а не целиком.
-            _check("png_ztxt_bomb: не повис на распаковке текстового чанка",
-                   elapsed < 10.0, "заняло %.2f с" % elapsed)
-            _check("png_ztxt_bomb: защита отработала и оставила след в отчёте",
+            # A kilobyte of compressed data -> 200 MB. Parsing PNG text chunks must
+            # decompress with a limit, not all at once.
+            _check("png_ztxt_bomb: did not hang decompressing the text chunk",
+                   elapsed < 10.0, "took %.2f s" % elapsed)
+            _check("png_ztxt_bomb: the guard fired and left a trace in the report",
                    bool(rep.errors) or any(s.kind == "hazard" for s in rep.signals),
-                   "ни ошибок, ни сигнала: 200 МБ распаковались молча")
+                   "no errors and no signal: 200 MB were decompressed silently")
 
 
 @_with_tmp
 def test_telegram_rendering(tmp):
-    """render_telegram: лимит длины сообщения (в UTF-16 code units, как
-    считает сам Telegram) и корректное HTML-экранирование "<script>&"."""
+    """render_telegram: the message length limit (in UTF-16 code units, the way
+    Telegram itself counts) and correct HTML escaping of "<script>&"."""
     path, expected = fixtures.make_docx(tmp)
     rep = inspect_file(path)
     messages = render_telegram(rep)
 
     for i, msg in enumerate(messages):
-        _check("telegram[%d]: длина <= %d (UTF-16 code units)" % (i, TG_LIMIT),
-               _tg_len(msg) <= TG_LIMIT, "фактически %d" % _tg_len(msg))
+        _check("telegram[%d]: length <= %d (UTF-16 code units)" % (i, TG_LIMIT),
+               _tg_len(msg) <= TG_LIMIT, "actually %d" % _tg_len(msg))
 
     blob = "\n".join(messages)
     xss = expected["xss_value"]
-    _check("telegram: исходный '<script>&' НЕ утёк в HTML как есть",
+    _check("telegram: the raw '<script>&' did NOT leak into the HTML as is",
            "<script>" not in blob)
-    _check("telegram: значение экранировано как &lt;script&gt;&amp;",
+    _check("telegram: the value is escaped as &lt;script&gt;&amp;",
            "&lt;script&gt;&amp;" in blob)
 
     line = summary_line(rep)
-    _check("summary_line: строка непустая и без переводов строк",
+    _check("summary_line: the line is non-empty and has no line breaks",
            bool(line) and "\n" not in line)
 
 
 @_with_tmp
 def test_idempotent_all(tmp):
-    """Read-only для ВСЕХ фикстур, не только тех, что проверены по дороге
-    в test_* выше -- отдельный явный проход, как того просит задание."""
+    """Read-only for ALL fixtures, not only the ones checked along the way in the
+    test_* above: a separate explicit pass."""
     makers = [fixtures.make_docx, fixtures.make_docx_wordlike, fixtures.make_xlsx,
               fixtures.make_pptx, fixtures.make_pdf, fixtures.make_pdf_incremental,
               fixtures.make_jpeg, fixtures.make_png, fixtures.make_rtf, fixtures.make_odt]
@@ -444,115 +445,116 @@ def test_idempotent_all(tmp):
 
 @_with_tmp
 def test_no_path_leak(tmp):
-    """Наши собственные сообщения об ошибках не имеют права утащить в чат
-    абсолютный путь с нашей машины.
+    """Our own error messages must never carry an absolute path from our machine
+    into the chat.
 
-    Текст исключения парсера (особенно pikepdf) содержит полный путь к
-    временному файлу. Отчёт уходит пользователю, то есть инструмент
-    приватности сливал бы ровно ту категорию ENVIRONMENT, которую ищет в
-    чужих файлах. Скраб живёт в Report.err().
+    A parser's exception text (pikepdf's especially) contains the full path to
+    the temporary file. The report goes to the user, so the privacy tool would
+    leak exactly the ENVIRONMENT category it looks for in other people's files.
+    The scrub lives in Report.err().
 
-    Обратная сторона проверяется тут же: путь, найденный ВНУТРИ чужого
-    файла, -- законная находка, и скраб не смеет её тронуть.
+    The other side is checked right here: a path found INSIDE someone else's
+    file is a legitimate finding, and the scrub must not touch it.
     """
     from core.model import Report
 
-    # Пробел и кириллица в имени: регексп обязан съесть путь целиком, а не
-    # до первого пробела -- иначе вторая половина всё равно утекает.
+    # A space and Cyrillic in the name: the regex has to eat the whole path, not
+    # stop at the first space, otherwise the second half leaks anyway.
     path = os.path.join(tmp, "секретный отчёт v2.pdf")
     with open(path, "wb") as fh:
         fh.write(b"%PDF-1.7\n" + os.urandom(400))
 
     rep = inspect_file(path)
-    _check("path_leak: битый файл дал ошибки разбора (иначе проверять нечего)",
-           bool(rep.errors), "ошибок нет -- тест ничего не проверяет")
+    _check("path_leak: the broken file produced parse errors (otherwise there's nothing to check)",
+           bool(rep.errors), "no errors -- the test checks nothing")
     for needle in (tmp, "Users", "AppData", "секретный"):
         bad = [e for e in rep.errors if needle in e]
-        _check("path_leak: в ошибках нет %r" % needle, not bad,
-               "утекло: %r" % (bad[:1] or ""))
+        _check("path_leak: the errors don't contain %r" % needle, not bad,
+               "leaked: %r" % (bad[:1] or ""))
 
-    # Скраб не должен калечить находки.
+    # The scrub must not mangle findings.
     probe = Report(path="synthetic", fmt="docx")
-    probe.add(Risk.ENVIRONMENT, "word/settings.xml", "Путь к шаблону",
+    probe.add(Risk.ENVIRONMENT, "word/settings.xml", "Template path",
               "file:///C:/Users/ivanov/Templates/corp.dotx")
-    _check("path_leak: путь ИЗ ЧУЖОГО файла сохранён как находка",
+    _check("path_leak: a path FROM SOMEONE ELSE'S file is kept as a finding",
            "ivanov" in probe.findings[0].value, probe.findings[0].value)
 
 
 def test_summary_metrics():
-    """Регрессия на три дефекта сводки, найденные прогоном на настоящих файлах.
+    """Regression test for three summary defects found by a run on real files.
 
-    Фикстуры не нужны: это чистая арифметика отчёта, без разбора файлов.
+    No fixtures needed: this is pure report arithmetic, no file parsing.
 
-    1. Report.signal() обязан склеивать дубликаты. Инспекторы ставят сигналы
-       внутри циклов (по страницам, по шрифтам), и «Calibri -- шрифт по
-       умолчанию Office 2007-2023» повторялся по разу на страницу, вытесняя
-       из блока выводов всё остальное -- в том числе сигнал о том, что файл
-       уже чистили.
-    2. report.critical (IDENTITY+ENVIRONMENT) НЕ равен report.sensitive.
-       У реального PDF было «137 критичных» при семи настоящих утечках:
-       остальное -- список шрифтов по страницам и версия формата.
-    3. summary_line не имеет права называть продюсером сигнал kind="dating"
-       (шрифт, формат бумаги). Выдавало «PDF, сделан через Calibri».
+    1. Report.signal() must merge duplicates. Inspectors raise signals inside
+       loops (per page, per font), and "Calibri is the Office 2007-2023 default
+       font" repeated once per page, crowding everything else out of the
+       conclusions block, including the signal that the file had already been
+       cleaned.
+    2. report.critical (IDENTITY+ENVIRONMENT) is NOT the same as
+       report.sensitive. A real PDF showed "137 critical" with seven actual
+       leaks: the rest was the per-page font list and the format version.
+    3. summary_line must never call a kind="dating" signal (a font, a paper
+       size) the producer. It used to print "PDF, made with Calibri".
     """
     from core.model import Report
 
-    # --- 1. дедупликация сигналов -----------------------------------------
+    # --- 1. signal deduplication ------------------------------------------
     rep = Report(path="synthetic", fmt="pdf")
     for _ in range(5):
-        rep.signal("dating", "Calibri -- шрифт по умолчанию Office 2007-2023", "medium")
-    rep.signal("dating", "Calibri -- шрифт по умолчанию Office 2007-2023", "high")
-    rep.signal("dating", "Формат бумаги Letter (США/Канада)", "medium")
+        rep.signal("dating", "Calibri is the Office 2007-2023 default font", "medium")
+    rep.signal("dating", "Calibri is the Office 2007-2023 default font", "high")
+    rep.signal("dating", "Letter paper size (US/Canada)", "medium")
 
     calibri = [s for s in rep.signals if s.detail.startswith("Calibri")]
-    _check("metrics: шесть одинаковых сигналов склеены в один",
+    _check("metrics: six identical signals were merged into one",
            len(calibri) == 1,
-           "сигналы: %r" % [(s.kind, s.detail[:34]) for s in rep.signals])
-    _check("metrics: при склейке сохранена высшая уверенность из двух",
+           "signals: %r" % [(s.kind, s.detail[:34]) for s in rep.signals])
+    _check("metrics: merging kept the higher of the two confidences",
            bool(calibri) and calibri[0].confidence == "high",
-           calibri[0].confidence if calibri else "сигнал потерян")
-    _check("metrics: различающиеся сигналы НЕ склеены",
-           len(rep.signals) == 2, "сигналов: %d" % len(rep.signals))
+           calibri[0].confidence if calibri else "signal lost")
+    _check("metrics: different signals were NOT merged",
+           len(rep.signals) == 2, "signals: %d" % len(rep.signals))
 
-    # --- 2. critical против sensitive -------------------------------------
-    rep.add(Risk.IDENTITY, "/Info", "Автор", "Иванов И.И.")
-    rep.add(Risk.ENVIRONMENT, "/Info", "Путь к исходнику", "C:\\Users\\ivanov\\doc.pdf")
+    # --- 2. critical vs sensitive -----------------------------------------
+    rep.add(Risk.IDENTITY, "/Info", "Author", "Иванов И.И.")
+    rep.add(Risk.ENVIRONMENT, "/Info", "Source path", "C:\\Users\\ivanov\\doc.pdf")
     for i in range(130):
-        rep.add(Risk.PROVENANCE, "/Resources /Font", "Шрифт", "ABCDEF+Font%d" % i)
-    rep.add(Risk.STRUCTURAL, "/Root", "Язык", "ru")
+        rep.add(Risk.PROVENANCE, "/Resources /Font", "Font", "ABCDEF+Font%d" % i)
+    rep.add(Risk.STRUCTURAL, "/Root", "Language", "ru")
 
-    _check("metrics: critical считает только IDENTITY+ENVIRONMENT",
+    _check("metrics: critical counts only IDENTITY+ENVIRONMENT",
            rep.critical == 2, "critical=%d" % rep.critical)
-    _check("metrics: sensitive включает провенанс (это объём работы для чистки)",
+    _check("metrics: sensitive includes provenance (that's the amount of cleaning work)",
            rep.sensitive == 132, "sensitive=%d" % rep.sensitive)
-    _check("metrics: critical и sensitive разошлись на шумном провенансе",
+    _check("metrics: critical and sensitive diverged on noisy provenance",
            rep.critical != rep.sensitive,
-           "оба равны %d -- значит метрики снова склеили" % rep.critical)
+           "both equal %d -- so the metrics were merged again" % rep.critical)
 
-    # --- 3. dating не выдаётся за продюсера -------------------------------
+    # --- 3. dating is not passed off as the producer ----------------------
     line = summary_line(rep)
-    _check("metrics: сводка НЕ называет шрифт продюсером",
-           "сделан через Calibri" not in line, line)
-    _check("metrics: сводка показывает critical, а не sensitive",
+    _check("metrics: the summary does NOT call a font the producer",
+           "made with Calibri" not in line, line)
+    _check("metrics: the summary shows critical, not sensitive",
            "(2 " in line and "(132 " not in line, line)
-    _check("metrics: без producer-сигнала сводка честно признаёт незнание",
-           "не опознан" in line, line)
+    _check("metrics: without a producer signal the summary honestly admits not knowing",
+           "not recognized" in line, line)
 
     rep.signal("producer", "Microsoft Word 16.0", "high")
     line2 = summary_line(rep)
-    _check("metrics: настоящий producer попадает в сводку",
-           "сделан через Microsoft Word 16.0" in line2, line2)
-    _check("metrics: шрифт не попал в сводку даже рядом с продюсером",
+    _check("metrics: a real producer makes it into the summary",
+           "made with Microsoft Word 16.0" in line2, line2)
+    _check("metrics: the font didn't get into the summary even next to the producer",
            "Calibri" not in line2, line2)
 
 
 # ---------------------------------------------------------------------------
-# БЛОК 1: нечитаемые файлы и облачные плейсхолдеры
+# BLOCK 1: unreadable files and cloud placeholders
 # ---------------------------------------------------------------------------
-# Настоящих плейсхолдеров OneDrive и файлов без прав доступа в CI нет, поэтому
-# швы sniff._read_head и sniff._win_attrs подменяются присваиванием модульного
-# атрибута. Восстановление -- ТОЛЬКО в finally: иначе подмена отравит все
-# последующие тесты в том же процессе (последний тест файла это проверяет).
+# CI has no real OneDrive placeholders or files without access rights, so the
+# sniff._read_head and sniff._win_attrs seams are swapped out by assigning the
+# module attribute. Restoring happens ONLY in finally: otherwise the swap would
+# poison every later test in the same process (the last test of the file
+# checks this).
 
 _REAL_READ_HEAD = sniff._read_head
 _REAL_WIN_ATTRS = sniff._win_attrs
@@ -560,8 +562,8 @@ _REAL_WIN_ATTRS = sniff._win_attrs
 
 @contextlib.contextmanager
 def _unreadable_stand(exc, attrs):
-    """Файл "не открывается": чтение головы бросает exc, GetFileAttributesW
-    отдаёт attrs (None -- не Windows или вызов не удался)."""
+    """The file "doesn't open": reading the head raises exc, GetFileAttributesW
+    returns attrs (None: not Windows or the call failed)."""
     def _boom(_path):
         raise exc
 
@@ -582,41 +584,41 @@ def _make_file(tmp, name, size):
 
 
 def _inspect_unreadable(tmp, path, exc, attrs):
-    """inspect_file на файле, который "не открывается" по причине exc при
-    атрибутах attrs. Возвращает (Report, склеенный текст ошибок). Заодно
-    проверяет то, что должно быть верно для ЛЮБОЙ причины: формат
-    "unreadable", ложного "не опознан" нет, пути и имени файла в тексте нет.
+    """inspect_file on a file that "doesn't open" because of exc, with attributes
+    attrs. Returns (Report, joined error text). Also checks what must hold for
+    ANY reason: the format is "unreadable", there's no false "not recognized",
+    and the text has no path or file name.
 
-    Исключения строятся с filename=path, как у настоящего open(): str(exc)
-    тогда содержит путь, и если текст исключения когда-нибудь попадёт в
-    сообщение, скраб Report.err() обязан его вырезать."""
+    The exceptions are built with filename=path, like a real open(): str(exc)
+    then contains the path, and if the exception text ever reaches a message,
+    the Report.err() scrub has to cut it out."""
     with _unreadable_stand(exc, attrs):
         rep = inspect_file(path)
     text = " | ".join(rep.errors)
     tag = "%s attrs=%s" % (type(exc).__name__, "None" if attrs is None else hex(attrs))
     _check("unreadable[%s]: fmt == 'unreadable'" % tag, rep.fmt == "unreadable", rep.fmt)
-    _check("unreadable[%s]: нет ложного диагноза 'не опознан'" % tag,
-           "не опознан" not in text, text[:200])
+    _check("unreadable[%s]: no false 'not recognized' diagnosis" % tag,
+           "not recognized" not in text, text[:200])
     leaked = [n for n in (tmp, os.path.basename(tmp), os.path.basename(path)) if n in text]
-    _check("unreadable[%s]: в ошибках нет пути и имени файла" % tag, not leaked,
-           "утекло: %r" % leaked)
+    _check("unreadable[%s]: the errors have no path or file name" % tag, not leaked,
+           "leaked: %r" % leaked)
     return rep, text
 
 
 def test_sniff_unreadable_keys():
     name = sniff.NAMES.get("unreadable")
-    _check("unreadable: sniff.NAMES['unreadable'] -- непустая строка",
+    _check("unreadable: sniff.NAMES['unreadable'] is a non-empty string",
            isinstance(name, str) and bool(name), repr(name))
     _check("unreadable: family('unreadable') == 'unreadable'",
            sniff.family("unreadable") == "unreadable", sniff.family("unreadable"))
-    _check("unreadable: pretty('unreadable') == 'Файл недоступен для чтения'",
-           sniff.pretty("unreadable") == "Файл недоступен для чтения", sniff.pretty("unreadable"))
+    _check("unreadable: pretty('unreadable') == 'File is not readable'",
+           sniff.pretty("unreadable") == "File is not readable", sniff.pretty("unreadable"))
 
 
 @_with_tmp
 def test_sniff_missing(tmp):
-    path = os.path.join(tmp, "нет_такого.doc")
-    _check("missing: sniff(несуществующий путь) == 'unreadable'",
+    path = os.path.join(tmp, "no_such_file.doc")
+    _check("missing: sniff(nonexistent path) == 'unreadable'",
            sniff.sniff(path) == "unreadable", sniff.sniff(path))
     reason = sniff.unreadable_reason(path)
     _check("missing: unreadable_reason == ('missing', 2)", reason == ("missing", 2), repr(reason))
@@ -624,115 +626,116 @@ def test_sniff_missing(tmp):
 
 @_with_tmp
 def test_sniff_never_raises(tmp):
-    bad = "bad" + chr(0) + "path"          # NUL в пути: open() бросает ValueError
-    _check("never_raises: sniff(путь с NUL) == 'unreadable'",
+    bad = "bad" + chr(0) + "path"          # NUL in the path: open() raises ValueError
+    _check("never_raises: sniff(path with NUL) == 'unreadable'",
            sniff.sniff(bad) == "unreadable", sniff.sniff(bad))
     reason = sniff.unreadable_reason(bad)
-    _check("never_raises: unreadable_reason(путь с NUL) == ('other', None)",
+    _check("never_raises: unreadable_reason(path with NUL) == ('other', None)",
            reason == ("other", None), repr(reason))
-    _check("never_raises: sniff(каталог) == 'unreadable'",
+    _check("never_raises: sniff(directory) == 'unreadable'",
            sniff.sniff(tmp) == "unreadable", sniff.sniff(tmp))
 
 
 @_with_tmp
 def test_sniff_regression_empty_and_random(tmp):
-    """Пустой файл ПРОЧИТАН успешно -- это 'unknown', а не 'unreadable'."""
+    """An empty file was READ successfully: it's 'unknown', not 'unreadable'."""
     empty = _make_file(tmp, "empty.bin", 0)
-    _check("regression: пустой файл (0 байт) -> 'unknown', не 'unreadable'",
+    _check("regression: an empty file (0 bytes) -> 'unknown', not 'unreadable'",
            sniff.sniff(empty) == "unknown", sniff.sniff(empty))
-    _check("regression: inspect_file(пустой) -> fmt 'unknown'",
+    _check("regression: inspect_file(empty) -> fmt 'unknown'",
            inspect_file(empty).fmt == "unknown")
 
-    # Детерминированный мусор с NUL и без известных сигнатур (не os.urandom:
-    # тест не должен быть недетерминированным).
+    # Deterministic garbage with NULs and no known signatures (not os.urandom:
+    # the test must not be nondeterministic).
     junk = os.path.join(tmp, "junk.bin")
     with open(junk, "wb") as fh:
         fh.write(b"\x00\x13\x37" + bytes((i * 7 + 3) % 256 for i in range(600)))
-    _check("regression: мусор с NUL без сигнатур -> 'unknown'",
+    _check("regression: garbage with NULs and no signatures -> 'unknown'",
            sniff.sniff(junk) == "unknown", sniff.sniff(junk))
 
 
 @_with_tmp
 def test_cloud_placeholder_simulated(tmp):
-    """ГЛАВНЫЙ тест блока. Плейсхолдер OneDrive: файл есть, размер настоящий,
-    а open().read() падает с errno 22. Диагноз -- плейсхолдер, не 'не опознан'.
+    """The MAIN test of the block. A OneDrive placeholder: the file exists, its
+    size is real, but open().read() fails with errno 22. The diagnosis is a
+    placeholder, not 'not recognized'.
     """
     path = _make_file(tmp, "договор_Иванов.docx", 321)
     rep, text = _inspect_unreadable(tmp, path, OSError(22, "Invalid argument", path), 0x00400020)
 
-    _check("cloud: report.size == 321 (у плейсхолдера размер настоящий)",
+    _check("cloud: report.size == 321 (a placeholder has its real size)",
            rep.size == 321, str(rep.size))
-    _check("cloud: ровно одна ошибка", len(rep.errors) == 1, "ошибок: %d" % len(rep.errors))
+    _check("cloud: exactly one error", len(rep.errors) == 1, "errors: %d" % len(rep.errors))
     first = rep.errors[0] if rep.errors else ""
-    _check("cloud: в ошибке сказано 'плейсхолдер'", "плейсхолдер" in first, first[:200])
-    _check("cloud: в ошибке есть подсказка 'Always keep on this device'",
+    _check("cloud: the error says 'placeholder'", "placeholder" in first, first[:200])
+    _check("cloud: the error has the hint 'Always keep on this device'",
            "Always keep on this device" in first, first[:200])
-    _check("cloud: НЕТ ложного 'не опознан'", "не опознан" not in first)
-    _check("cloud: находок нет", not rep.findings, "findings: %d" % len(rep.findings))
-    # Приватность: отчёт уходит пользователю в чат. Report.err() вырезает
-    # абсолютные пути, а имя файла -- тоже метаданные.
-    _check("cloud: в ошибке НЕТ пути временного каталога",
+    _check("cloud: NO false 'not recognized'", "not recognized" not in first)
+    _check("cloud: no findings", not rep.findings, "findings: %d" % len(rep.findings))
+    # Privacy: the report goes to the user in the chat. Report.err() cuts out
+    # absolute paths, and the file name is metadata too.
+    _check("cloud: the error has NO temporary directory path",
            tmp not in first and os.path.basename(tmp) not in first, first[:200])
-    _check("cloud: в ошибке НЕТ имени файла", "договор_Иванов" not in first, first[:200])
+    _check("cloud: the error has NO file name", "договор_Иванов" not in first, first[:200])
 
 
 @_with_tmp
 def test_cloud_flags_matrix(tmp):
-    """Облако определяется по АТРИБУТАМ, не по errno: errno 22 сам по себе
-    ничего не доказывает -- так же падает недопустимое имя файла."""
+    """The cloud is detected by ATTRIBUTES, not by errno: errno 22 by itself
+    proves nothing, since an invalid file name fails the same way."""
     path = _make_file(tmp, "doc.bin", 321)
 
     for attrs, what in ((0x00040000, "RECALL_ON_OPEN"), (0x00001020, "OFFLINE")):
         _rep, text = _inspect_unreadable(tmp, path, OSError(22, "Invalid argument", path), attrs)
-        _check("matrix[%s]: сообщение про плейсхолдер" % what, "плейсхолдер" in text, text[:200])
+        _check("matrix[%s]: the message is about a placeholder" % what, "placeholder" in text, text[:200])
 
     _rep, text = _inspect_unreadable(tmp, path, OSError(22, "Invalid argument", path), 0x00000420)
-    _check("matrix[только REPARSE_POINT]: сообщение про reparse point",
+    _check("matrix[REPARSE_POINT only]: the message is about a reparse point",
            "reparse point" in text, text[:200])
-    # В сообщении про reparse есть условная подсказка "если файл из облака",
-    # поэтому слово "облако" не проверяем -- проверяем, что это НЕ диагноз
-    # плейсхолдера.
-    _check("matrix[только REPARSE_POINT]: НЕ диагноз 'плейсхолдер'",
-           "плейсхолдер" not in text and "Always keep on this device" not in text, text[:200])
+    # The reparse message has a conditional hint "if the file comes from the
+    # cloud", so we don't check for the word "cloud": we check that it is NOT a
+    # placeholder diagnosis.
+    _check("matrix[REPARSE_POINT only]: NOT a 'placeholder' diagnosis",
+           "placeholder" not in text and "Always keep on this device" not in text, text[:200])
 
-    for attrs, what in ((0x20, "обычные атрибуты 0x20"), (None, "атрибуты None")):
+    for attrs, what in ((0x20, "plain attributes 0x20"), (None, "attributes None")):
         _rep, text = _inspect_unreadable(tmp, path, OSError(22, "Invalid argument", path), attrs)
-        _check("matrix[%s]: сообщение содержит 'errno 22'" % what, "errno 22" in text, text[:200])
-        _check("matrix[%s]: НЕТ слова 'плейсхолдер' (errno 22 облако не доказывает)" % what,
-               "плейсхолдер" not in text, text[:200])
+        _check("matrix[%s]: the message contains 'errno 22'" % what, "errno 22" in text, text[:200])
+        _check("matrix[%s]: NO word 'placeholder' (errno 22 doesn't prove the cloud)" % what,
+               "placeholder" not in text, text[:200])
 
 
 @_with_tmp
 def test_win_attrs_invalid(tmp):
     import ctypes
 
-    missing = os.path.join(tmp, "нет_такого.bin")
-    _check("win_attrs: несуществующий путь -> None (INVALID_FILE_ATTRIBUTES 0xFFFFFFFF обработан)",
+    missing = os.path.join(tmp, "no_such_file.bin")
+    _check("win_attrs: nonexistent path -> None (INVALID_FILE_ATTRIBUTES 0xFFFFFFFF handled)",
            sniff._win_attrs(missing) is None, repr(sniff._win_attrs(missing)))
 
     real = _make_file(tmp, "real.bin", 10)
     attrs = sniff._win_attrs(real)
     if hasattr(ctypes, "WinDLL"):
-        _check("win_attrs: существующий файл -> int", isinstance(attrs, int), repr(attrs))
+        _check("win_attrs: existing file -> int", isinstance(attrs, int), repr(attrs))
     else:
-        _check("win_attrs: не Windows (нет ctypes.WinDLL) -> None", attrs is None, repr(attrs))
+        _check("win_attrs: not Windows (no ctypes.WinDLL) -> None", attrs is None, repr(attrs))
 
-    # Без ctypes.WinDLL (не Windows) функция обязана отдать None, а не бросить.
+    # Without ctypes.WinDLL (not Windows) the function has to return None, not raise.
     saved = getattr(ctypes, "WinDLL", None)
-    got = "не вызывалась"
+    got = "not called"
     try:
         if saved is not None:
             delattr(ctypes, "WinDLL")
         try:
             got = sniff._win_attrs(real)
-        except Exception as exc:  # noqa: BLE001 -- именно это и проверяем
-            got = "исключение %s" % type(exc).__name__
+        except Exception as exc:  # noqa: BLE001 -- this is exactly what we test
+            got = "exception %s" % type(exc).__name__
     finally:
         if saved is not None:
             ctypes.WinDLL = saved
-    _check("win_attrs: при удалённом ctypes.WinDLL -> None без исключения",
+    _check("win_attrs: with ctypes.WinDLL removed -> None without an exception",
            got is None, repr(got))
-    _check("win_attrs: ctypes.WinDLL восстановлен",
+    _check("win_attrs: ctypes.WinDLL restored",
            getattr(ctypes, "WinDLL", None) is saved)
 
 
@@ -741,37 +744,37 @@ def test_denied_and_missing_messages(tmp):
     path = _make_file(tmp, "doc.bin", 321)
 
     _rep, text = _inspect_unreadable(tmp, path, PermissionError(13, "x", path), 0x20)
-    _check("denied: есть 'нет доступа на чтение'", "нет доступа на чтение" in text, text[:200])
-    _check("denied: есть 'errno 13'", "errno 13" in text, text[:200])
+    _check("denied: 'no read access' is present", "no read access" in text, text[:200])
+    _check("denied: 'errno 13' is present", "errno 13" in text, text[:200])
 
     _rep, text = _inspect_unreadable(tmp, path, FileNotFoundError(2, "x", path), 0x20)
-    _check("missing: есть 'не найден'", "не найден" in text, text[:200])
+    _check("missing: 'not found' is present", "not found" in text, text[:200])
 
 
 def test_footer_unreadable():
-    """Подвал не имеет права врать: нечитаемый файл как раз НЕ прочитан."""
+    """The footer must not lie: an unreadable file is exactly the one that was NOT read."""
     for fmt, was_read in (("unreadable", False), ("pdf", True)):
         rep = Report(path="x", fmt=fmt, size=10)
-        rep.err("тестовая ошибка")
+        rep.err("test error")
         for kind, text in (("telegram", "\n".join(render_telegram(rep))),
                            ("plain", render_plain(rep))):
-            claims_read = "файл прочитан и не изменён" in text
-            admits = "прочитать его не удалось" in text
-            _check("footer[%s/%s]: утверждение 'файл прочитан и не изменён' %s"
-                   % (fmt, kind, "есть" if was_read else "ОТСУТСТВУЕТ"),
+            claims_read = "the file was read and not modified" in text
+            admits = "but it couldn't be read" in text
+            _check("footer[%s/%s]: the claim 'the file was read and not modified' is %s"
+                   % (fmt, kind, "present" if was_read else "ABSENT"),
                    claims_read == was_read, text[-200:])
-            _check("footer[%s/%s]: признание 'прочитать его не удалось' %s"
-                   % (fmt, kind, "отсутствует" if was_read else "ЕСТЬ"),
+            _check("footer[%s/%s]: the admission 'but it couldn't be read' is %s"
+                   % (fmt, kind, "absent" if was_read else "PRESENT"),
                    admits == (not was_read), text[-200:])
 
 
 # ---------------------------------------------------------------------------
-# БЛОК 2: легаси OLE2 (.doc / .xls / .ppt)
+# BLOCK 2: legacy OLE2 (.doc / .xls / .ppt)
 # ---------------------------------------------------------------------------
-# Фикстуры -- настоящие CFBF-контейнеры, собранные побайтово и проверенные
-# olefile, ole32.dll и шеллом Windows. Эти тесты -- регрессия на семь дефектов,
-# найденных первым запуском insp_legacy на настоящем OLE2 (D1-D7): .doc хранит
-# удалённый текст прошлых версий и таблицу авторов правок.
+# The fixtures are real CFBF containers, built byte by byte and verified with
+# olefile, ole32.dll and the Windows shell. These tests are a regression suite
+# for seven defects found by the first run of insp_legacy on real OLE2 (D1-D7):
+# a .doc keeps deleted text from past versions and a table of revision authors.
 
 
 def _vals(rep, label, loc=None):
@@ -791,22 +794,22 @@ def _write_cfb(tmp, name, streams, **kw):
 
 
 def _check_ole_container(tag, path, expected, exact=True):
-    """Фикстура -- настоящий контейнер: olefile открывает его без замечаний,
-    отдаёт заложенные метаданные и ровно заложенные потоки верхнего уровня."""
-    _check("%s: olefile.isOleFile(фикстура)" % tag, olefile.isOleFile(path))
+    """The fixture is a real container: olefile opens it without complaints and
+    returns the planted metadata and exactly the planted top-level streams."""
+    _check("%s: olefile.isOleFile(fixture)" % tag, olefile.isOleFile(path))
     with olefile.OleFileIO(path) as ole:
-        _check("%s: olefile не жалуется на структуру (parsing_issues == [])" % tag,
+        _check("%s: olefile doesn't complain about the structure (parsing_issues == [])" % tag,
                ole.parsing_issues == [], repr(ole.parsing_issues)[:200])
         meta = ole.get_metadata()
         bad = {k: getattr(meta, k, None) for k, v in expected.get("ole_meta", {}).items()
                if getattr(meta, k, None) != v}
-        _check("%s: olefile.get_metadata() отдаёт все заложенные поля" % tag,
-               not bad, "расходятся: %r" % bad)
+        _check("%s: olefile.get_metadata() returns all the planted fields" % tag,
+               not bad, "mismatched: %r" % bad)
         streams = ["/".join(p) for p in ole.listdir()]
     want = expected["streams"]
     ok = sorted(streams) == sorted(want) if exact else set(want) <= set(streams)
-    _check("%s: состав потоков совпадает с заложенным" % tag, ok,
-           "в файле %r, заложено %r" % (streams, want))
+    _check("%s: the set of streams matches the planted one" % tag, ok,
+           "in the file %r, planted %r" % (streams, want))
 
 
 @_with_tmp
@@ -817,59 +820,59 @@ def test_doc(tmp):
 
     for label in expected["unremovable_labels"]:
         found = _finds(rep, label)
-        _check("doc: %r -- IDENTITY, removable=False, value содержит '1Table'" % label,
+        _check("doc: %r -- IDENTITY, removable=False, the value contains '1Table'" % label,
                bool(found) and all(f.risk == Risk.IDENTITY and not f.removable
                                    and "1Table" in f.value for f in found),
                repr([(f.risk.value, f.removable, f.value) for f in found]))
-    _check("doc: счётчик быстрых сохранений == %d" % expected["quick_saves"],
-           _vals(rep, "Счётчик быстрых сохранений") == [str(expected["quick_saves"])],
-           repr(_vals(rep, "Счётчик быстрых сохранений")))
-    _check("doc: язык приложения (lid) == 0x0419",
-           _vals(rep, "Язык приложения (lid)") == ["0x%04X" % expected["lid"]] == ["0x0419"],
-           repr(_vals(rep, "Язык приложения (lid)")))
-    marks = _vals(rep, "Автор правки (SttbfRMark)")
-    _check("doc: SttbfRMark -- оба автора, служебная Unknown отброшена",
+    _check("doc: fast-save count == %d" % expected["quick_saves"],
+           _vals(rep, "Fast-save count") == [str(expected["quick_saves"])],
+           repr(_vals(rep, "Fast-save count")))
+    _check("doc: application language (lid) == 0x0419",
+           _vals(rep, "Application language (lid)") == ["0x%04X" % expected["lid"]] == ["0x0419"],
+           repr(_vals(rep, "Application language (lid)")))
+    marks = _vals(rep, "Revision author (SttbfRMark)")
+    _check("doc: SttbfRMark -- both authors, the service entry Unknown is dropped",
            marks == list(fixtures.DOC_RMARK) and "Unknown" not in marks, repr(marks))
 
-    # --- РЕГРЕССИЯ D2: пользовательские свойства. olefile читает их имена
-    # только как UTF-8, поэтому Unicode-секция (как пишет настоящий Office) и
-    # cp1251-секция теряли Purview-метку, email и значение МОЛЧА: ноль ошибок,
-    # ноль находок.
-    _check("doc/D2: в фикстуре есть кириллическое имя пользовательского свойства",
+    # --- REGRESSION D2: custom properties. olefile reads their names only as
+    # UTF-8, so a Unicode section (the way real Office writes it) and a cp1251
+    # section lost the Purview label, the email and the value SILENTLY: zero
+    # errors, zero findings.
+    _check("doc/D2: the fixture has a Cyrillic custom property name",
            any(re.search("[А-Яа-яЁё]", k) for k in expected["userdef"]),
            repr(list(expected["userdef"])))
     for name, value in expected["userdef"].items():
-        label = "Польз. свойство: " + name
+        label = "Custom property: " + name
         found = _finds(rep, label)
         _check("doc/D2: %r == %r, risk IDENTITY" % (label, value),
                [f.value for f in found] == [value]
                and all(f.risk == Risk.IDENTITY for f in found),
                repr([(f.value, f.risk.value) for f in found]))
-    _check("doc/D2: rep.errors пуст (потеря была молчаливой -- ошибок тоже не было)",
+    _check("doc/D2: rep.errors is empty (the loss was silent: there were no errors either)",
            not rep.errors, repr(rep.errors)[:300])
 
-    # --- РЕГРЕССИЯ D1: время изменения контейнера. Раньше
-    # ole.getctime("Root Entry") бросал OSError, глотаемый голым except, и
-    # находки не было ни у одного файла. Дата намеренно не равна дате
-    # последнего сохранения -- иначе находку можно спутать с тем свойством.
-    _check("doc/D1: 'Время изменения контейнера' == %s" % expected["root_mtime"],
-           _vals(rep, "Время изменения контейнера") == [expected["root_mtime"]],
-           repr(_vals(rep, "Время изменения контейнера")))
-    _check("doc/D1: время контейнера не равно дате последнего сохранения",
-           expected["root_mtime"] not in _vals(rep, "Последнее сохранение"),
-           repr(_vals(rep, "Последнее сохранение")))
+    # --- REGRESSION D1: container modification time. ole.getctime("Root Entry")
+    # used to raise OSError, swallowed by a bare except, and no file had this
+    # finding. The date is deliberately not equal to the last saved date,
+    # otherwise the finding could be confused with that property.
+    _check("doc/D1: 'Container modification time' == %s" % expected["root_mtime"],
+           _vals(rep, "Container modification time") == [expected["root_mtime"]],
+           repr(_vals(rep, "Container modification time")))
+    _check("doc/D1: the container time is not equal to the last saved date",
+           expected["root_mtime"] not in _vals(rep, "Last saved"),
+           repr(_vals(rep, "Last saved")))
 
-    # --- времена и места находок
-    edit = _vals(rep, "Общее время редактирования")
-    _check("doc: 'Общее время редактирования' содержит и 8220, и '2 ч 17 мин'",
-           len(edit) == 1 and "8220" in edit[0] and "2 ч 17 мин" in edit[0], repr(edit))
-    _check("doc: 'Создан' == 2023-03-05 14:07:00",
-           _vals(rep, "Создан") == ["2023-03-05 14:07:00"], repr(_vals(rep, "Создан")))
-    for label, loc in (("Организация", "DocumentSummaryInformation"),
-                       ("Руководитель", "DocumentSummaryInformation"),
-                       ("Автор", "SummaryInformation")):
+    # --- finding times and locations
+    edit = _vals(rep, "Total editing time")
+    _check("doc: 'Total editing time' contains both 8220 and '2 h 17 min'",
+           len(edit) == 1 and "8220" in edit[0] and "2 h 17 min" in edit[0], repr(edit))
+    _check("doc: 'Created' == 2023-03-05 14:07:00",
+           _vals(rep, "Created") == ["2023-03-05 14:07:00"], repr(_vals(rep, "Created")))
+    for label, loc in (("Organization", "DocumentSummaryInformation"),
+                       ("Manager", "DocumentSummaryInformation"),
+                       ("Author", "SummaryInformation")):
         locs = [f.location for f in _finds(rep, label)]
-        _check("doc: location находки %r == %s" % (label, loc), locs == [loc], repr(locs))
+        _check("doc: the location of finding %r == %s" % (label, loc), locs == [loc], repr(locs))
 
 
 @_with_tmp
@@ -878,44 +881,45 @@ def test_xls(tmp):
     rep = _check_fixture("xls", path, expected, "xls")
     _check_ole_container("xls", path, expected)
 
-    found = _finds(rep, "Имя пользователя Excel")
-    _check("xls: 'Имя пользователя Excel' == 'Сидорова А. С.', IDENTITY",
+    found = _finds(rep, "Excel user name")
+    _check("xls: 'Excel user name' == 'Сидорова А. С.', IDENTITY",
            [f.value for f in found] == [fixtures.XLS_WRITEACCESS_USER]
            and all(f.risk == Risk.IDENTITY for f in found), repr([f.value for f in found]))
-    sheets = _vals(rep, "Листы книги")
-    _check("xls: 'Листы книги' содержит и 'Бюджет', и 'Скрытый_Расчёт'",
+    sheets = _vals(rep, "Workbook sheets")
+    _check("xls: 'Workbook sheets' contains both 'Бюджет' and 'Скрытый_Расчёт'",
            len(sheets) == 1 and fixtures.XLS_SHEET in sheets[0]
            and fixtures.XLS_HIDDEN_SHEET in sheets[0], repr(sheets))
-    # В expected лежат только счётчики (supbook/externsheet/hlinks), строка
-    # значения собирается из них; EXTERNNAME в фикстуре нет -- 0.
+    # expected holds only the counters (supbook/externsheet/hlinks), and the
+    # value string is built from them; the fixture has no EXTERNNAME, so 0.
     want = "SUPBOOK: %d, EXTERNSHEET: %d, EXTERNNAME: 0" % (expected["supbook"],
                                                              expected["externsheet"])
-    _check("xls: 'Записи внешних связей' == %r" % want,
-           _vals(rep, "Записи внешних связей") == [want],
-           repr(_vals(rep, "Записи внешних связей")))
-    _check("xls: 'Гиперссылки' == '2 шт.'",
-           _vals(rep, "Гиперссылки") == ["%d шт." % expected["hlinks"]] == ["2 шт."],
-           repr(_vals(rep, "Гиперссылки")))
+    _check("xls: 'External link records' == %r" % want,
+           _vals(rep, "External link records") == [want],
+           repr(_vals(rep, "External link records")))
+    _check("xls: 'Hyperlinks' == '2 pcs'",
+           _vals(rep, "Hyperlinks") == ["%d pcs" % expected["hlinks"]] == ["2 pcs"],
+           repr(_vals(rep, "Hyperlinks")))
 
-    # Пользовательские свойства в однобайтовой cp1251, русское имя.
-    _check("xls: в фикстуре есть кириллическое имя пользовательского свойства",
+    # Custom properties in single-byte cp1251, a Russian name.
+    _check("xls: the fixture has a Cyrillic custom property name",
            any(re.search("[А-Яа-яЁё]", k) for k in expected["userdef"]))
     for name, value in expected["userdef"].items():
-        found = _finds(rep, "Польз. свойство: " + name)
-        _check("xls: 'Польз. свойство: %s' == %r, IDENTITY" % (name, value),
+        found = _finds(rep, "Custom property: " + name)
+        _check("xls: 'Custom property: %s' == %r, IDENTITY" % (name, value),
                [f.value for f in found] == [value]
                and all(f.risk == Risk.IDENTITY for f in found),
                repr([(f.value, f.risk.value) for f in found]))
-    _check("xls: rep.errors пуст", not rep.errors, repr(rep.errors)[:300])
+    _check("xls: rep.errors is empty", not rep.errors, repr(rep.errors)[:300])
 
 
 @_with_tmp
 def test_ppt(tmp):
-    """РЕГРЕССИЯ D5: ANSI-имя в CurrentUserAtom -- cp1251, а не cp1252.
-    Раньше 'Петров' выходило как 'Ïåòðîâ'. Обе формы атома: с UTF-16-именем
-    (PowerPoint 2000+) и только с ANSI (тогда единственный источник -- cp1251).
+    """REGRESSION D5: the ANSI name in CurrentUserAtom is cp1251, not cp1252.
+    'Петров' used to come out as 'Ïåòðîâ'. Both forms of the atom: with a
+    UTF-16 name (PowerPoint 2000+) and with ANSI only (then cp1251 is the only
+    source).
     """
-    label = "Имя последнего редактора (CurrentUserAtom)"
+    label = "Last editor name (CurrentUserAtom)"
     for tag, kwargs in (("ppt", {}), ("ppt_ansi", {"unicode_name": False})):
         sub = os.path.join(tmp, tag)
         os.mkdir(sub)
@@ -931,41 +935,44 @@ def test_ppt(tmp):
 
 @_with_tmp
 def test_doc_active(tmp):
-    """РЕГРЕССИЯ D7: поток CompObj лежит и в корне, и внутри встроенного
-    объекта; инспектор не имеет права путать вложенное с корневым."""
+    """REGRESSION D7: a CompObj stream sits both in the root and inside an
+    embedded object; the inspector must not confuse the nested one with the
+    root one."""
     path, expected = fixtures.make_doc_active(tmp)
     rep = _check_fixture("doc_active", path, expected, "doc")
 
     for bad in expected["not_errors"]:
         hits = [e for e in rep.errors if bad in e]
-        _check("doc_active/D7: в errors нет записей с %r" % bad, not hits, repr(hits)[:300])
-    # Вложенное не путается с корневым: у встроенного объекта свой CompObj
-    # (Excel.Sheet.8), у самого документа -- свой (Word.Document.8).
-    _check("doc_active/D7: ProgID корня == Word.Document.8, а не вложенного Excel.Sheet.8",
+        _check("doc_active/D7: errors have no entries with %r" % bad, not hits, repr(hits)[:300])
+    # The nested one isn't confused with the root one: the embedded object has
+    # its own CompObj (Excel.Sheet.8), and the document itself has its own
+    # (Word.Document.8).
+    _check("doc_active/D7: root ProgID == Word.Document.8, not the nested Excel.Sheet.8",
            _vals(rep, "ProgID") == ["Word.Document.8"], repr(_vals(rep, "ProgID")))
-    _check("doc_active: сигнал hazard про VBA",
+    _check("doc_active: hazard signal about VBA",
            any(s.kind == "hazard" and "VBA" in s.detail for s in rep.signals),
            repr([(s.kind, s.detail[:60]) for s in rep.signals]))
 
-    objs = _finds(rep, "Вложенные OLE-объекты")
-    _check("doc_active: 'Вложенные OLE-объекты' IDENTITY, removable=False, '1 объект(ов): %s'"
+    objs = _finds(rep, "Nested OLE objects")
+    _check("doc_active: 'Nested OLE objects' IDENTITY, removable=False, '1 object(s): %s'"
            % expected["object_id"],
            len(objs) == 1 and objs[0].risk == Risk.IDENTITY and not objs[0].removable
-           and objs[0].value.startswith("1 объект(ов): " + expected["object_id"]),
+           and objs[0].value.startswith("1 object(s): " + expected["object_id"]),
            repr([(f.risk.value, f.removable, f.value) for f in objs]))
-    macros = _finds(rep, "Поток макросов")
-    _check("doc_active: 'Поток макросов' содержит %s и removable=False" % expected["macro_stream"],
+    macros = _finds(rep, "Macro stream")
+    _check("doc_active: 'Macro stream' contains %s and removable=False" % expected["macro_stream"],
            any(expected["macro_stream"] in f.value for f in macros)
            and all(not f.removable for f in macros),
            repr([(f.value, f.removable) for f in macros]))
     for label in expected["unremovable_labels"]:
         found = _finds(rep, label)
-        _check("doc_active: %r есть и все такие находки removable=False" % label,
+        _check("doc_active: %r is present and all such findings are removable=False" % label,
                bool(found) and all(not f.removable for f in found))
 
 
-# Дочерний процесс для векторной бомбы: время меряет он сам, вывод -- ASCII-JSON
-# (консоль и кодировки не участвуют). Файл-зонд пишется в utf-8.
+# A child process for the vector bomb: it measures the time itself, and the
+# output is ASCII JSON (the console and encodings play no part). The probe
+# file is written in utf-8.
 _VECTOR_PROBE = """
 import json, sys, time
 sys.path.insert(0, sys.argv[1])
@@ -973,29 +980,29 @@ from core.insp_legacy import inspect_ole
 t0 = time.time()
 rep = inspect_ole(sys.argv[2], "doc")
 print(json.dumps({"elapsed": time.time() - t0,
-                  "author": [f.value for f in rep.findings if f.label == "Автор"]}))
+                  "author": [f.value for f in rep.findings if f.label == "Author"]}))
 """
 
 
 @_with_tmp
 def test_ole_vector_bomb(tmp):
-    """РЕГРЕССИЯ D6 (отказ в обслуживании): VT_VECTOR|VT_R8 со счётчиком
-    0xFFFFFFFF. olefile разбирал его циклом на четыре миллиарда пустых
-    итераций и списком на десятки гигабайт -- бот зависал вместе с разбором.
-    Хватает одного испорченного байта, злого умысла не нужно."""
+    """REGRESSION D6 (denial of service): VT_VECTOR|VT_R8 with the counter
+    0xFFFFFFFF. olefile parsed it with a loop of four billion empty iterations
+    and a list of tens of gigabytes: the bot hung along with the parse. One
+    corrupted byte is enough, no malice needed."""
     summary = fixtures._ole_section([
         (1, fixtures._vt_i2(1251)),
-        (3, struct.pack("<HHI", 0x1005, 0, 0xFFFFFFFF)),     # 4 млрд элементов
+        (3, struct.pack("<HHI", 0x1005, 0, 0xFFFFFFFF)),     # 4 billion elements
         (4, fixtures._vt_lpstr(fixtures.DOC_AUTHOR, "cp1251"))])
     path = _write_cfb(tmp, "vector_bomb.doc", [
         ("\x05SummaryInformation",
          fixtures._ole_propstream((fixtures._FMTID_SUMMARY, summary))),
         ("WordDocument", b"\xec\xa5" + b"\x00" * 4200)])
 
-    # Регрессия -- это ЗАВИСАНИЕ (и рост памяти), поэтому разбор идёт в дочернем
-    # процессе с жёстким таймаутом: при регрессии тест честно падает, процесс
-    # убит, а сводка прогона не теряется (watchdog в самом процессе убил бы
-    # заодно и весь раннер).
+    # The regression is a HANG (and memory growth), so the parse runs in a child
+    # process with a hard timeout: on a regression the test fails honestly, the
+    # process is killed, and the run summary isn't lost (a watchdog in this
+    # process would kill the whole runner along with it).
     probe = os.path.join(tmp, "probe_vector_bomb.py")
     with open(probe, "w", encoding="utf-8") as fh:
         fh.write(_VECTOR_PROBE)
@@ -1004,35 +1011,35 @@ def test_ole_vector_bomb(tmp):
         proc = subprocess.run([sys.executable, probe, root, path],
                               capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
-        _check("vector_bomb/D6: inspect_ole вернулся (не завис на счётчике 0xFFFFFFFF)",
-               False, "нет ответа за 30 с, дочерний процесс убит")
+        _check("vector_bomb/D6: inspect_ole returned (didn't hang on the 0xFFFFFFFF counter)",
+               False, "no answer within 30 s, the child process was killed")
         return
     try:
         got = json.loads(proc.stdout.decode("ascii"))
     except ValueError:
-        _check("vector_bomb/D6: дочерний процесс вернул результат", False,
-               "код %s, stderr: %s" % (proc.returncode,
+        _check("vector_bomb/D6: the child process returned a result", False,
+               "code %s, stderr: %s" % (proc.returncode,
                                        proc.stderr.decode("utf-8", "replace")[-300:]))
         return
-    _check("vector_bomb/D6: inspect_ole вернулся быстрее 5 с",
-           got["elapsed"] < 5.0, "заняло %.2f с" % got["elapsed"])
-    _check("vector_bomb/D6: 'Автор' при этом найден (остальные свойства читаются)",
+    _check("vector_bomb/D6: inspect_ole returned in under 5 s",
+           got["elapsed"] < 5.0, "took %.2f s" % got["elapsed"])
+    _check("vector_bomb/D6: 'Author' is still found (the other properties are read)",
            got["author"] == [fixtures.DOC_AUTHOR], repr(got["author"]))
 
 
 @_with_tmp
 def test_ole_codepage_and_null_filetime(tmp):
-    """РЕГРЕССИЯ D3 и D4. У двух потоков свойств СВОИ кодовые страницы:
-    SummaryInformation в 1252, DocumentSummaryInformation в 1251 -- строки
-    второго читаем в его странице, иначе 'ООО «Ромашка»' выходит как
-    'ÎÎÎ «Ðîìàøêà»' (D3). Нулевой FILETIME -- 'не задано', а не дата 1601 года:
-    из-за него 'сохранено раньше создания' давало ложный inconsistent (D4)."""
+    """REGRESSION D3 and D4. The two property streams have THEIR OWN code pages:
+    SummaryInformation in 1252, DocumentSummaryInformation in 1251. Strings of
+    the second are read in its own page, otherwise 'ООО «Ромашка»' comes out as
+    'ÎÎÎ «Ðîìàøêà»' (D3). A zero FILETIME is 'not set', not a date in 1601:
+    because of it, 'saved before created' produced a false inconsistent (D4)."""
     summary = fixtures._ole_section([
         (1, fixtures._vt_i2(1252)),
         (4, fixtures._vt_lpstr("John Smith", "cp1252")),
-        (11, fixtures._vt_filetime(0)),                       # "не печатали"
+        (11, fixtures._vt_filetime(0)),                       # "never printed"
         (12, fixtures._vt_filetime(fixtures._filetime(fixtures.DOC_CREATE))),
-        (13, fixtures._vt_filetime(0))])                      # сохранение не задано
+        (13, fixtures._vt_filetime(0))])                      # save time not set
     docsum = fixtures._ole_section([
         (1, fixtures._vt_i2(1251)),
         (15, fixtures._vt_lpstr(fixtures.DOC_COMPANY, "cp1251"))])
@@ -1044,25 +1051,26 @@ def test_ole_codepage_and_null_filetime(tmp):
         ("WordDocument", b"\xec\xa5" + b"\x00" * 4200)])
     rep = inspect_ole(path, "doc")
 
-    company = _vals(rep, "Организация", "DocumentSummaryInformation")
-    _check("codepage/D3: 'Организация' == 'ООО «Ромашка»' (а не 'ÎÎÎ «Ðîìàøêà»')",
+    company = _vals(rep, "Organization", "DocumentSummaryInformation")
+    _check("codepage/D3: 'Organization' == 'ООО «Ромашка»' (not 'ÎÎÎ «Ðîìàøêà»')",
            company == [fixtures.DOC_COMPANY], repr(company))
-    _check("codepage/D3: 'Автор' из секции cp1252 == 'John Smith'",
-           _vals(rep, "Автор") == ["John Smith"], repr(_vals(rep, "Автор")))
-    _check("codepage/D4: 'Последняя печать' пусто (нулевой FILETIME -- не дата)",
-           _vals(rep, "Последняя печать") == [""], repr(_vals(rep, "Последняя печать")))
-    _check("codepage/D4: нет ложного сигнала kind=inconsistent",
+    _check("codepage/D3: 'Author' from the cp1252 section == 'John Smith'",
+           _vals(rep, "Author") == ["John Smith"], repr(_vals(rep, "Author")))
+    _check("codepage/D4: 'Last printed' is empty (a zero FILETIME is not a date)",
+           _vals(rep, "Last printed") == [""], repr(_vals(rep, "Last printed")))
+    _check("codepage/D4: no false signal kind=inconsistent",
            not any(s.kind == "inconsistent" for s in rep.signals),
            repr([(s.kind, s.detail[:80]) for s in rep.signals]))
 
 
 @_with_tmp
 def test_xls_with_embedded_word(tmp):
-    """Книга Excel со встроенным объектом Word остаётся книгой. Раньше sniff
-    искал имена потоков плоско по всему дереву и находил хранилище
-    MBD.../WordDocument -- книга определялась как 'doc' и её разбирал не тот
-    инспектор. Теперь сравнивается только верхний уровень ole.listdir().
-    Чистить файл не тем инспектором опаснее, чем не чистить вообще."""
+    """An Excel workbook with an embedded Word object stays a workbook. sniff used
+    to search for stream names flatly across the whole tree and found the
+    MBD.../WordDocument storage: the workbook was detected as 'doc' and parsed
+    by the wrong inspector. Now only the top level of ole.listdir() is compared.
+    Cleaning a file with the wrong inspector is more dangerous than not
+    cleaning it at all."""
     summary, _docsum = fixtures._ole_props_streams()
     workbook = (struct.pack("<HH", 0x0809, 16) + b"\x00" * 16      # BOF
                 + struct.pack("<HH", 0x000A, 0))                    # EOF
@@ -1073,29 +1081,29 @@ def test_xls_with_embedded_word(tmp):
          fixtures._ole_compobj("Word", "MSWordDoc", "Word.Document.8", fixtures._CLSID_WORD8)),
         (("MBD0001A2B3", "WordDocument"), b"\xec\xa5" + b"\x00" * 4200)])
 
-    _check("xls+word: sniff == 'xls' (встроенный Word не превращает книгу в документ)",
+    _check("xls+word: sniff == 'xls' (an embedded Word doesn't turn a workbook into a document)",
            sniff.sniff(path) == "xls", sniff.sniff(path))
     rep = inspect_file(path)
     _check("xls+word: inspect_file -> fmt 'xls'", rep.fmt == "xls", rep.fmt)
-    _check("xls+word: есть находка 'Поток рабочей книги'",
-           bool(_vals(rep, "Поток рабочей книги")))
-    _check("xls+word: НЕТ находки 'Остаточный текст и таблица авторов правок' (чужой Word)",
-           not _finds(rep, "Остаточный текст и таблица авторов правок"))
-    _check("xls+word: rep.errors пуст", not rep.errors, repr(rep.errors)[:300])
+    _check("xls+word: the 'Workbook stream' finding is present",
+           bool(_vals(rep, "Workbook stream")))
+    _check("xls+word: NO 'Residual text and revision author table' finding (someone else's Word)",
+           not _finds(rep, "Residual text and revision author table"))
+    _check("xls+word: rep.errors is empty", not rep.errors, repr(rep.errors)[:300])
 
-    # Вторая линия обороны: даже если fmt передан неверно, разбор идёт по
-    # потокам верхнего уровня, а несовпадение уходит в сигнал inconsistent.
+    # The second line of defense: even if fmt is passed wrong, parsing follows the
+    # top-level streams, and a mismatch goes into an inconsistent signal.
     forced = inspect_ole(path, "doc")
-    _check("xls+word: inspect_ole(fmt='doc') всё равно разбирает книгу, а не чужой Word",
-           bool(_vals(forced, "Поток рабочей книги"))
-           and not _finds(forced, "Остаточный текст и таблица авторов правок"))
-    _check("xls+word: inspect_ole(fmt='doc') -- сигнал inconsistent про расхождение",
+    _check("xls+word: inspect_ole(fmt='doc') still parses the workbook, not the other Word",
+           bool(_vals(forced, "Workbook stream"))
+           and not _finds(forced, "Residual text and revision author table"))
+    _check("xls+word: inspect_ole(fmt='doc') -- an inconsistent signal about the mismatch",
            any(s.kind == "inconsistent" for s in forced.signals))
 
 
 @_with_tmp
 def test_ole_idempotent_and_truncated(tmp):
-    """Read-only на всех OLE2-фикстурах и устойчивость к обрезанным копиям."""
+    """Read-only on all OLE2 fixtures and resilience to truncated copies."""
     made = {}
     for maker in (fixtures.make_doc, fixtures.make_doc_active, fixtures.make_xls,
                   fixtures.make_ppt):
@@ -1114,30 +1122,30 @@ def test_ole_idempotent_and_truncated(tmp):
                 t0 = time.time()
                 rep = inspect_file(cut)
                 elapsed = time.time() - t0
-            except Exception as exc:  # noqa: BLE001 -- именно это и проверяем
-                _check("%s обрезан до %d байт: inspect_file не бросил исключение" % (name, n),
+            except Exception as exc:  # noqa: BLE001 -- this is exactly what we test
+                _check("%s truncated to %d bytes: inspect_file did not raise" % (name, n),
                        False, "%s: %s" % (type(exc).__name__, exc))
                 continue
-            _check("%s обрезан до %d байт: вернулся Report, быстро" % (name, n),
+            _check("%s truncated to %d bytes: a Report came back, quickly" % (name, n),
                    isinstance(rep, Report) and elapsed < 5.0,
-                   "%s, %.2f с" % (type(rep).__name__, elapsed))
+                   "%s, %.2f s" % (type(rep).__name__, elapsed))
 
 
 # ---------------------------------------------------------------------------
-# Должен идти ПОСЛЕДНИМ (раннер сортирует тесты по имени): подмены швов sniff
-# из блока 1 не имеют права пережить свои тесты.
+# Must run LAST (the runner sorts tests by name): the sniff seam swaps from
+# block 1 must not outlive their tests.
 # ---------------------------------------------------------------------------
 
 
 def test_zz_seams_restored():
-    _check("швы: sniff._read_head восстановлен после подмен",
+    _check("seams: sniff._read_head restored after the swaps",
            sniff._read_head is _REAL_READ_HEAD)
-    _check("швы: sniff._win_attrs восстановлен после подмен",
+    _check("seams: sniff._win_attrs restored after the swaps",
            sniff._win_attrs is _REAL_WIN_ATTRS)
 
 
 # ---------------------------------------------------------------------------
-# запуск
+# run
 # ---------------------------------------------------------------------------
 
 
@@ -1150,17 +1158,17 @@ def _run_all():
         try:
             fn()
         except AssertionError as exc:
-            _check("%s: без необработанных AssertionError" % fn.__name__, False, str(exc))
-        except Exception as exc:  # noqa: BLE001 -- тест не должен останавливать остальные
-            _check("%s: без необработанного исключения" % fn.__name__, False,
+            _check("%s: no unhandled AssertionError" % fn.__name__, False, str(exc))
+        except Exception as exc:  # noqa: BLE001 -- a test must not stop the others
+            _check("%s: no unhandled exception" % fn.__name__, False,
                    "%s: %s" % (type(exc).__name__, exc))
 
     print("=" * 78)
     total = len(_RESULTS)
     failed = [r for r in _RESULTS if not r[1]]
-    print("ИТОГО: %d проверок, %d провалено" % (total, len(failed)))
+    print("TOTAL: %d checks, %d failed" % (total, len(failed)))
     if failed:
-        print("ПРОВАЛЕННЫЕ ПРОВЕРКИ:")
+        print("FAILED CHECKS:")
         for name, _, detail in failed:
             print("  - %s%s" % (name, ("  -- " + detail) if detail else ""))
     return 1 if failed else 0

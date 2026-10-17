@@ -1,8 +1,8 @@
-# Переводы строк в репозитории всегда LF, даже когда работаем на Windows:
-# иначе каждый коммит с другой машины даёт мусорный дифф на весь файл.
+# Line endings in the repository are always LF, even when working on Windows:
+# otherwise every commit from another machine produces a whole-file junk diff.
 * text=auto eol=lf
 
-# Бинарные фикстуры и тестовые образцы не трогать.
+# Leave binary fixtures and test samples alone.
 *.doc  binary
 *.xls  binary
 *.ppt  binary

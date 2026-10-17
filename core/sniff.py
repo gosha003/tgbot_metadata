@@ -1,11 +1,11 @@
-"""Определение формата по содержимому, а не по расширению.
+"""Detect the format from content, not from the extension.
 
-Расширение врёт: .docx может оказаться .doc, переименованным вручную,
-а присланный "документ" -- вообще JPEG. Чистить файл не тем инспектором
-опаснее, чем не чистить вообще: получится файл, который выглядит
-обработанным, но течёт.
+Extensions lie: a .docx may turn out to be a .doc renamed by hand, and a
+"document" someone sent may be a JPEG. Cleaning a file with the wrong
+inspector is more dangerous than not cleaning it at all: the result looks
+processed but still leaks.
 
-Только stdlib.
+Stdlib only.
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ from __future__ import annotations
 import errno
 import os
 import zipfile
+from core.i18n import N_, tr
 
-# Формат -> человекочитаемое имя. Ключи используются как Report.fmt.
+# Format -> human-readable name. Keys are used as Report.fmt.
 NAMES = {
     "docx": "Word (OOXML)",
     "xlsx": "Excel (OOXML)",
@@ -22,12 +23,12 @@ NAMES = {
     "odt": "OpenDocument Text",
     "ods": "OpenDocument Spreadsheet",
     "odp": "OpenDocument Presentation",
-    "zip": "ZIP-архив",
+    "zip": N_("ZIP archive"),
     "pdf": "PDF",
     "doc": "Word 97-2003 (OLE2)",
     "xls": "Excel 97-2003 (OLE2)",
     "ppt": "PowerPoint 97-2003 (OLE2)",
-    "ole": "OLE2-контейнер (тип не опознан)",
+    "ole": N_("OLE2 container (type not recognized)"),
     "rtf": "RTF",
     "jpeg": "JPEG",
     "png": "PNG",
@@ -35,15 +36,15 @@ NAMES = {
     "heic": "HEIF/HEIC",
     "webp": "WebP",
     "gif": "GIF",
-    "text": "Текст/CSV",
-    "unknown": "Неопознанный формат",
-    # Не "не опознан", а "не прочитан": формат неизвестен, потому что файл не
-    # открылся (облачный плейсхолдер, нет прав, занят, не найден). Причину
-    # даёт unreadable_reason().
-    "unreadable": "Файл недоступен для чтения",
+    "text": N_("Text/CSV"),
+    "unknown": N_("Unrecognized format"),
+    # Not "unrecognized" but "unread": the format is unknown because the file
+    # didn't open (cloud placeholder, no permission, locked, not found). The
+    # reason comes from unreadable_reason().
+    "unreadable": N_("File is not readable"),
 }
 
-# Какой инспектор обслуживает формат (заполняется в inspect.py).
+# Which inspector handles the format (filled in by inspect.py).
 FAMILY = {
     "docx": "ooxml", "xlsx": "ooxml", "pptx": "ooxml",
     "odt": "odf", "ods": "odf", "odp": "odf",
@@ -58,7 +59,7 @@ FAMILY = {
 
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
-# Мапинг mimetype ODF -> формат.
+# ODF mimetype -> format mapping.
 _ODF = {
     b"application/vnd.oasis.opendocument.text": "odt",
     b"application/vnd.oasis.opendocument.spreadsheet": "ods",
@@ -72,15 +73,15 @@ def _read_head(path) -> bytes:
 
 
 def sniff(path) -> str:
-    """Вернуть ключ формата. Никогда не бросает.
+    """Return the format key. Never raises.
 
-    'unreadable' -- файл не открылся (причина: unreadable_reason()).
-    'unknown' -- файл прочитан, но сигнатура не опознана (или он пустой).
-    Это разные диагнозы: первый лечится действием пользователя, второй нет.
+    'unreadable': the file didn't open (reason: unreadable_reason()).
+    'unknown': the file was read but the signature wasn't recognized (or it's empty).
+    These are different diagnoses: the first is fixed by user action, the second isn't.
     """
     try:
         head = _read_head(path)
-    except (OSError, ValueError):  # ValueError -- NUL в пути
+    except (OSError, ValueError):  # ValueError: NUL in path
         return "unreadable"
 
     if not head:
@@ -108,13 +109,13 @@ def sniff(path) -> str:
             return "heic"
     if head[:2] == b"PK":
         return _sniff_zip(path)
-    # Некоторые PDF начинаются с мусора; спека допускает %PDF- в первых 1024 байт.
-    # Только ПОСЛЕ точных сигнатур: ZIP, где первая запись -- несжатый PDF, несёт
-    # %PDF- в первой сотне байт и раньше определялся как PDF, а не как архив.
+    # Some PDFs start with junk; the spec allows %PDF- within the first 1024 bytes.
+    # Only AFTER the exact signatures: a ZIP whose first entry is an uncompressed
+    # PDF has %PDF- in its first hundred bytes and used to be detected as PDF.
     if b"%PDF-" in head[:1024]:
         return "pdf"
 
-    # Текст: нет NUL-байтов и декодируется.
+    # Text: no NUL bytes and it decodes.
     if b"\x00" not in head:
         try:
             head.decode("utf-8")
@@ -133,7 +134,7 @@ def _sniff_zip(path) -> str:
     try:
         with zipfile.ZipFile(path) as zf:
             names = set(zf.namelist())
-            # ODF объявляет себя первой записью 'mimetype' (несжатой).
+            # ODF declares itself with a first 'mimetype' entry (uncompressed).
             if "mimetype" in names:
                 try:
                     mime = zf.read("mimetype").strip()
@@ -154,14 +155,14 @@ def _sniff_zip(path) -> str:
 
 
 def _sniff_ole(path) -> str:
-    """Тип OLE2 определяется по именам потоков ВЕРХНЕГО УРОВНЯ контейнера.
+    """The OLE2 type is decided by the names of the container's TOP-LEVEL streams.
 
-    Именно верхнего, а не всего дерева. Вложенный OLE-объект живёт внутри
-    хранилища (ObjectPool/_1396712391/WordDocument), и если искать имена
-    плоско по всему дереву, то книга Excel со встроенным документом Word
-    определится как .doc -- после чего её разберёт не тот инспектор.
-    Чистить файл не тем инспектором опаснее, чем не чистить вообще:
-    получится файл, который выглядит обработанным, но течёт.
+    Top-level only, not the whole tree. An embedded OLE object lives inside a
+    storage (ObjectPool/_1396712391/WordDocument), and searching names flatly
+    across the tree would detect an Excel workbook with an embedded Word
+    document as .doc, and then the wrong inspector would parse it.
+    Cleaning a file with the wrong inspector is more dangerous than not
+    cleaning it at all: the result looks processed but still leaks.
     """
     try:
         import olefile
@@ -171,7 +172,7 @@ def _sniff_ole(path) -> str:
         if not olefile.isOleFile(path):
             return "ole"
         with olefile.OleFileIO(path) as ole:
-            # listdir() отдаёт путь списком компонентов; длина 1 == верхний уровень.
+            # listdir() returns a path as a list of components; length 1 == top level.
             top = {parts[0] for parts in ole.listdir() if len(parts) == 1}
             if "WordDocument" in top:
                 return "doc"
@@ -184,10 +185,10 @@ def _sniff_ole(path) -> str:
     return "ole"
 
 
-# --- почему файл не читается --------------------------------------------------
-# Атрибуты Windows из GetFileAttributesW. Плейсхолдер облачного провайдера
-# (OneDrive Files On-Demand и аналоги): размер и метаданные на диске есть,
-# содержимого нет, open() падает с OSError (на замере -- errno 22).
+# --- why a file can't be read --------------------------------------------------
+# Windows attributes from GetFileAttributesW. A cloud provider placeholder
+# (OneDrive Files On-Demand and the like) has a size and metadata on disk but
+# no content, and open() fails with OSError (errno 22 when measured).
 _ATTR_REPARSE_POINT = 0x00000400
 _ATTR_OFFLINE = 0x00001000
 _ATTR_RECALL_ON_OPEN = 0x00040000
@@ -197,12 +198,12 @@ _INVALID_ATTRS = 0xFFFFFFFF
 
 
 def _win_attrs(path):
-    """Атрибуты файла Windows или None (не Windows, ошибка вызова).
-    Отдельная функция, чтобы тесты подменяли её без настоящих плейсхолдеров."""
+    """Windows file attributes, or None (not Windows, or the call failed).
+    A separate function so tests can patch it without real placeholders."""
     try:
         import ctypes
-        # Свой экземпляр DLL: restype у общего windll.kernel32 не трогаем.
-        # Вне Windows ctypes.WinDLL нет -- AttributeError, отдаём None.
+        # Our own DLL instance: don't touch restype on the shared windll.kernel32.
+        # Outside Windows there is no ctypes.WinDLL: AttributeError, return None.
         fn = ctypes.WinDLL("kernel32").GetFileAttributesW
         fn.restype = ctypes.c_uint32
         fn.argtypes = [ctypes.c_wchar_p]
@@ -213,19 +214,19 @@ def _win_attrs(path):
 
 
 def unreadable_reason(path):
-    """Почему файл не открывается: (причина, errno или None). Не бросает.
+    """Why a file won't open: (reason, errno or None). Never raises.
 
-    Причины: cloud (плейсхолдер облака), dir, denied (errno 13: нет прав ИЛИ
-    файл занят другим процессом -- CRT Windows не различает, winerror у
-    исключения open() пустой), missing (errno 2), reparse (ссылка/точка
-    повторной обработки без признаков облака), other.
-    Облако определяем по АТРИБУТАМ, не по errno: тот же errno 22 даёт и
-    недопустимое имя файла.
+    Reasons: cloud (cloud placeholder), dir, denied (errno 13: no permission OR
+    the file is locked by another process; the Windows CRT can't tell them
+    apart and open()'s exception has no winerror), missing (errno 2), reparse
+    (link/reparse point without cloud attributes), other.
+    Cloud is detected by ATTRIBUTES, not errno: the same errno 22 also comes
+    from an invalid file name.
     """
     try:
         try:
             _read_head(path)
-            return "other", None   # уже читается (скачалось между попытками)
+            return "other", None   # readable now (downloaded between attempts)
         except OSError as exc:
             code = exc.errno
         if os.path.isdir(path):
@@ -245,7 +246,7 @@ def unreadable_reason(path):
 
 
 def pretty(fmt: str) -> str:
-    return NAMES.get(fmt, fmt)
+    return tr(NAMES.get(fmt, fmt))
 
 
 def family(fmt: str) -> str:

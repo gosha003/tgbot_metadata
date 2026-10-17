@@ -1,40 +1,41 @@
-"""Генерация файлов настоящим Microsoft Office для приёмки.
+"""Generating files with real Microsoft Office for acceptance testing.
 
-Зачем. Синтетические фикстуры (`tests/fixtures.py`) проверяют, что код делает
-то, что задумано. Они не могут проверить, что задумано верно: это показывают
-только файлы, которые действительно сохранило настоящее приложение. За одну
-сессию такие файлы дали три ложных срабатывания инспектора и опровергли
-утверждение о таймстемпах ZIP у ODF, на котором собирались строить `clean_odf`.
-Поэтому генератор лежит в репозитории, а не остаётся разовым скриптом.
+Why. The synthetic fixtures (`tests/fixtures.py`) check that the code does
+what was intended. They can't check that the intent is right: only files
+that a real application actually saved show that. In one session such files
+produced three false positives in the inspector and disproved the claim
+about ODF ZIP timestamps that `clean_odf` was about to be built on. That's
+why the generator lives in the repository instead of staying a one-off
+script.
 
-Где в системе. Сбоку от основного набора тестов: ничего из `core/` и
-`tests/test_*.py` от этого модуля не зависит. Office — необязательное
-обогащение, как `exiftool` и LibreOffice (правило проекта «ноль обязательных
-внешних бинарников»), поэтому при отсутствии Word бросается `Unavailable`, а
-вызывающий обязан это пережить, а не упасть.
+Where it sits. Beside the main test suite: nothing in `core/` or
+`tests/test_*.py` depends on this module. Office is optional enrichment,
+like `exiftool` and LibreOffice (the project rule "zero required external
+binaries"), so when Word is missing `Unavailable` is raised, and the caller
+has to survive that rather than crash.
 
-Публичный API:
-    make_word_files(dest=None) -> dict   настоящие .doc/.rtf/.odt/.docx
-    available() -> bool                  зарегистрирован ли Word.Application
-    Unavailable                          исключение «Office недоступен»
+Public API:
+    make_word_files(dest=None) -> dict   real .doc/.rtf/.odt/.docx
+    available() -> bool                  whether Word.Application is registered
+    Unavailable                          the "Office unavailable" exception
 
 CLI:
-    PYTHONIOENCODING=utf-8 python -m tests.real_office [каталог]
+    PYTHONIOENCODING=utf-8 python -m tests.real_office [directory]
 
-ПРИВАТНОСТЬ. Созданные файлы несут имя пользователя Word этой машины --
-настоящее имя человека, потому что именно его Word пишет в `dc:creator`. Это
-не недосмотр, а то, что и надо проверять. Но из этого следует два запрета:
-каталог по умолчанию лежит в `%TEMP%`, а не в репозитории, и содержимое
-находок в логи и отчёты не печатается.
+PRIVACY. The created files carry the Word user name of this machine: a real
+person's name, because that's exactly what Word writes into `dc:creator`.
+That's not an oversight but exactly what needs checking. Two prohibitions
+follow from it: the default directory is in `%TEMP%`, not in the repository,
+and the contents of findings are not printed to logs or reports.
 
-ПОБОЧНЫЕ ЭФФЕКТЫ. Скрипт на время меняет два параметра установленного Word --
-имя пользователя и предупреждение о сохранении файла с исправлениями, -- и
-возвращает их в блоке finally. Если процесс убить между правкой и
-восстановлением, параметры останутся изменёнными.
+SIDE EFFECTS. The script temporarily changes two settings of the installed
+Word (the user name and the warning about saving a file with tracked
+changes) and restores them in a finally block. If the process is killed
+between the change and the restore, the settings stay changed.
 
-Зависимости: только stdlib плюс `powershell`, который есть в любой Windows.
-pywin32 намеренно не используется: это была бы новая обязательная зависимость
-ради вспомогательного модуля.
+Dependencies: stdlib only plus `powershell`, which every Windows has.
+pywin32 is deliberately not used: it would be a new required dependency for
+the sake of a helper module.
 """
 
 from __future__ import annotations
@@ -47,10 +48,10 @@ __all__ = ["make_word_files", "available", "Unavailable", "WORD_FILES"]
 
 
 class Unavailable(RuntimeError):
-    """Office на этой машине недоступен или сценарий не отработал."""
+    """Office is unavailable on this machine or the script failed."""
 
 
-# Что создаёт make_word_files: имя файла -> код формата Word (WdSaveFormat).
+# What make_word_files creates: file name -> Word format code (WdSaveFormat).
 # wdFormatDocument97=0, wdFormatRTF=6, wdFormatXMLDocument=12,
 # wdFormatOpenDocumentText=23.
 WORD_FILES = (
@@ -60,9 +61,9 @@ WORD_FILES = (
     ("word_real.odt", 23),
 )
 
-# Значения, которые мы просим Word записать. Кириллица здесь не украшение:
-# Unicode-секция пользовательских свойств (MS-OLEPS) и кодировка RTF
-# (\'hh против \uN) на латинице не проверяются.
+# The values we ask Word to write. The Cyrillic here isn't decoration: the
+# Unicode section of custom properties (MS-OLEPS) and the RTF encoding
+# (\'hh vs \uN) can't be tested with Latin text.
 _TITLE = "Отчёт за 3 квартал"
 _SUBJECT = "Внутренний документ"
 _COMPANY = "ООО Ромашка-Тест"
@@ -74,19 +75,19 @@ _REVIEWER_1 = "Кузнецова Анастасия Викторовна"
 _REVIEWER_2 = "Громов Дмитрий Алексеевич"
 _COMMENT = "Проверить источник данных"
 
-# Три приёма, без которых сценарий не работает. Каждый стоил отдельной отладки,
-# поэтому они описаны здесь, а не только в коде:
+# Three tricks without which the script doesn't work. Each cost a separate
+# debugging session, so they're described here and not only in the code:
 #
-# 1. PowerShell не умеет индексировать параметризованное свойство COM:
-#    $doc.BuiltInDocumentProperties.Item("Title") возвращает $null. Нужен
-#    InvokeMember. То же касается CustomDocumentProperties.Add и SaveAs2 --
-#    без InvokeMember Word считает имя файла не заданным и открывает диалог
-#    «Сохранить как», который при Visible=$false невидим и модален, то есть
-#    процесс висит навсегда.
-# 2. Word предупреждает при сохранении файла с исправлениями и примечаниями
-#    (Options.WarnBeforeSavingPrintingSendingMarkup). Тот же невидимый висяк.
-# 3. Файл сценария обязан быть в UTF-8 С BOM: PowerShell 5.1 без BOM читает
-#    .ps1 как cp1251 и калечит кириллицу до синтаксической ошибки.
+# 1. PowerShell can't index a parameterized COM property:
+#    $doc.BuiltInDocumentProperties.Item("Title") returns $null. InvokeMember
+#    is needed. The same goes for CustomDocumentProperties.Add and SaveAs2:
+#    without InvokeMember Word treats the file name as unset and opens the
+#    "Save As" dialog, which with Visible=$false is invisible and modal, so
+#    the process hangs forever.
+# 2. Word warns when saving a file with tracked changes and comments
+#    (Options.WarnBeforeSavingPrintingSendingMarkup). The same invisible hang.
+# 3. The script file must be UTF-8 WITH a BOM: PowerShell 5.1 reads a .ps1
+#    without a BOM as cp1251 and mangles Cyrillic into a syntax error.
 _PS_TEMPLATE = r"""
 $ErrorActionPreference = "Stop"
 $out = "{out}"
@@ -115,7 +116,7 @@ $w.Options.DoNotPromptForConvert = $true
 
 try {{
     $doc = $w.Documents.Add()
-    # Без текста Word не пишет ни статистику, ни rsid, ни время правки.
+    # Without text Word writes neither statistics, nor rsid, nor the editing time.
     $doc.Content.Text = "{body}"
 
     $bp = $doc.BuiltInDocumentProperties
@@ -129,9 +130,9 @@ try {{
     Add-Prop $cp "{p1name}" "{p1value}"
     Add-Prop $cp "{p2name}" "{p2value}"
 
-    # Два рецензента: их имена ложатся в SttbfRMark у .doc, в w:ins/@w:author
-    # у .docx и в \*\revtbl у RTF. Одного мало -- таблица из одной записи не
-    # проверяет обход таблицы.
+    # Two reviewers: their names land in SttbfRMark in .doc, in w:ins/@w:author
+    # in .docx and in \*\revtbl in RTF. One isn't enough: a one-entry table
+    # doesn't test walking the table.
     $doc.TrackRevisions = $true
     $w.UserName = "{rev1}"
     $w.UserInitials = "AA"
@@ -170,10 +171,10 @@ finally {{
 
 
 def available() -> bool:
-    """Зарегистрирован ли Word.Application в этой системе.
+    """Whether Word.Application is registered on this system.
 
-    Возврат: True, если COM-класс Word есть. Проверка по реестру, Word при
-    этом не запускается -- запуск стоит секунды и оставляет процесс.
+    Returns: True if the Word COM class exists. Checked via the registry, Word
+    isn't started: starting it costs seconds and leaves a process behind.
     """
     try:
         import winreg
@@ -189,28 +190,28 @@ def available() -> bool:
 
 
 def make_word_files(dest: str | None = None, timeout: int = 180) -> dict:
-    """Создать настоящим Word четыре файла: .doc, .rtf, .docx, .odt.
+    """Create four files with real Word: .doc, .rtf, .docx, .odt.
 
-    dest: каталог для файлов. None -> новый каталог в %TEMP%. Каталог
-        создаётся при необходимости; в репозиторий его класть нельзя (файлы
-        несут имя пользователя Word этой машины).
-    timeout: сколько секунд ждать Word. Больше минуты нужно потому, что
-        первый запуск Office после перезагрузки заметно медленнее.
+    dest: the directory for the files. None -> a new directory in %TEMP%. The
+        directory is created if needed; it must not be put in the repository
+        (the files carry the Word user name of this machine).
+    timeout: how many seconds to wait for Word. More than a minute is needed
+        because the first Office start after a reboot is noticeably slower.
 
-    Возврат: dict «имя файла -> абсолютный путь». В нём ровно то, что
-        действительно создалось и непусто.
+    Returns: a dict "file name -> absolute path". It holds exactly what was
+        actually created and is non-empty.
 
-    Исключения: Unavailable -- Word не зарегистрирован, powershell не
-        запустился, сценарий отработал с ошибкой или не создал ни одного
-        файла. Текст исключения содержит только диагностику сценария; имён и
-        содержимого созданных файлов в нём нет.
+    Raises: Unavailable if Word isn't registered, powershell didn't start, the
+        script failed, or it created no files. The exception text contains only
+        the script's diagnostics; there are no names or contents of the created
+        files in it.
 
-    Побочные эффекты: запускает и закрывает Word; на время работы меняет имя
-        пользователя Word и предупреждение о сохранении файла с исправлениями,
-        затем возвращает их. Пишет файлы в dest.
+    Side effects: starts and closes Word; while running, changes the Word user
+        name and the warning about saving a file with tracked changes, then
+        restores them. Writes files into dest.
     """
     if not available():
-        raise Unavailable("Word.Application не зарегистрирован: Office не установлен")
+        raise Unavailable("Word.Application is not registered: Office is not installed")
     if dest is None:
         dest = tempfile.mkdtemp(prefix="tgm_real_")
     os.makedirs(dest, exist_ok=True)
@@ -228,7 +229,7 @@ def make_word_files(dest: str | None = None, timeout: int = 180) -> dict:
         keywords=_KEYWORDS, p1name=_PROP_1[0], p1value=_PROP_1[1],
         p2name=_PROP_2[0], p2value=_PROP_2[1], rev1=_REVIEWER_1,
         rev2=_REVIEWER_2, comment=_COMMENT, saves=saves)
-    # utf-8-sig: BOM обязателен, см. приём 3 выше.
+    # utf-8-sig: the BOM is required, see trick 3 above.
     with open(script, "w", encoding="utf-8-sig") as fh:
         fh.write(text)
 
@@ -237,11 +238,11 @@ def make_word_files(dest: str | None = None, timeout: int = 180) -> dict:
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
             timeout=timeout, capture_output=True, check=False)
     except FileNotFoundError as exc:
-        raise Unavailable("powershell не найден: %s" % type(exc).__name__) from exc
+        raise Unavailable("powershell not found: %s" % type(exc).__name__) from exc
     except subprocess.TimeoutExpired as exc:
-        # Висяк почти всегда означает невидимый модальный диалог Word.
+        # A hang almost always means an invisible modal Word dialog.
         raise Unavailable(
-            "Word не ответил за %d с: вероятно, открыт невидимый диалог" % timeout
+            "Word didn't respond within %d s: an invisible dialog is probably open" % timeout
         ) from exc
 
     lines = []
@@ -255,15 +256,15 @@ def make_word_files(dest: str | None = None, timeout: int = 180) -> dict:
             made[name] = p
     if not made:
         bad = next((ln for ln in lines if ln.startswith("FAIL")), "")
-        raise Unavailable("Word не создал ни одного файла. %s" % (bad or "; ".join(lines[-3:])))
+        raise Unavailable("Word created no files. %s" % (bad or "; ".join(lines[-3:])))
     return made
 
 
 def _demo():
-    """Самопроверка: создать файлы и показать, что инспектор в них видит.
+    """Self-test: create the files and show what the inspector sees in them.
 
-    Печатаются только числа, метки и места: значения из файлов -- настоящие
-    персональные данные владельца машины, и выводить их нельзя.
+    Only numbers, labels and locations are printed: the values from the files
+    are the machine owner's real personal data and must not be printed.
     """
     import sys
 
@@ -272,45 +273,44 @@ def _demo():
 
     dest = sys.argv[1] if len(sys.argv) > 1 else None
     if not available():
-        print("Word не установлен -- приёмка на настоящих файлах пропущена.")
-        print("Это не провал: Office для проекта необязателен.")
+        print("Word is not installed -- acceptance testing on real files skipped.")
+        print("This is not a failure: Office is optional for the project.")
         return 0
     try:
         made = make_word_files(dest)
     except Unavailable as exc:
-        print("не получилось: %s" % exc)
+        print("failed: %s" % exc)
         return 1
 
-    print("создано файлов: %d" % len(made))
+    print("files created: %d" % len(made))
     ok = True
     for name in sorted(made):
         rep = inspect_file(made[name])
         risks = {}
         for f in rep.findings:
             risks[f.risk.value] = risks.get(f.risk.value, 0) + 1
-        print("  %-16s fmt=%-5s находок %3d (%s), сигналы: %s, ошибок %d"
+        print("  %-16s fmt=%-5s findings %3d (%s), signals: %s, errors %d"
               % (name, rep.fmt, len(rep.findings),
                  ", ".join("%s %d" % kv for kv in sorted(risks.items())),
-                 ",".join(sorted({s.kind for s in rep.signals})) or "нет",
+                 ",".join(sorted({s.kind for s in rep.signals})) or "none",
                  len(rep.errors)))
         if rep.errors:
             ok = False
-            print("     ОШИБКИ РАЗБОРА: %d -- настоящий файл обязан разбираться "
-                  "без ошибок" % len(rep.errors))
+            print("     PARSE ERRORS: %d -- a real file must parse without errors" % len(rep.errors))
         if not rep.findings:
             ok = False
-            print("     НИ ОДНОЙ НАХОДКИ -- для файла от Office это дефект инспектора")
+            print("     NOT A SINGLE FINDING -- for a file from Office that's an inspector defect")
         if name == "word_real.doc":
-            marks = [f.value for f in rep.findings if f.label == "Автор правки (SttbfRMark)"]
-            # Двое рецензентов заложены сценарием; первая запись таблицы --
-            # служебная "Unknown", и выдать её за человека нельзя.
+            marks = [f.value for f in rep.findings if f.label == "Revision author (SttbfRMark)"]
+            # Two reviewers are planted by the script; the first table entry is the
+            # service entry "Unknown", and it must not be passed off as a person.
             if len(marks) == 2 and "Unknown" not in marks:
-                print("     SttbfRMark: 2 автора, служебная запись отброшена")
+                print("     SttbfRMark: 2 authors, the service entry dropped")
             else:
                 ok = False
-                print("     SttbfRMark: ожидались 2 автора без Unknown, получено %d"
+                print("     SttbfRMark: expected 2 authors without Unknown, got %d"
                       % len(marks))
-    print("каталог: %s" % (dest or "в %TEMP%, путь не печатаем"))
+    print("directory: %s" % (dest or "in %TEMP%, the path is not printed"))
     return 0 if ok else 1
 
 

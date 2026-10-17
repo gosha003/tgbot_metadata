@@ -1,9 +1,12 @@
-# Токен бота. Никогда не должен попасть в историю.
+# Bot token. Must never get into the history.
 .env
 *.env
 
-# Замок единственного экземпляра бота.
+# Single-instance lock of the bot.
 .bot.lock
+
+# Per-user language choice of the bot (/lang): local state, not source.
+.bot_lang.json
 
 # Python
 __pycache__/
@@ -12,12 +15,12 @@ __pycache__/
 .venv/
 venv/
 
-# Необязательные внешние бинарники (exiftool и прочее): качаются вручную,
-# в репозиторий не кладутся. .gitkeep оставляет сам каталог.
+# Optional external binaries (exiftool etc.) are downloaded by hand and not
+# committed. .gitkeep keeps the directory itself.
 tools/*
 !tools/.gitkeep
 
-# Временные файлы разбора и черновики агентов.
+# Temporary parsing files and drafts.
 tmp/
 scratch_*
 *.tmp
