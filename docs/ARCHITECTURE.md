@@ -107,8 +107,8 @@ list and the format version. Calling all 137 critical would drown the seven real
 leaks.
 
 `parts` is the container's composition (ZIP entries with their DOS timestamps, OLE
-streams). Inspectors fill it; the report does not render it yet. It is the input
-for phase 2, which needs a byte-exact repack.
+streams). Inspectors fill it and the tests check it; the report doesn't render it,
+and the cleaners read the container themselves (`core/zipfix.py`).
 
 ### `err()` and path scrubbing
 

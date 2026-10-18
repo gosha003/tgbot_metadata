@@ -1,7 +1,7 @@
 # tgbot_metadata
 
 [![tests](https://github.com/gosha003/tgbot_metadata/actions/workflows/tests.yml/badge.svg)](https://github.com/gosha003/tgbot_metadata/actions/workflows/tests.yml)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 
 A Telegram bot and command-line tool that **finds and removes hidden metadata** from documents,
 spreadsheets, presentations, PDFs and photos, and then **proves the result** by inspecting the
@@ -62,7 +62,9 @@ and removes it without leaving the file looking tampered with.
 ## Quick start
 
 ```bash
-pip install -r requirements.txt          # Python 3.10+, tested on 3.11
+python -m venv .venv                     # Python 3.11+
+source .venv/bin/activate                # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
 Inspect a file (read-only):
@@ -86,8 +88,9 @@ Run the bot: put your token from [@BotFather](https://t.me/BotFather) and your T
 python bot.py
 ```
 
-On Windows, prefix commands with `PYTHONIOENCODING=utf-8` (or set it once) so the console doesn't
-mangle non-ASCII output.
+On Windows, set `PYTHONIOENCODING=utf-8` once per console so it doesn't mangle non-ASCII output:
+`$env:PYTHONIOENCODING="utf-8"` in PowerShell, `set PYTHONIOENCODING=utf-8` in cmd. The
+`PYTHONIOENCODING=utf-8 python ...` prefix used below is for POSIX shells and Git Bash.
 
 ### Cleaning profiles
 

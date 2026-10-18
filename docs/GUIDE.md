@@ -78,7 +78,7 @@ time.
 You need:
 
 - a computer with Windows, macOS or Linux;
-- **Python 3.10 or newer** (free, installation is described below);
+- **Python 3.11 or newer** (free, installation is described below);
 - a Telegram account;
 - about 200 MB of disk space.
 
@@ -100,7 +100,7 @@ You need:
    python --version
    ```
 
-   It should say `Python 3.10` or newer. If it says "is not recognized as an
+   It should say `Python 3.11` or newer. If it says "is not recognized as an
    internal or external command", the PATH box wasn't ticked: reinstall Python
    with the box ticked.
 
@@ -226,6 +226,10 @@ TG_OWNER_ID=
 
 Leave `TG_OWNER_ID` empty for now: you'll learn your number in the next step.
 
+The bot replies in Russian by default. For English replies, also add the line
+`BOT_LANG=en` now (or send `/lang en` to the bot later). The replies quoted below
+are the English ones.
+
 > Why the bot serves no one without `TG_OWNER_ID`: otherwise anyone who finds
 > the bot through search could push their files through it on your computer.
 > The bot is closed by default and answers only the people you name.
@@ -290,7 +294,7 @@ in the chat with the bot shows what was found.
 **LibreOffice** is a free office suite. It's needed for the "Regenerate"
 button and for cleaning old `.doc` / `.xls` / `.ppt` files.
 
-- Windows and macOS: download it from [libreoffice.org](https://www.libreoffice.org/download/download/)
+- Windows and macOS: download it from [libreoffice.org](https://www.libreoffice.org/download/download-libreoffice/)
   and install it like any program. The bot finds it on its own.
 - Linux: `sudo apt install libreoffice`.
 
@@ -569,10 +573,11 @@ Send `/lang` and pick Русский or English. The choice is remembered per us
 
 ## 14. Updating
 
-If you installed with git:
+If you installed with git (on macOS/Linux: `cd ~/tgbot_metadata` and activate the
+venv instead of the first line):
 
 ```
-cd C:\tgbot_metadata          (or ~/tgbot_metadata)
+cd C:\tgbot_metadata
 git pull
 python -m pip install -r requirements.txt
 ```

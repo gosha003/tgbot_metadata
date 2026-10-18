@@ -1794,7 +1794,7 @@ def test_97_cli_verdict_text(tmp):
            rc == 0 and "CLEANED: no original value" in text and "NOT FULLY" not in text, (rc, text[:200]))
 
     # Since phase 2 docx is cleaned. A refusal with a phase number remains for
-    # formats whose cleaning doesn't exist yet: legacy OLE2 (phase 4), ODF and RTF.
+    # legacy OLE2 (phase 4): it can only be regenerated through LibreOffice.
     rc, text, out = run_cli(fixtures.make_docx(tmp)[0])
     _check("CLI, docx: exit code 0, the file is produced, \"CLEANED\"",
            rc == 0 and os.path.isfile(out) and "CLEANED" in text and "NOT CLEANED" not in text,

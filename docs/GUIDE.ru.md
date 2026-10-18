@@ -79,7 +79,7 @@ Word» — это правда).
 Понадобится:
 
 - компьютер с Windows, macOS или Linux;
-- **Python 3.10 или новее** (бесплатный, установка описана ниже);
+- **Python 3.11 или новее** (бесплатный, установка описана ниже);
 - аккаунт в Telegram;
 - около 200 МБ места на диске.
 
@@ -102,7 +102,7 @@ Word» — это правда).
    python --version
    ```
 
-   Должно ответить `Python 3.10` или новее. Если пишет «не является внутренней
+   Должно ответить `Python 3.11` или новее. Если пишет «не является внутренней
    или внешней командой», значит, галочку PATH не поставили: переустановите
    Python с галочкой.
 
@@ -288,7 +288,7 @@ another window» (сообщения в окне бота — на англий�
 **LibreOffice** — бесплатный офисный пакет. Нужен для кнопки «Пересоздать» и
 для чистки старых `.doc` / `.xls` / `.ppt`.
 
-- Windows и macOS: скачать с [libreoffice.org](https://www.libreoffice.org/download/download/)
+- Windows и macOS: скачать с [libreoffice.org](https://www.libreoffice.org/download/download-libreoffice/)
   и установить как обычную программу. Бот найдёт его сам.
 - Linux: `sudo apt install libreoffice`.
 
@@ -562,10 +562,11 @@ LibreOffice, если он запущен, и попробуйте ещё раз
 
 ## 14. Обновление
 
-Если ставили через git:
+Если ставили через git (на macOS/Linux вместо первой строки — `cd ~/tgbot_metadata`
+и активировать venv):
 
 ```
-cd C:\tgbot_metadata          (или ~/tgbot_metadata)
+cd C:\tgbot_metadata
 git pull
 python -m pip install -r requirements.txt
 ```

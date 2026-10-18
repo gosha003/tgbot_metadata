@@ -70,7 +70,7 @@ DECISIONS (each deliberate):
   vbaProject and OLE embeddings; with force_signed, signatures.
   [Content_Types].xml loses only the Overrides of removed parts and Defaults
   for extensions no longer in the package.
-* External paths in .rels (file:///, C:\, UNC) are replaced with the FILE
+* External paths in .rels (file:///, C:\\, UNC) are replaced with the FILE
   NAME: formulas and objects rely on such relationships, so removing the
   relationship entirely isn't possible. mailto links and the
   template/mail-merge source are removed together with the element that
@@ -85,7 +85,7 @@ DECISIONS (each deliberate):
   breaks the signature. With force_signed the signatures are removed.
 * Everything that can't be removed is honestly marked Act.UNREMOVABLE:
   embedded OLE objects in STEALTH (they have their own docProps inside, and
-  OLE2 cleaning doesn't exist yet), Power Query DataMashup, images in formats
+  OLE2 can't be cleaned in place), Power Query DataMashup, images in formats
   clean_image doesn't take.
 
 Privacy: no logs; errors hold texts without paths. File values are
@@ -1336,11 +1336,11 @@ def _sec_embeddings(pkg):
                 _drop(pkg, nm, "embeddings", tr("Embedded OLE object"), size,
                       tr("PARANOID removes the embedded OLE object entirely together with the "
                          "object in the text: it has its own docProps (author, company, path), "
-                         "and OLE2 cleaning doesn't exist yet (phase 4)."))
+                         "and OLE2 can't be cleaned in place."))
             else:
                 pkg.act(Act.UNREMOVABLE, nm, what, size,
                         note=tr("Embedded OLE object: it has its own docProps inside (author, "
-                                "company, path), and OLE2 cleaning doesn't exist yet (phase 4), "
+                                "company, path), and OLE2 can't be cleaned in place, "
                                 "so the metadata INSIDE the object remains. The paranoid profile "
                                 "removes such an object entirely."))
         elif rest and rest not in ("big", "depth"):

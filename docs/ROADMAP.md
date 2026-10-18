@@ -66,8 +66,9 @@ write a new local header and those bytes. Recompress only the 3–5 XML parts
 that were actually edited. Otherwise the compressed size of every entry
 changes and the file's profile no longer matches the claimed application.
 
-The `Report.parts` field is filled by the inspectors for exactly this purpose:
-it holds the container's composition with timestamps and compression methods.
+The inspectors record the container's composition (entry order, timestamps,
+compression methods) in `Report.parts`; the cleaner itself reads the ZIP directly
+through `core/zipfix.py`.
 
 ### The line we don't cross
 
@@ -92,8 +93,8 @@ feature.
 
 ### Phase 1 — PDF and images
 `pikepdf`: `/Info`, XMP including the `xmpMM:*` GUIDs, regeneration of the
-trailer `/ID`, `save(linearize=True)` to drop the incremental-update history
-and garbage-collect, annotation authorship, JS, `/EmbeddedFiles`, `/PieceInfo`.
+trailer `/ID`, a full rewrite without linearization to drop the
+incremental-update history (linearizing would leave a fingerprint of its own), annotation authorship, JS, `/EmbeddedFiles`, `/PieceInfo`.
 Images: our own container rebuild on the stdlib, without re-encoding; `exiftool`
 stays optional enrichment for inspection.
 
@@ -129,9 +130,9 @@ Word: there is not a single rsid." In other words, `PARANOID` makes the file
 look not cleaned but machine-generated, which for many tasks is the worse
 outcome: suspicion of forgery weighs more than suspicion of cleaning. The
 warning mechanism works — the signal arrives in `new_signals` and ends up in
-the report — but the choice itself, whether to strip rsids from a file that
-claims Word, must be revisited in phase 3 together with the detectability
-score: it is the score that should weigh such pairs. Verified with one command:
+the report, and the detectability score (`core/lint.py`) rates it `obvious`.
+This stays a known limit: keeping rsids keeps a link between documents, and
+dropping them reads as a library-made file. Verified with one command:
 `python -m core.clean_ooxml --real-word`.
 
 ### Phase 2 — ODF and RTF
@@ -216,7 +217,7 @@ on the tenant side — warn).
 
 ## Deferred tasks and known gaps
 
-Collected from review reports; for planning, not as a bug list.
+For planning, not a bug list.
 
 **PDF.** Fonts are traversed in depth: Form XObjects, tiling `/Pattern`s and
 annotation appearance streams (`/AP`), with a limit on nodes and depth. XMP is
@@ -236,8 +237,8 @@ costs more than a missed one. pptx specifics (`presProps.xml`,
 `notesSlides/*`, `slideMasters/*`) are covered only by the generic part.
 `docMetadata/LabelInfo.xml` is matched by name suffix, not by exact path.
 
-**Report.** `Report.parts` is not rendered (deliberately — it is an input to
-phase 2). The number of messages is capped by `bot._MAX_PARTS`, with an honest
+**Report.** `Report.parts` is not rendered (it records the container's composition
+for the tests; users don't need it). The number of messages is capped by `bot._MAX_PARTS`, with an honest
 truncation notice; without the cap, Telegram answered 429 to a report of dozens
 of messages, i.e. the bot blocked itself. Values go under `tg-spoiler`
 (`report.MASK_VALUES`).
@@ -260,9 +261,8 @@ versions in the stream is still not extracted: it cannot be pulled out without
 rebuilding the document, and that is a phase 4 task, not the inspector's. Also:
 paths of external workbooks from `SUPBOOK` in `.xls` are not extracted (only
 the records are counted); the Unicode section of custom properties is built
-per MS-OLEPS and has not been checked against a file from real Office — there
-is not a single readable `.doc` on the machine, they are all cloud
-placeholders. Not covered by fixtures: the v4 container (4096-byte sectors),
+per MS-OLEPS and has not been checked against a file from real Office (no real
+Office `.doc` sample was available when it was written). Not covered by fixtures: the v4 container (4096-byte sectors),
 DIFAT beyond the header (>109 FAT sectors), an encrypted `.doc`,
 BIFF5/Excel 95, digital signature.
 
