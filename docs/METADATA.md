@@ -207,8 +207,10 @@ the source file, which makes it an identifier that links files.
 incrementally, all the previous versions physically sit in it: old xrefs, old
 page content and, in particular, **the text under "redacted" black
 rectangles**. Detection: the number of `%%EOF` and `startxref` occurrences in
-the raw bytes, `/Prev` in the trailers. The fix is re-saving with
-linearization (`pdf.save(linearize=True)`), which also garbage-collects.
+the raw bytes, `/Prev` in the trailers. The fix is a full rewrite: QPDF writes only
+the objects reachable from the trailer, so the old revisions are gone.
+Linearization isn't needed for that and is a fingerprint of its own (it adds a
+`/Prev` and hint tables), so the cleaner doesn't linearize.
 
 ### Other
 | Where | What |

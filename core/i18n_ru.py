@@ -1097,8 +1097,8 @@ RU = {
         "Вшитая миниатюра JFIF",
     "Embedded OLE object":
         "Вложенный OLE-объект",
-    "Embedded OLE object: it has its own docProps inside (author, company, path), and OLE2 cleaning doesn't exist yet (phase 4), so the metadata INSIDE the object remains. The paranoid profile removes such an object entirely.":
-        "Вложенный OLE-объект: внутри свои docProps (автор, компания, путь), чистки OLE2 пока нет (фаза 4), поэтому метаданные ВНУТРИ объекта остались. Профиль paranoid удаляет такой объект целиком.",
+    "Embedded OLE object: it has its own docProps inside (author, company, path), and OLE2 can't be cleaned in place, so the metadata INSIDE the object remains. The paranoid profile removes such an object entirely.":
+        "Вложенный OLE-объект: внутри свои docProps (автор, компания, путь), а OLE2 на месте не чистится, поэтому метаданные ВНУТРИ объекта остались. Профиль paranoid удаляет такой объект целиком.",
     "Embedded OLE objects":
         "Встроенные OLE-объекты",
     "Embedded file":
@@ -1851,8 +1851,8 @@ RU = {
         "PARANOID убирает приложение и версию: файл без них читается как обработанный (Word всегда пишет app.xml с Application) -- этого профиль не скрывает.",
     "PARANOID removes the application string.":
         "PARANOID убирает строку приложения.",
-    "PARANOID removes the embedded OLE object entirely together with the object in the text: it has its own docProps (author, company, path), and OLE2 cleaning doesn't exist yet (phase 4).":
-        "PARANOID удаляет вложенный OLE-объект целиком вместе с объектом в тексте: у него свои docProps (автор, компания, путь), а чистки OLE2 пока нет (фаза 4).",
+    "PARANOID removes the embedded OLE object entirely together with the object in the text: it has its own docProps (author, company, path), and OLE2 can't be cleaned in place.":
+        "PARANOID удаляет вложенный OLE-объект целиком вместе с объектом в тексте: у него свои docProps (автор, компания, путь), а OLE2 на месте не чистится.",
     "PARANOID removes the macros entirely: they contain source code, module names and the project path. Document functionality that relied on them is lost.":
         "PARANOID удаляет макросы целиком: в них исходники, имена модулей и путь проекта. Функциональность документа, которая на них держалась, потеряна.",
     "PARANOID: /ID removed altogether (it is optional). In many producers ID[0] is derived from the file path and name and links files; a file without /ID looks processed.":
