@@ -125,7 +125,7 @@ def _fmt_size(size) -> str:
 
 def _confidence(value) -> str:
     key = clip(value, 32).lower()
-    return tr(CONFIDENCE[key]) if key in CONFIDENCE else (key or tr("not specified"))
+    return tr(CONFIDENCE[key]) if key in CONFIDENCE else (key or tr("unspecified"))
 
 
 def _by_location(items):
@@ -326,7 +326,7 @@ def _tg_signals(report):
     signals = _attr(report, "signals")
     if not signals:
         return []
-    out = [[tr("\U0001F50E <b>SIGNALS</b>")]]
+    out = [[tr("\U0001F50E <b>CONCLUSIONS</b>")]]
     for kind, items in _signal_groups(signals):
         title = tr(SIGNAL_TITLE.get(kind, "")) or _other_title(kind)
         lines = ["%s <b>%s</b>" % (SIGNAL_ICON.get(kind, "\u2022"), _esc(title, 120))]
@@ -469,11 +469,11 @@ def render_plain(report) -> str:
 
 
 def _plain_signals(report):
-    """The SIGNALS block in plain form."""
+    """The CONCLUSIONS block in plain form."""
     signals = _attr(report, "signals")
     if not signals:
         return []
-    out = ["", tr("SIGNALS"), "-" * WIDTH]
+    out = ["", tr("CONCLUSIONS"), "-" * WIDTH]
     for kind, items in _signal_groups(signals):
         title = tr(SIGNAL_TITLE.get(kind, "")) or _other_title(kind)
         out.append("  %s" % _plain(title, 120))
@@ -817,7 +817,7 @@ def _demo():
     tg_partial = render_telegram(partial)
     blob = " ".join(tg_partial)
     assert "Word (OOXML)" in blob                     # header survived
-    assert "SIGNALS" in blob                         # signals survived
+    assert "CONCLUSIONS" in blob                     # signals survived
     assert "Could not parse" in blob            # parse errors survived
     assert "failed to render" in blob                  # and the failure itself is visible
     assert "failed to render" in render_plain(partial)

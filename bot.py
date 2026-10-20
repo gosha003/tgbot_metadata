@@ -213,7 +213,7 @@ _PROFILES = {"cl:stealth": Profile.STEALTH, "cl:paranoid": Profile.PARANOID,
 _KEEP_OPTS = {
     "title": (N_("document title"), {"/Title", "dc:title", "title"},
               ("заголовок", "название", "title")),
-    "author": (N_("author"), {"/Author", "dc:creator", "author", "creator", "initial-creator"},
+    "author": (N_("the author"), {"/Author", "dc:creator", "author", "creator", "initial-creator"},
                ("автор", "creator", "author", "кто сохранял", "last saved by", "lastmodifiedby")),
     "icc": (N_("ICC profile"), {"icc"}, ()),
 }
@@ -778,7 +778,7 @@ async def on_clear(message: Message) -> None:
     await message.answer(
         tr("\U0001F5D1 Report messages deleted: %d.\n<i>The bot doesn't remember reports sent "
            "before its last restart -- delete those by hand. The bot doesn't touch cleaned files "
-           "or your own messages.</i>") % n)
+           "or the files you sent; it deletes only its own reports and this command.</i>") % n)
 
 
 @router.message(Command("status"))
@@ -1528,7 +1528,7 @@ async def _selftest() -> int:
         btns = [b.text for r in ch.markup.inline_keyboard for b in r] if ch else []
         # LibreOffice doesn't regenerate PDFs: the "Regenerate" button would lead to a guaranteed refusal.
         check("buttons: \"Keep\" toggles, Stealth, Paranoid, Don't clean (no Regenerate)",
-              btns == ["☐ Keep: document title", "☐ Keep: author",
+              btns == ["☐ Keep: document title", "☐ Keep: the author",
                        "Clean (Stealth)", "Clean (Paranoid)", "Don't clean"], btns)
         check("profiles explained right in the message, regeneration not promised for PDF",
               ch and "Stealth" in ch.text and "keeps" in ch.text and "Paranoid" in ch.text
@@ -1840,11 +1840,11 @@ async def _selftest() -> int:
         cb = await click(ch, "kp:author")
         lbl = [b.text for r in ch.markup.inline_keyboard for b in r]
         check("toggle switched on: button ☑, entry intact, keep={'author'}",
-              "☑ Keep: author" in lbl and _pending[key].keep == {"author"}
+              "☑ Keep: the author" in lbl and _pending[key].keep == {"author"}
               and cb.acks == [(None, False)], (lbl, cb.acks))
         await click(ch, "kp:author")
         check("pressing again switches it off", _pending[key].keep == set()
-              and "☐ Keep: author" in [b.text for r in ch.markup.inline_keyboard for b in r])
+              and "☐ Keep: the author" in [b.text for r in ch.markup.inline_keyboard for b in r])
         cb = await click(ch, "kp:author", user_id=8)
         check("someone else's toggle rejected, state unchanged",
               cb.acks[0][1] and _pending[key].keep == set(), cb.acks)
@@ -1953,7 +1953,7 @@ async def _selftest() -> int:
         lbl = [b.text for r in ch.markup.inline_keyboard for b in r] if ch else []
         check("ZIP: batch cleaning offered, with the file count and toggles",
               ch and "ZIP archive" in ch.text and "files inside: 4" in ch.text
-              and lbl == ["☐ Keep: document title", "☐ Keep: author", "☐ Keep: ICC profile",
+              and lbl == ["☐ Keep: document title", "☐ Keep: the author", "☐ Keep: ICC profile",
                           "Names in archive: neutral", "Clean all (Stealth)", "Clean all (Paranoid)",
                           "Regenerate all (LibreOffice)", "Don't clean"], lbl)
         check("ZIP: nothing on disk after the offer", left() == base)
@@ -2072,6 +2072,8 @@ async def _selftest() -> int:
               and any("Result not sent" in t and "Bot API" in t and "MB" in t for t in texts(ev)),
               texts(ev)[-1][:300])
         check("ZIP: the sending limit in config equals 50 MB", config.MAX_SEND_BYTES == 50 * 1024 * 1024)
+        check("config: a malformed id is skipped instead of raising ValueError",
+              config._ids("--5, ², 12; -7") == [12, -7])
 
         # long report -> as a document
         g["_BATCH_CHAT_PARTS"] = 0
@@ -2162,6 +2164,10 @@ async def _selftest() -> int:
         await on_clear(m)
         check("/clear deleted the reports and said how many",
               bot.deleted and not _reports and any("Report messages deleted" in t for t in texts(ev)), texts(ev))
+        check("/clear says it removes only its own reports and the command, not that it spares "
+              "your messages",
+              any("only its own reports and this command" in t and "your own messages" not in t
+                  for t in texts(ev)), texts(ev))
 
         _reports.clear()
         _track(SimpleNamespace(chat=SimpleNamespace(id=5), message_id=1))

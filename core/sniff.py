@@ -137,7 +137,9 @@ def _sniff_zip(path) -> str:
             # ODF declares itself with a first 'mimetype' entry (uncompressed).
             if "mimetype" in names:
                 try:
-                    mime = zf.read("mimetype").strip()
+                    # Bounded: a tiny zip can declare a huge deflated mimetype.
+                    with zf.open("mimetype") as fh:
+                        mime = fh.read(100).strip()
                     if mime in _ODF:
                         return _ODF[mime]
                 except Exception:

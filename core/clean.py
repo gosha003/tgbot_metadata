@@ -718,11 +718,25 @@ def _selftest() -> int:
             _check("%s: no crash, result correct" % name,
                    isinstance(res, DispatchResult) and not (res.ok and not res.verified)
                    and (not res.ok or os.path.isfile(res.dst)), res.errors)
-        for bad, want in ((os.path.join(tmp, "no_such_file.pdf"), "not found"), (tmp, "directory")):
+        for bad, want in ((os.path.join(tmp, "нет_такого.pdf"), "not found"), (tmp, "directory")):
             res = clean_file(bad, os.path.join(tmp, "x.out"))
             _check("%s: refused with a reason" % want, not res.ok and want in " ".join(res.errors), res.errors)
         res = clean_file("bad" + chr(0) + "path", os.path.join(tmp, "x.out"))
         _check("NUL in the path doesn't crash", not res.ok)
+        # A tiny zip declaring a huge deflated "mimetype": sniff() must not unpack it.
+        import tracemalloc
+        import zipfile
+        bomb = os.path.join(tmp, "mimetype_bomb.zip")
+        with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("mimetype", b"A" * (30 << 20))
+        tracemalloc.start()
+        try:
+            kind = sniff.sniff(bomb)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        _check("sniff: a huge deflated mimetype entry is read bounded", kind == "zip" and peak < (4 << 20),
+               (kind, peak))
         path, _exp = fx.make_pdf(os.path.join(tmp, "case_0"))
         res = clean_file(path, os.path.join(tmp, "p.out"), "nonsense")
         _check("unknown profile rejected", not res.ok and "profile" in " ".join(res.errors))

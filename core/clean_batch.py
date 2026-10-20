@@ -587,7 +587,7 @@ def _selftest() -> int:
             z.writestr("secret.docx", b"x")
         notes = os.path.join(fxd, "notes.txt")
         with open(notes, "w", encoding="utf-8") as fh:
-            fh.write("just text")
+            fh.write("просто текст")
 
         def mkzip(path, entries):
             import warnings
@@ -601,7 +601,7 @@ def _selftest() -> int:
             with open(p, "rb") as fh:
                 return fh.read()
 
-        entries = [("HR department/" + n, rd(p)) for n, (p, _) in made.items()]
+        entries = [("Отдел кадров/" + n, rd(p)) for n, (p, _) in made.items()]
         entries += [("inner.zip", rd(nested)), ("notes.txt", rd(notes))]
         mixed = mkzip(os.path.join(root, "mixed.zip"), entries)
         sha_in = _sha(mixed)
@@ -655,7 +655,7 @@ def _selftest() -> int:
         names = _names(dst)
         print("  archive entries:", names)
         rep = zipfile.ZipFile(dst).read(REPORT_NAME).decode("utf-8")
-        orig_parts = {"leaky", "probe", "book", "deck", "inner", "notes", "HR", "department"}
+        orig_parts = {"leaky", "probe", "book", "deck", "inner", "notes", "Отдел", "кадров"}
         _check("neutral: no original names in the archive's names or report",
                not any(p in " ".join(names) + rep for p in orig_parts))
         _check("neutral: originals of uncleaned files in NOT_CLEANED/ with a prefix", all(
