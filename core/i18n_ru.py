@@ -431,6 +431,8 @@ RU = {
         "Строка подключения к источнику данных.",
     "A container of several images in one file: the second frame may lie inside in full, with its own metadata":
         "Контейнер нескольких изображений в одном файле: внутри может лежать второй кадр целиком, со своими метаданными",
+    "A corporate certificate authority reveals the organization.":
+        "Корпоративный удостоверяющий центр выдаёт организацию.",
     "A cryptographically signed provenance manifest (C2PA / Content Credentials) was removed. The removal itself is DETECTABLE: the recipient sees that a signature existed and was stripped; with a soft binding or a watermark, provenance can be recovered even without this block":
         "Криптографически подписанный манифест происхождения (C2PA / Content Credentials) удалён. Сам срез ДЕТЕКТИРУЕМ: получатель видит, что подпись была и её убрали; при наличии soft-binding или водяного знака происхождение восстанавливается и без этого блока",
     "A custom XML part of unknown origin (%s). This is how EDMS data and content-control bindings are stored; it cannot be removed blindly -- the document text may depend on it.":
@@ -2207,6 +2209,10 @@ RU = {
         "Данные валидации подписи: цепочки сертификатов подписантов.",
     "Signer":
         "Подписант",
+    "Signer certificate: issuer":
+        "Сертификат подписанта: издатель",
+    "Signer certificate: subject":
+        "Сертификат подписанта: владелец",
     "Signer contact":
         "Контакты подписанта",
     "Significant bits":
@@ -2511,6 +2517,8 @@ RU = {
         "Точное время каждой правки.",
     "The exact time of every revision. The attribute is optional in the schema; the revisions stay in place.":
         "Точное время каждой правки. Атрибут необязателен по схеме, правки остаются на месте.",
+    "The exact time the document was signed.":
+        "Точное время подписания документа.",
     "The exact time the label was applied.":
         "Точное время применения метки.",
     "The fact of printing and its exact time.":
@@ -2667,6 +2675,8 @@ RU = {
         "В пакете %d вложенных OLE-объект(ов) со своими метаданными.",
     "The package has %d entries, only the first %d were processed":
         "В пакете %d записей, обработаны первые %d",
+    "The package is digitally signed (%d parts in _xmlsignatures/): cleaning the metadata WILL invalidate the signature; the cleaner refuses without force_signed":
+        "Пакет подписан цифровой подписью (частей в _xmlsignatures/: %d): очистка метаданных сделает подпись недействительной; без force_signed очистка отклоняется",
     "The package is signed (%d parts in _xmlsignatures/): any edit invalidates the signature. File NOT cleaned; to clean it anyway and remove the signature, force_signed is required.":
         "Пакет подписан (%d частей в _xmlsignatures/): любая правка делает подпись недействительной. Файл НЕ очищен; чтобы всё равно очистить и убрать подпись, нужен force_signed.",
     "The package layout alone reveals both the generator and the document structure.":
@@ -2759,6 +2769,8 @@ RU = {
         "Набор запретов (печать, извлечение текста, правка) -- это тоже отпечаток того, кто и чем готовил файл.",
     "The set of subset prefixes is a stable fingerprint of a \"producer + font set\" pair: a match between two files points to a common source.":
         "Набор префиксов сабсетов -- устойчивый отпечаток связки «продюсер + набор шрифтов»: совпадение у двух файлов указывает на общий источник.",
+    "The signature carries the signer's certificate (name or organization, email, validity period). It can be removed only together with the signature: the file stops being signed, and cleaning is refused without force_signed.":
+        "Подпись содержит сертификат подписанта (имя или организацию, email, срок действия). Убрать его можно только вместе с подписью: файл перестанет быть подписанным, а очистка без force_signed отклоняется.",
     "The signature contains the signer's certificate (full name, organization, email). It cannot be removed without losing the signature.":
         "Подпись содержит сертификат подписанта (ФИО, организация, почта). Удалить её без потери подписи невозможно.",
     "The signature contains the signer's certificate: a full name or organization name, email address, validity period, thumbprint. It can be removed only together with the signature itself: the file stops being signed.":
@@ -3055,6 +3067,8 @@ RU = {
         "Кто создал документ. Переживает все последующие правки.",
     "Who modified the comment":
         "Кем изменён комментарий",
+    "Who the certificate was issued to: usually a full name, an organization and an email.":
+        "Кому выдан сертификат: обычно полное имя, организация и email.",
     "Windows Installer (MSI database)":
         "Windows Installer (база MSI)",
     "Windows Installer (MSP patch)":
@@ -3505,6 +3519,8 @@ RU = {
         "hazard: в файле макросы (активное содержимое). STEALTH их не удаляет: это сломало бы документ, решение за пользователем. Внутри проекта могут быть имена и путь автора.",
     "header":
         "заголовок",
+    "hidden":
+        "скрытый",
     "high":
         "высокая",
     "histogram":
@@ -4201,6 +4217,8 @@ RU = {
         "версия %d.%02d, плотность %dx%d, %s",
     "version %d.%02d, density %dx%d, units %d":
         "версия %d.%02d, плотность %dx%d, единицы %d",
+    "very hidden":
+        "особо скрытый",
     "w15:presenceInfo/@userId is usually a real work email. The part is pure identity and was removed entirely together with its reference in document.xml.rels and its Override in [Content_Types].xml.":
         "w15:presenceInfo/@userId -- как правило, реальный рабочий email. Часть -- чистая идентичность, убрана целиком вместе со ссылкой в document.xml.rels и Override в [Content_Types].xml.",
     "w15:presenceInfo/@userId — in the overwhelming majority of cases this is a real work email.":
@@ -4227,8 +4245,8 @@ RU = {
         "w:rsid — идентификаторы сессий правки",
     "w:rsid — editing session IDs":
         "w:rsid — идентификаторы сессий правки",
-    "w:trackChanges — change tracking":
-        "w:trackChanges — запись исправлений",
+    "w:trackRevisions — change tracking":
+        "w:trackRevisions — запись исправлений",
     "was %s":
         "было %s",
     "was %s, now 0":

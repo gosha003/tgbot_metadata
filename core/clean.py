@@ -184,9 +184,11 @@ def _norm(value) -> str:
 # to be exactly such a word, the oracle will miss it. For these words that's a
 # price worth paying; otherwise the oracle catches its own vocabulary.
 # The set holds every language, since reports are rendered in the user's language.
+# "Author" is the neutral name the OOXML cleaner writes (clean_ooxml.AUTHOR, the same in
+# every language): cleaning a file twice must not report it as a survivor.
 _PLACEHOLDERS = frozenset(_norm(w) for p in (
     N_("present"), N_("no"), N_("yes"), N_("absent"), N_("empty"), N_("not set"),
-    N_("on"), N_("off"), "true", "false", "none", "n/a",
+    N_("on"), N_("off"), "true", "false", "none", "n/a", "Author",
 ) for w in both(p))
 
 

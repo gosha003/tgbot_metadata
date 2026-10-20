@@ -116,8 +116,8 @@ import zipfile
 
 from . import sniff, zipfix
 from .cleanmodel import Act, CleanResult, Profile
-from .insp_ooxml import (_PERSON_NAME_RE, _SP_NAMES, _device_name, _emails,
-                         _has_path)
+from .insp_ooxml import (_PERSON_NAME_RE, _SP_NAMES, _TC_PLACEHOLDER_RE, _XLCOMMENTS_RE,
+                         _device_name, _emails, _has_path)
 from .model import clip
 from core.i18n import N_, tr
 
@@ -149,7 +149,6 @@ _BODY_RE = re.compile(
 _PERSON_RE = re.compile(
     r"^(xl/persons/.+\.xml|xl/threadedComments/.+\.xml|ppt/commentAuthors\.xml|ppt/authors\.xml"
     r"|ppt/comments/.+\.xml|ppt/[^/]+/comments\d*\.xml)$")
-_XLCOMMENTS_RE = re.compile(r"^xl/comments\d*\.xml$")
 _PIVOT_RE = re.compile(r"^xl/pivotCache/pivotCacheDefinition\d*\.xml$")
 _CUSTOMXML_RE = re.compile(r"^customXml/item\d*\.xml$")
 
@@ -1576,7 +1575,7 @@ def _xl_comments(pkg, name):
     seen = {}
     for n in P.by("author"):
         v = n.text().strip()
-        if v and v != AUTHOR:
+        if v and v != AUTHOR and not _TC_PLACEHOLDER_RE.match(v):
             P.set_text(n, AUTHOR)
             seen[v] = seen.get(v, 0) + 1
     for who, cnt in seen.items():
@@ -1838,7 +1837,7 @@ def _sec_customxml(pkg):
                            "be removed blindly: content control data binding (w:dataBinding) "
                            "relies on customXml, and blanking the part would erase visible "
                            "document text. The values remain in the file.")
-                        % (root.ns or root.name.decode("utf-8", "replace")))
+                        % (root.ns or root.name))
             else:
                 empty += 1
             continue
@@ -3202,6 +3201,9 @@ def _selftest(verbose=False):
             "Power Query connection, a table's structured reference: the inspector takes them "
             "for leaks)", all(_expected_survivor(s) for s in sv),
             [(s.label, s.found_at) for s in sv if not _expected_survivor(s)][:5])
+        chk("xlsx STEALTH: the legacy comment author is reported by the inspector and gone from the output",
+            any(f.location == "xl/comments1.xml" and f.value == K["rev"] and f.risk.value == "identity"
+                for f in b.findings) and not any(K["rev"] in f.value for f in a.findings if f.location == "xl/comments1.xml"))
         chk("xlsx STEALTH: DataMashup marked UNREMOVABLE",
             any(a_.act is Act.UNREMOVABLE and "item4.xml" in a_.location for a_ in res.actions))
         v = verify_ooxml(src_x, dst)
@@ -3385,10 +3387,71 @@ def _selftest(verbose=False):
         src_s = build("sig.docx", sigs)
         r_ = bad("signed package without force_signed", src_s)
         chk("signed package: the reason is named", r_ is not None and "signed" in " ".join(r_.errors).lower())
+        rs = inspect_file(src_s)
+        chk("signed package: the inspector warns before the cleaner refuses, same test of what is signed",
+            any(s_.kind == "hazard" and "digitally signed" in s_.detail for s_ in rs.signals)
+            and any(f.label == "Package digital signature" and f.risk.value == "identity" and not f.removable
+                    for f in rs.findings))
+        rn = inspect_file(P("w.docx"))
+        chk("an unsigned package: no signature warning",
+            not any("digitally signed" in s_.detail for s_ in rn.signals))
         r_, d_ = run(src_s, ST, "sig", force_signed=True)
         chk("signed package with force_signed: signature removed entirely, package intact",
             r_.ok and not any(n.startswith("_xmlsignatures/") for n in names(d_)) and "sigs" not in txt(d_, "[Content_Types].xml")
             and "signature" not in txt(d_, "_rels/.rels") and verify_ooxml(src_s, d_)["ok"], r_.errors)
+
+        # a customXml part with no namespace and some text: reported as UNREMOVABLE, the cleaning goes on
+        nons = _fx_docx() + [("customXml/item9.xml", '<?xml version="1.0"?><root>Some secret text</root>')]
+        r_, d_ = run(build("nons.docx", nons), ST, "nons")
+        chk("customXml root without a namespace and with text: UNREMOVABLE, not a failed section",
+            r_.ok and any(a_.act is Act.UNREMOVABLE and a_.location == "customXml/item9.xml"
+                          and '"root"' in a_.note for a_ in r_.actions), r_.errors)
+
+        # properties and document variables named after a person, in English: removed, while a date or
+        # a status with "review"/"approval" in its name holds no person and stays
+        who = {"Reviewer": "Petr Ivanovich Smirnov", "Approved By": "Olga Sergeevna Belova",
+               "Executor": "Anna Pavlovna Orlova"}
+        harmless = {"ReviewDate": "2024-03-01", "ApprovalStatus": "Final"}
+        en = []
+        for n, bd in _fx_docx():
+            if n == "docProps/custom.xml":
+                bd = _custom([("ContentTypeId", K["ctid"])] + list(who.items()) + list(harmless.items()))
+            elif n == "word/settings.xml":
+                bd = bd.replace("</w:docVars>", '<w:docVar w:name="Reviewer" w:val="Maria Ivanovna Koval"/></w:docVars>')
+            en.append((n, bd))
+        src_en = build("en_names.docx", en)
+        r_, d_ = run(src_en, ST, "en_names")
+        b, a, sv = oracle(src_en, d_)
+        out = txt(d_, "docProps/custom.xml") + txt(d_, "word/settings.xml")
+        chk("English person-named properties and docVar: removed, oracle sees nothing survive",
+            r_.ok and not sv and not any(v in out for v in list(who.values()) + ["Maria Ivanovna Koval"]),
+            [(s_.label, s_.found_at) for s_ in sv][:4] or r_.errors)
+        # legacy Excel comments in openpyxl's layout; Excel's tc={GUID} placeholder is left
+        # as is; and cleaning the output once more finds nothing: the neutral "Author" it
+        # wrote is not taken for a surviving name
+        X = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        guid = "tc={1A2B3C4D-0000-1111-2222-333344445555}"
+        cm = ('<?xml version="1.0"?><comments xmlns="%s"><authors><author>Ivan Petrovich Sidorov</author>'
+              '<author>%s</author></authors><commentList/></comments>' % (X, guid))
+        xl = [(n, bd) for n, bd in _fx_xlsx()] + [("xl/comments/comment1.xml", cm)]
+        src_cm = build("openpyxl_comments.xlsx", xl)
+        r_, d_ = run(src_cm, ST, "openpyxl_comments")
+        cm_out = txt(d_, "xl/comments/comment1.xml")
+        chk("openpyxl comments: the author is gone, the tc={GUID} placeholder is untouched and not reported",
+            r_.ok and "Ivan Petrovich Sidorov" not in cm_out and guid in cm_out
+            and not any(a_.before == guid for a_ in r_.actions), r_.errors)
+        r2, d2 = run(d_, ST, "openpyxl_comments_again")
+        b2, a2, sv2 = oracle(d_, d2)
+        # (a path the first pass turned into a bare file name is still there; that is by design)
+        authors = [(s_.label, s_.found_at) for s_ in sv2 if "comment" in s_.found_at.lower()
+                   or "author" in s_.label.lower()]
+        chk("cleaning the cleaned file again: the neutral \"Author\" is not taken for a surviving name",
+            r2.ok and not authors, authors[:4])
+
+        chk("ReviewDate and ApprovalStatus are not taken for a person and stay",
+            r_.ok and all(v in out for v in harmless.values()) and all(
+                f.risk.value == "provenance" for f in b.findings
+                if f.location == "docProps/custom.xml" and f.label in harmless))
 
         # a reference from XML to a relationship of an unknown kind: the part isn't removed, honestly UNREMOVABLE, package intact
         weird = [(n, (bd.replace('<w:p w:rsidR="00B54A06"', '<w:p w:rsidR="00B54A06"><w:foo r:id="rId23"/></w:p><w:p w:rsidR="00B54A06"', 1)
@@ -3456,7 +3519,7 @@ def _selftest(verbose=False):
         for cut in (len(whole) // 2, len(whole) - 30, len(whole) - 1):
             open(P("cut.docx"), "wb").write(whole[:cut])
             bad("truncated docx (%d)" % cut, P("cut.docx"))
-        bad("no file", P("no_such_file.docx"))
+        bad("no file", P("нет_такого.docx"))
         bad("directory instead of a file", td)
         r_ = clean_ooxml(src, src)
         chk("input == output: refused, input intact", (not r_.ok) and _sha(src) == _sha(src) and r_.errors, r_.errors)
