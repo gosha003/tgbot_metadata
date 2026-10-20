@@ -30,12 +30,16 @@ deliberately and as a whole: everything else is written against it.
 
 ### `Risk`
 
-| Value | What goes here | Cleaned |
+| Value | What goes here | Removed by |
 |---|---|---|
-| `IDENTITY` | full names, emails, tenant GUIDs, camera serial numbers, signers | yes |
-| `ENVIRONMENT` | local paths, hostnames, printer names, database connection strings | yes |
-| `PROVENANCE` | application, version, dates, edit time, generator, fonts | yes |
-| `STRUCTURAL` | language, accessibility tags, ICC profile, table of contents, page format | **usually kept** |
+| `IDENTITY` | full names, emails, tenant GUIDs, camera serial numbers, signers | all profiles |
+| `ENVIRONMENT` | local paths, hostnames, printer names, database connection strings | all profiles |
+| `PROVENANCE` | application, version, dates, edit time, generator, fonts | Paranoid and Regenerate. Stealth keeps it in documents: the true application, version and original dates are part of looking natural. In images, Stealth drops every metadata container, so PROVENANCE goes with them |
+| `STRUCTURAL` | language, accessibility tags, ICC profile, table of contents, page format | **none** (usually kept) |
+
+The profiles are defined in `PROFILE_REMOVES` (`core/cleanmodel.py`): Stealth
+removes `IDENTITY` and `ENVIRONMENT`; Paranoid and Regenerate also remove
+`PROVENANCE`; no profile removes `STRUCTURAL`.
 
 A common mistake is filing an email or a name under `PROVENANCE` because the field
 is called `CreatorTool`. The value decides, not the field name. The opposite
@@ -125,7 +129,7 @@ look the same, with opposite meanings.
 
 ```python
 sniff(path) -> str                 # format key, NEVER raises
-unreadable_reason(path) -> tuple   # ("cloud"|"missing"|"dir"|"denied"|"other", errno)
+unreadable_reason(path) -> tuple   # ("cloud"|"missing"|"dir"|"denied"|"reparse"|"other", errno)
 pretty(fmt) -> str                 # human-readable name
 family(fmt) -> str                 # which inspector handles it
 ```
@@ -261,8 +265,9 @@ the Russian reply. That is why the test exists.
 - every `tr()` / `N_()` literal has a Russian version with matching placeholders;
 - every plural word has its Russian forms;
 - `tr()` is never evaluated at import time;
-- every fixture gets identical inspection and cleaning verdicts in English and in
-  Russian: the language must not change a verdict.
+- every fixture gets identical inspection and Stealth/Paranoid cleaning verdicts
+  in English and in Russian: the language must not change a verdict. (Regenerate
+  and the bot's own reply texts are not covered.)
 
 ### In the bot
 
@@ -328,8 +333,8 @@ in phase 2". The consistency check is
 6. Wrap every user-visible string (cleaning report lines, error messages) in `tr()`,
    module-level constants in `N_()`, and add the Russian versions to
    `core/i18n_ru.py`; see [Languages (i18n)](#languages-i18n).
-   `tests/test_i18n.py` also runs every fixture through cleaning in both languages
-   and requires identical verdicts.
+   `tests/test_i18n.py` also runs every fixture through Stealth and Paranoid
+   cleaning in both languages and requires identical verdicts.
 
 Required properties of a cleaner:
 

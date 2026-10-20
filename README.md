@@ -43,8 +43,8 @@ and removes it without leaving the file looking tampered with.
   reports on a timer, never logs file names or contents, and defuses external links before handing a
   file to LibreOffice (which would otherwise fetch them and reveal your IP).
 - **Bilingual.** The bot replies in Russian by default and in English on request (`/lang`). A test
-  runs every fixture in both languages and requires identical verdicts: the language can change
-  the wording, never the result.
+  runs the fixtures through inspection and through Stealth/Paranoid cleaning in both languages and
+  requires identical verdicts: the language can change the wording, never the result.
 
 ## Supported formats
 
@@ -57,7 +57,7 @@ and removes it without leaving the file looking tampered with.
 | ODF (odt / ods / odp) | ✓ | ✓ in place | `meta:generator` build, editing duration, template path, printer, comments, embedded images |
 | RTF | ✓ | ✓ in place | author, company, revision table, absolute paths, `\*\rsidtbl` |
 | Legacy doc / xls / ppt | ✓ | via LibreOffice (`regenerate`) | SummaryInformation, editing time, revision authors, residual text of earlier versions, macros |
-| ZIP of documents | ✓ | ✓ batch mode | every file inside, cleaned and proven individually |
+| ZIP of documents | timestamps only | ✓ batch mode | entry timestamps; the batch clean inspects, cleans and proves every file inside individually |
 
 ## Quick start
 
