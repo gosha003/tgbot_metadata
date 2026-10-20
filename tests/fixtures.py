@@ -1507,12 +1507,12 @@ def make_broken(dir):
         fh.write(full[: len(full) // 2])
     out["jpeg_truncated"] = p
 
-    # A PNG with a zTXt bomb: about a kilobyte of compressed data expands into
-    # 200 MB. A denial vector separate from the zip bomb: here decompression is
-    # triggered by parsing a TEXT chunk of the PNG, and doing that with a bare
-    # zlib.decompress() means eating memory on a file that looks harmless by
-    # size. The bot accepts arbitrary files and runs without a sandbox, so the
-    # guard has to be in the parser itself.
+    # A PNG with a zTXt bomb: about 200 KB of compressed data expands into 200 MB
+    # (deflate's maximum ratio is ~1000:1). A denial vector separate from the zip
+    # bomb: here decompression is triggered by parsing a TEXT chunk of the PNG, and
+    # doing that with a bare zlib.decompress() means eating memory on a file that
+    # looks harmless by size. The bot accepts arbitrary files and runs without a
+    # sandbox, so the guard has to be in the parser itself.
     p = os.path.join(dir, "ztxt_bomb.png")
     payload = zlib.compress(b"\x00" * (200 * 1024 * 1024), 9)
     with open(p, "wb") as fh:

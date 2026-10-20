@@ -398,7 +398,7 @@ def test_broken(tmp):
                    any(s.kind == "hazard" for s in rep.signals)
                    or any("bomb" in e for e in rep.errors))
         if name == "png_ztxt_bomb":
-            # A kilobyte of compressed data -> 200 MB. Parsing PNG text chunks must
+            # ~200 KB of compressed data -> 200 MB. Parsing PNG text chunks must
             # decompress with a limit, not all at once.
             _check("png_ztxt_bomb: did not hang decompressing the text chunk",
                    elapsed < 10.0, "took %.2f s" % elapsed)
@@ -617,7 +617,7 @@ def test_sniff_unreadable_keys():
 
 @_with_tmp
 def test_sniff_missing(tmp):
-    path = os.path.join(tmp, "no_such_file.doc")
+    path = os.path.join(tmp, "нет_такого.doc")
     _check("missing: sniff(nonexistent path) == 'unreadable'",
            sniff.sniff(path) == "unreadable", sniff.sniff(path))
     reason = sniff.unreadable_reason(path)
@@ -709,7 +709,7 @@ def test_cloud_flags_matrix(tmp):
 def test_win_attrs_invalid(tmp):
     import ctypes
 
-    missing = os.path.join(tmp, "no_such_file.bin")
+    missing = os.path.join(tmp, "нет_такого.bin")
     _check("win_attrs: nonexistent path -> None (INVALID_FILE_ATTRIBUTES 0xFFFFFFFF handled)",
            sniff._win_attrs(missing) is None, repr(sniff._win_attrs(missing)))
 
