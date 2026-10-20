@@ -47,9 +47,8 @@ from lxml import etree
 
 from .clean_image import _clean_jpeg
 from .cleanmodel import PROFILE_REMOVES, Act, CleanResult, Profile
-from .insp_pdf import (RDF, _INFO_MAP, _XMP_IDENTITY, _flatten,
-                       _looks_like_path, _qname, _s, _walk_name_tree, _xmp_fromstring,
-                       is_jpeg_image)
+from .insp_pdf import (RDF, _XMP_IDENTITY, _flatten, _info_risk, _looks_like_path, _qname, _s,
+                       _walk_name_tree, _xmp_fromstring, _xmp_value_risk, is_jpeg_image)
 from .model import Risk
 from core.i18n import N_, tr
 
@@ -63,9 +62,6 @@ MAX_FIELDS = 20000
 MAX_XMP = 4 * 1024 * 1024            # decompressed XMP larger than this is not parsed
 MAX_IMAGES = 20000
 
-_ID_WORDS = ("author", "user", "owner", "company", "operator", "signer")  # as in the inspector
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-_FILENAME_TITLE = re.compile(r"\.(docx?|xlsx?|pptx?|rtf|odt|ods|odp|txt|indd|psd|ai)\s*$", re.I)
 _WEB = re.compile(r"(?i)^(https?|mailto|tel):")
 _ACTIVE = {"/Launch", "/JavaScript", "/SubmitForm", "/ImportData", "/GoToR", "/GoToE"}
 _DROP_NS = {"xmpMM", "photoshop", "illustrator", "xmpRights", "xmpBJ"}   # entirely, in any profile
@@ -218,19 +214,6 @@ def _file_label(spec, fallback=""):
 # ============================================================================
 
 
-def _info_risk(key, raw):
-    """Category of an /Info field, by the same rules as the inspector's (the oracle)."""
-    _, risk = _INFO_MAP.get(key, (None, None))
-    if risk is None:
-        low = key.lower()
-        risk = Risk.IDENTITY if any(w in low for w in _ID_WORDS) else Risk.PROVENANCE
-    if risk is not Risk.IDENTITY and (_looks_like_path(raw) or (key == "/Title" and _FILENAME_TITLE.search(raw))):
-        return Risk.ENVIRONMENT      # a path or file name instead of a title
-    if risk is Risk.PROVENANCE and _EMAIL.search(raw):
-        return Risk.IDENTITY
-    return risk
-
-
 def _sec_info(pdf, c):
     info = pdf.trailer.get("/Info")      # NOT pdf.docinfo: it creates an empty /Info
     if not isinstance(info, pikepdf.Dictionary):
@@ -242,7 +225,9 @@ def _sec_info(pdf, c):
         # [] and del work.
         raw = _s(info[key])
         risk = _info_risk(key, raw)
-        ua_title = key == "/Title" and c.ua
+        # PDF/UA needs the title, but only a real one: a path, an email or a file name
+        # in its place is a leak in any profile.
+        ua_title = key == "/Title" and c.ua and risk is Risk.PROVENANCE
         if (risk in c.removes or key.startswith("/PTEX")) and not ua_title:
             if key.startswith("/PTEX"):
                 note = tr("The TeX Live version string with its build date gives away the "
@@ -276,7 +261,7 @@ def _sec_info(pdf, c):
 
 def _read_xmp(stream):
     """Decompressed XMP bytes, or None if reading is unsafe. Flate is decompressed
-    with a ceiling (a bomb: kilobytes expand into gigabytes); exotic filters are
+    with a ceiling (a bomb: a megabyte can expand into a gigabyte); exotic filters are
     left alone."""
     raw = stream.read_raw_bytes()
     flt = stream.get("/Filter")
@@ -299,13 +284,12 @@ def _xmp_drop(key, value, c):
     prefix = key.split(":", 1)[0]
     if prefix in ("pdfaid", "pdfuaid"):
         return False                                   # PDF/A, PDF/UA declaration -- structural
-    if c.paranoid:
-        return not (c.ua and key == "dc:title")
+    if c.paranoid and not (c.ua and key == "dc:title"):
+        return True
     if prefix in _DROP_NS or key in _XMP_IDENTITY:
         return True
-    if _looks_like_path(value) or _EMAIL.search(value):
-        return True
-    return key == "dc:title" and bool(_FILENAME_TITLE.search(value))
+    # A PDF/UA dc:title is kept in PARANOID too, unless its content leaks like any other value.
+    return _xmp_value_risk(key, value) is not None
 
 
 def _xmp_clean(raw, c, where):
@@ -898,7 +882,7 @@ def _verify(res, tmp, snap, npages, no_id):
             bad.append(tr("the result is linearized"))
     eof = _count_eof(tmp)
     if eof != 1:
-        res.err(tr("The result has %d %%EOF markers (expected 1): possibly a string inside a "
+        res.err(tr("The result has %d %%%%EOF markers (expected 1): possibly a string inside a "
                    "stream.") % eof)
     return bad
 
@@ -1137,18 +1121,20 @@ def _annot(pdf, page, **kw):
     return a
 
 
-def _fx_incremental(path):
-    """Manual incremental revision: the first revision has TOPSECRET, the second a "cover-up"."""
+def _fx_incremental(path, **save_kw):
+    """Manual incremental revision: the first revision has TOPSECRET, the second a "cover-up".
+    save_kw goes to save(), e.g. linearize=True for a linearized base revision."""
     pdf = pikepdf.Pdf.new()
     pdf.add_blank_page(page_size=(200, 200))
     pdf.pages[0].obj["/Contents"] = pdf.make_stream(b"BT 10 100 Td (TOPSECRET 4111) Tj ET")
     pdf.docinfo["/Author"] = "Иван Петров"
-    pdf.save(path, object_stream_mode=pikepdf.ObjectStreamMode.disable, compress_streams=False, static_id=True)
+    pdf.save(path, object_stream_mode=pikepdf.ObjectStreamMode.disable, compress_streams=False, static_id=True,
+             **save_kw)
     with pikepdf.open(path) as q:
         n = q.pages[0].Contents.objgen[0]
     data = open(path, "rb").read()
     old = int(re.findall(rb"startxref\s+(\d+)", data)[-1])
-    inner = re.search(rb"trailer\s*<<(.*?)>>", data, re.S).group(1)
+    inner = re.sub(rb"\s*/Prev\s+\d+", b"", re.search(rb"trailer\s*<<(.*?)>>", data, re.S).group(1))
     new = b"BT 10 100 Td (REDACTED) Tj ET"
     obj = b"\n%d 0 obj\n<< /Length %d >>\nstream\n" % (n, len(new)) + new + b"\nendstream\nendobj\n"
     o_off = len(data) + obj.index(b"%d 0 obj" % n)
@@ -1270,7 +1256,7 @@ def _selftest():
             res, dst = run(s4, "inc_" + prof.value, prof)
             eof1, prev1 = _raw(dst)
             _check("%s: ok" % prof.value, res.ok, res.errors)
-            _check("%s: TOPSECRET is gone from the file, %%EOF == 1, /Prev == 0" % prof.value,
+            _check("%s: TOPSECRET is gone from the file, %%%%EOF == 1, /Prev == 0" % prof.value,
                    b"TOPSECRET" not in open(dst, "rb").read() and eof1 == 1 and prev1 == 0, (eof1, prev1))
             with pikepdf.open(dst) as q:
                 _check("%s: the \"cover-up\" remains on the page" % prof.value, b"REDACTED" in q.pages[0].Contents.read_bytes())
@@ -1497,6 +1483,178 @@ def _selftest():
         with pikepdf.open(os.path.join(tmp, "xmp_bytes.pdf")) as q:
             _check("_save does not re-serialize the root XMP (open_metadata is not called)",
                    q.Root.Metadata.read_bytes() == _EMPTY_XMP)
+
+        # --- 13. inspector: linearized files, /Info classes, bounded streams, texts -------
+        print("13. inspector: linearized files, /Info classes, bounded streams, exiftool, texts")
+        import base64
+        import json
+        import time
+        import types
+
+        from . import insp_pdf
+        from .insp_pdf import _stream_fits
+        from .model import Report
+        from .report import render_plain
+
+        # A linearized file (Fast Web View) has a second %%EOF/startxref and a /Prev in the
+        # first-page trailer by design: that is not an incremental update.
+        pdf = pikepdf.Pdf.new()
+        pdf.add_blank_page()
+        lin = _write(tmp, "lin", pdf, linearize=True, object_stream_mode=pikepdf.ObjectStreamMode.disable)
+        _check("fixture: a linearized file has two %%EOF", _raw(lin)[0] == 2, _raw(lin))
+        a13 = inspect_file(lin)
+        _check("linearized: no \"Incremental updates\", no hazard",
+               not any("Incremental" in f.label for f in a13.findings) and not any(s.kind == "hazard" for s in a13.signals))
+        li = os.path.join(tmp, "lin_inc.pdf")
+        _fx_incremental(li, linearize=True)
+        a13 = inspect_file(li)
+        inc = [f.value for f in a13.findings if "Incremental" in f.label]
+        _check("linearized + an appended revision: still reported, as 2 revisions, with the hazard",
+               len(inc) == 1 and inc[0].startswith("2 revisions") and any(s.kind == "hazard" for s in a13.signals), inc)
+        txt = render_plain(a13)
+        _check("report text: %PDF- header, %%EOF end marker (no doubled percent in the header, none lost in the end marker)",
+               "%%PDF" not in txt and "(%PDF-)" in txt and "(by %%EOF)" in txt, [l for l in txt.splitlines() if "EOF" in l or "PDF-" in l])
+        r13 = CleanResult(src="", dst="", fmt="pdf", profile="stealth")
+        _verify(r13, li, {}, 1, False)
+        _check("_verify prints the real marker %%EOF", any("%%EOF markers" in e for e in r13.errors), r13.errors)
+
+        # The cleaner's /Info rules are the inspector's: an email in a provenance field is identity,
+        # a file name instead of a title is environment.
+        pdf = pikepdf.Pdf.new()
+        pdf.add_blank_page()
+        pdf.docinfo["/Subject"] = "ivan@corp.example"
+        pdf.docinfo["/Title"] = "Договор_Иванов_финал.docx"
+        pdf.docinfo["/Keywords"] = "plain words"
+        s13 = _write(tmp, "infoclass", pdf)
+        risks = {f.label: f.risk.value for f in inspect_file(s13).findings if f.location == "/Info"}
+        _check("inspector: email in /Subject is identity, file name in /Title is environment, plain /Keywords stay provenance",
+               (risks.get("Subject"), risks.get("Title"), risks.get("Keywords")) == ("identity", "environment", "provenance"), risks)
+        res, dst = run(s13, "infoclass")
+        i13 = info_of(dst)
+        _check("the cleaner agrees: /Subject and /Title removed, /Keywords kept",
+               res.ok and "/Subject" not in i13 and "/Title" not in i13 and "/Keywords" in i13, i13)
+
+        # read_bytes() decodes the whole stream, so the decoded size is bounded before it is called.
+        bp = pikepdf.Pdf.new()
+
+        def _stream(data, **kw):
+            st = bp.make_stream(b"")
+            st.write(data, **kw)
+            return st
+
+        cap = 1 << 20
+        bomb64 = _stream(zlib.compress(b"\x00" * (64 << 20)), filter=N.FlateDecode)
+        small = zlib.compress(b"\x00" * 1000)
+        pred_bomb = _stream(zlib.compress(b"\x02" + b"\x00" * 9), filter=N.FlateDecode,
+                            decode_parms=pikepdf.Dictionary(Predictor=12, Columns=50_000_000))
+        pred_ok = _stream(zlib.compress(b"\x02" + b"\x00" * 99), filter=N.FlateDecode,
+                          decode_parms=pikepdf.Dictionary(Predictor=12, Columns=100))
+        crypt = bp.make_stream(small)
+        crypt.Filter = pikepdf.Array([N.Crypt, N.FlateDecode])
+        crypt.DecodeParms = pikepdf.Array([pikepdf.Dictionary(Name=N.Identity), None])
+        a85 = bp.make_stream(base64.a85encode(small, adobe=True))
+        a85.Filter = pikepdf.Array([N.ASCII85Decode, N.FlateDecode])
+        a85_bomb = bp.make_stream(base64.a85encode(zlib.compress(b"\x00" * (64 << 20)), adobe=True))
+        a85_bomb.Filter = pikepdf.Array([N.ASCII85Decode, N.FlateDecode])
+        # The bound must come before any decoding: read_bytes() may not be called at all.
+        real_read = pikepdf.Object.read_bytes
+        pikepdf.Object.read_bytes = lambda *a, **k: (_ for _ in ()).throw(AssertionError("decoded"))
+        try:
+            fits = {name: _stream_fits(st, cap) for name, st in (
+                ("bomb", bomb64), ("small", _stream(small, filter=N.FlateDecode)), ("plain", _stream(b"x" * 100)),
+                ("plain_big", _stream(b"x" * (cap + 1))), ("lzw", _stream(b"\x00", filter=N.LZWDecode)),
+                ("corrupt", _stream(b"not zlib", filter=N.FlateDecode)), ("pred_bomb", pred_bomb),
+                ("pred_ok", pred_ok), ("crypt", crypt), ("a85", a85), ("a85_bomb", a85_bomb))}
+        finally:
+            pikepdf.Object.read_bytes = real_read
+        _check("_stream_fits: Flate bombs are refused without being inflated, also behind ASCII85",
+               not fits["bomb"] and not fits["a85_bomb"], fits)
+        _check("_stream_fits: small Flate and plain streams fit, also behind /Crypt and ASCII85",
+               fits["small"] and fits["plain"] and fits["crypt"] and fits["a85"], fits)
+        _check("_stream_fits: a predictor whose row alone is over the cap does not fit; a normal one does",
+               not fits["pred_bomb"] and fits["pred_ok"], fits)
+        _check("_stream_fits: a plain stream over the cap and a filter chain that can't be bounded do not fit",
+               not fits["plain_big"] and not fits["lzw"], fits)
+        _check("_stream_fits: corrupt Flate data fits (QPDF stops short of the cap)", fits["corrupt"], fits)
+
+        # A long value without "@" must not make the email search quadratic (a tiny PDF
+        # could otherwise stall the inspector for hours).
+        pdf = pikepdf.Pdf.new()
+        pdf.add_blank_page()
+        pdf.docinfo["/Subject"] = "a" * 200_000
+        pdf.docinfo["/Keywords"] = "contact: ivan@corp.example"
+        slow = _write(tmp, "redos", pdf)
+        t0 = time.time()
+        a13 = inspect_file(slow)
+        took = time.time() - t0
+        risks = {f.label: f.risk.value for f in a13.findings if f.location == "/Info"}
+        _check("a 200 KB /Info value without \"@\" is inspected fast; an email is still identity",
+               took < 5 and risks.get("Keywords") == "identity" and risks.get("Subject") == "provenance",
+               (round(took, 2), risks))
+
+        # XMP values are classified by content as the cleaner removes them: an email or a
+        # file name instead of a title is critical in the report too.
+        from .insp_pdf import _xmp_class
+        _check("XMP: an email in a value is identity, a file-name dc:title is environment, a title stays provenance",
+               (_xmp_class("dc:description", "write to ivan@corp.example")[0], _xmp_class("dc:title", "Договор_Иванов.docx")[0],
+                _xmp_class("dc:title", "Annual report")[0]) == (Risk.IDENTITY, Risk.ENVIRONMENT, Risk.PROVENANCE))
+
+        # PDF/UA needs a title, so a real one stays even in PARANOID; a file name in its
+        # place is a leak and goes in every profile, as the oracle says.
+        ua_xmp = (b'<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
+                  b'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description '
+                  b'rdf:about="" xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/"><pdfuaid:part>1'
+                  b'</pdfuaid:part></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
+        for title, prof, kept in (("Annual report", Profile.PARANOID, True),
+                                  ("Договор_Иванов_финал.docx", Profile.STEALTH, False),
+                                  ("Договор_Иванов_финал.docx", Profile.PARANOID, False)):
+            pdf = pikepdf.Pdf.new()
+            pdf.add_blank_page()
+            pdf.Root.Metadata = pdf.make_stream(ua_xmp, Type=N.Metadata, Subtype=N.XML)
+            pdf.docinfo["/Title"] = title
+            ua = _write(tmp, "ua_%s_%s" % (prof.value, int(kept)), pdf)
+            res, dst = run(ua, "ua_%s_%s" % (prof.value, int(kept)), prof)
+            from .clean import survived_values
+            left = survived_values(inspect_file(ua), inspect_file(dst))
+            _check("PDF/UA, %s, title %r: %s, and the oracle sees no original value survive"
+                   % (prof.value, title, "kept" if kept else "removed"),
+                   res.ok and ("/Title" in info_of(dst)) == kept and not left, (res.errors, info_of(dst), left))
+
+        # A refused /Metadata must not be decoded after all by the open_metadata() fallback.
+        pdf = pikepdf.Pdf.new()
+        pdf.add_blank_page()
+        pdf.Root.Metadata = pdf.make_stream(b"", Type=N.Metadata, Subtype=N.XML)
+        pdf.Root.Metadata.write(zlib.compress(b"\x00" * (4 << 20)), filter=N.FlateDecode)
+
+        class _Pdf:
+            Root = pdf.Root
+
+            def open_metadata(self):
+                raise AssertionError("fallback decoded the refused stream")
+
+        real_cap, insp_pdf.MAX_STREAM = insp_pdf.MAX_STREAM, 1 << 20
+        try:
+            r13 = Report(path="", fmt="pdf")
+            insp_pdf._sec_xmp(_Pdf(), r13, {})
+        finally:
+            insp_pdf.MAX_STREAM = real_cap
+        _check("oversized /Metadata: refused with bomb protection, and the open_metadata() fallback is not run on it",
+               any("bomb protection" in e for e in r13.errors) and not any("open_metadata" in e for e in r13.errors), r13.errors)
+
+        # exiftool reports the temporary download (System/File/ExifTool groups) next to the document.
+        out = json.dumps([{"SourceFile": "x.pdf", "System:FileCreateDate": "2026:10:20 00:26:20-04:00",
+                           "System:FileName": "x.pdf", "ExifTool:ExifToolVersion": 12.0, "File:FileType": "PDF",
+                           "PDF:Author": "Ivan", "XMP-dc:Creator": "Ivan"}]).encode()
+        real = insp_pdf.shutil, insp_pdf.subprocess
+        insp_pdf.shutil = types.SimpleNamespace(which=lambda _n: "exiftool")
+        insp_pdf.subprocess = types.SimpleNamespace(run=lambda *a, **k: types.SimpleNamespace(stdout=out))
+        try:
+            r13 = Report(path="", fmt="pdf")
+            insp_pdf._enrich_exiftool("x.pdf", r13, {})
+        finally:
+            insp_pdf.shutil, insp_pdf.subprocess = real
+        _check("exiftool: tags of the temporary copy are skipped, document tags are kept",
+               {f.label for f in r13.findings} == {"Author", "Creator"}, [f.label for f in r13.findings])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1530,7 +1688,7 @@ def _real(paths):
             b = inspect_file(p)
             eof0, prev0 = _raw(p)
             f0 = facts(p)
-            print("file %d: pages %d; BEFORE: critical %d, sensitive %d, %%EOF %d, raw /Prev %d "
+            print("file %d: pages %d; BEFORE: critical %d, sensitive %d, %%%%EOF %d, raw /Prev %d "
                   "(of them /Outlines bookmark links: %d), /Prev in trailer: %s"
                   % (n, f0["pages"], b.critical, b.sensitive, eof0, prev0, f0["outl_prev"], f0["trailer_prev"]))
             for prof in (Profile.STEALTH, Profile.PARANOID):
@@ -1546,7 +1704,7 @@ def _real(paths):
                                     if k in ("scrubbed", "inconsistent")})
                 left = sorted({(f.location, f.label.split(" ")[0]) for f in a.findings if f.risk.value in ("identity", "environment")})
                 print("  %-8s ok=%s errors=%d  critical %d->%d  sensitive %d->%d" % (prof.value, res.ok, len(res.errors), b.critical, a.critical, b.sensitive, a.sensitive))
-                print("           %%EOF %d->%d; raw /Prev %d->%d (bookmark links left %d); /Prev "
+                print("           %%%%EOF %d->%d; raw /Prev %d->%d (bookmark links left %d); /Prev "
                       "in the TRAILER %s->%s"
                       % (eof0, eof1, prev0, prev1, f1["outl_prev"], f0["trailer_prev"], f1["trailer_prev"]))
                 print("           structural kept %s of %s; Creator/Producer as they were: %s; "

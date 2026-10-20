@@ -14,11 +14,14 @@ quietly work without it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
 import shutil
 import subprocess
+import zlib
 
 import pikepdf
 from lxml import etree
@@ -210,17 +213,83 @@ def _get(dct, key):
         return None
 
 
+def _predictor_row(parms):
+    """Bytes in one row of a /Predictor in /DecodeParms (0 without a predictor), or
+    None if the parameters are unusable. A predictor pads a short last row to a full
+    one, so it can add up to a row to the inflated size: /Columns may be huge."""
+    dicts = list(parms) if isinstance(parms, pikepdf.Array) else ([parms] if parms is not None else [])
+    row = 0
+    for d in dicts:
+        if not isinstance(d, pikepdf.Dictionary):
+            continue
+        try:
+            if int(_get(d, "/Predictor") or 1) <= 1:
+                continue
+            colors, bpc, cols = (int(_get(d, k) or dflt) for k, dflt in
+                                 (("/Colors", 1), ("/BitsPerComponent", 8), ("/Columns", 1)))
+        except Exception:                                  # noqa: BLE001
+            return None
+        if min(colors, bpc, cols) < 1:
+            return None
+        row = max(row, (colors * bpc * cols + 7) // 8)
+    return row
+
+
+def _stream_fits(stream, cap) -> bool:
+    """True only if the stream is provably at most cap bytes once decoded. It gates
+    read_bytes(), which decodes the whole stream before any size can be checked.
+
+    /Crypt only decrypts (QPDF hands back decrypted raw bytes anyway) and never
+    enlarges the data. ASCIIHex and ASCII85 grow it at most 4x and are decoded here
+    with the stdlib; a final Flate is inflated with a ceiling, plus one predictor row.
+    Anything else (LZW, RunLength, a filter after Flate) can't be bounded cheaply and
+    counts as not fitting. Raises if the stream can't be read."""
+    flt = _get(stream, "/Filter")
+    names = [_s(f) for f in flt] if isinstance(flt, pikepdf.Array) else ([_s(flt)] if flt is not None else [])
+    names = [n for n in names if n != "/Crypt"]
+    data = stream.read_raw_bytes()
+    for i, name in enumerate(names):
+        if name in ("/ASCIIHexDecode", "/AHx"):
+            text = re.sub(rb"\s+", b"", data).split(b">", 1)[0]
+            try:
+                data = binascii.a2b_hex(text + b"0" * (len(text) % 2))
+            except (binascii.Error, ValueError):
+                return False
+        elif name in ("/ASCII85Decode", "/A85"):
+            text = re.sub(rb"\s+", b"", data)
+            text = (text[2:] if text.startswith(b"<~") else text).split(b"~>", 1)[0]
+            try:
+                data = base64.a85decode(text)
+            except ValueError:
+                return False
+        elif name in ("/FlateDecode", "/Fl") and i == len(names) - 1:
+            row = _predictor_row(_get(stream, "/DecodeParms"))
+            if row is None:
+                return False
+            try:
+                out = zlib.decompressobj().decompress(data, cap + 1)
+            except zlib.error:
+                return True     # corrupt data: QPDF stops at the same point, short of the cap
+            return len(out) + row <= cap
+        else:
+            return False        # LZW can expand ~2500x, and no stdlib decoder bounds it
+    return len(data) <= cap
+
+
 def _stream_text(obj) -> str:
     """Body text: /JS (and similar fields) in a PDF can be a string or a stream;
     a script body sits in a stream just as often as in a string. The compressed
-    size is checked before decompression: the same bomb protection as for /Metadata."""
+    size and then the decoded size are checked before decompression: the same
+    bomb protection as for /Metadata."""
     if obj is None:
         return ""
     try:
         packed = len(obj.read_raw_bytes())
         if packed > MAX_XMP_PACKED:
             return tr("<stream too large to decompress: %d compressed bytes>") % packed
-        return obj.read_bytes()[:MAX_STREAM].decode("utf-8", "replace")
+        if not _stream_fits(obj, MAX_STREAM):
+            return tr("<stream not decompressed: it may expand beyond the limit>")
+        return obj.read_bytes().decode("utf-8", "replace")
     except Exception:
         return _s(obj)
 
@@ -243,6 +312,40 @@ def _pdf_date(raw: str) -> str:
 
 def _looks_like_path(value: str) -> bool:
     return bool(_PATHISH.search(value or ""))
+
+
+_ID_WORDS = ("author", "user", "owner", "company", "operator", "signer")
+# Bounded quantifiers: with plain + the search is quadratic on a long run of word
+# characters without "@", and /Info and XMP values come straight from the file.
+_EMAIL = re.compile(r"[\w.+-]{1,64}@[\w-]{1,255}\.[\w.-]{1,255}")
+_FILENAME_TITLE = re.compile(r"\.(docx?|xlsx?|pptx?|rtf|odt|ods|odp|txt|indd|psd|ai)\s*$", re.I)
+
+
+def _info_risk(key, raw):
+    """Category of an /Info field. Shared by the inspector and the cleaner, so the
+    oracle sees exactly what the cleaner treats as identifying."""
+    _, risk = _INFO_MAP.get(key, (None, None))
+    if risk is None:
+        low = key.lower()
+        risk = Risk.IDENTITY if any(w in low for w in _ID_WORDS) else Risk.PROVENANCE
+    if risk is not Risk.IDENTITY and (_looks_like_path(raw) or (key == "/Title" and _FILENAME_TITLE.search(raw))):
+        return Risk.ENVIRONMENT      # a path or file name instead of a title
+    if risk is Risk.PROVENANCE and _EMAIL.search(raw):
+        return Risk.IDENTITY
+    return risk
+
+
+def _xmp_value_risk(key, value):
+    """The risk an XMP value carries by its content alone, or None. Shared with the
+    cleaner (clean_pdf._xmp_drop), so the oracle sees what the cleaner removes."""
+    value = value or ""
+    if _looks_like_path(value):
+        return Risk.ENVIRONMENT
+    if _EMAIL.search(value):
+        return Risk.IDENTITY
+    if key == "dc:title" and _FILENAME_TITLE.search(value):
+        return Risk.ENVIRONMENT          # a file name instead of a title
+    return None
 
 
 def _qname(tag) -> str:
@@ -375,23 +478,16 @@ def _sec_docinfo(pdf, report, ctx):
             report.err(tr("/Info %s can't be read: %s") % (key, exc))
             continue
         collected[key] = raw
-        label, risk = _INFO_MAP.get(key, (None, None))
+        label, _ = _INFO_MAP.get(key, (None, None))
         label = label and tr(label)
+        risk = _info_risk(key, raw)
         if label is None:
             # A non-standard key: corporate DMSs, plugins and scripts write these.
             label = tr("Non-standard key %s") % key
-            low = key.lower()
-            if any(w in low for w in ("author", "user", "owner", "company", "operator", "signer")):
-                risk = Risk.IDENTITY
-            elif _looks_like_path(raw):
-                risk = Risk.ENVIRONMENT
-            else:
-                risk = Risk.PROVENANCE
             note = (tr("A key outside the PDF specification: a specific application or corporate "
                        "document management system writes it, so it identifies the file's source "
                        "especially well."))
         elif _looks_like_path(raw):
-            risk = Risk.ENVIRONMENT
             note = tr("The value looks like a local path: it reveals the user name and disk "
                       "layout.")
         else:
@@ -410,15 +506,21 @@ def _sec_docinfo(pdf, report, ctx):
 def _sec_xmp(pdf, report, ctx):
     """C. XMP: both via pikepdf and as the raw /Metadata stream. People forget about it."""
     raw = b""
+    refused = False      # a refused stream must not be decoded by the fallback below either
     try:
         meta = _get(pdf.Root, "/Metadata")
         if meta is not None:
             packed = len(meta.read_raw_bytes())
             if packed > MAX_XMP_PACKED:
+                refused = True
                 report.err(tr("The /Metadata stream is too large (%d bytes compressed): not "
                               "decompressed, bomb protection.") % packed)
+            elif not _stream_fits(meta, MAX_STREAM):
+                refused = True
+                report.err(tr("The /Metadata stream expands beyond %d MB or its size can't be "
+                              "bounded: not decompressed, bomb protection.") % (MAX_STREAM >> 20))
             else:
-                raw = meta.read_bytes()[:MAX_STREAM]
+                raw = meta.read_bytes()
     except Exception as exc:
         report.err(tr("The raw /Metadata stream can't be read: %s") % exc)
 
@@ -428,7 +530,7 @@ def _sec_xmp(pdf, report, ctx):
                    note=tr("XMP lives in a separate stream and survives cleaning of /Info: this "
                            "is most often where everything \"already deleted\" remains."))
         pairs = _parse_xmp(raw, report)
-    else:
+    elif not refused:
         # Fallback via pikepdf if the raw stream is unavailable.
         try:
             md = pdf.open_metadata()
@@ -466,6 +568,9 @@ def _xmp_class(key, value) -> tuple:
     if _looks_like_path(value):
         return Risk.ENVIRONMENT, tr("The value contains a local path: it reveals the user name "
                                     "and disk layout.")
+    risk = _xmp_value_risk(key, value)        # an email, or a file name instead of a title
+    if risk is not None:
+        return risk, ""
     if key in ("xmp:CreateDate", "xmp:ModifyDate", "xmp:MetadataDate"):
         return Risk.PROVENANCE, (tr("An XMP date. xmp:MetadataDate is often newer than "
                                     "xmp:ModifyDate: the difference shows the metadata was "
@@ -524,7 +629,11 @@ def _sec_object_xmp(pdf, report, ctx):
             if packed > MAX_XMP_PACKED:
                 report.err(tr("%s: stream too large (%d compressed bytes), not decompressed.") % (where, packed))
                 continue
-            pairs = _parse_xmp(meta.read_bytes()[:MAX_STREAM], report)
+            if not _stream_fits(meta, MAX_STREAM):
+                report.err(tr("%s: the stream expands beyond %d MB or its size can't be bounded, "
+                              "not decompressed.") % (where, MAX_STREAM >> 20))
+                continue
+            pairs = _parse_xmp(meta.read_bytes(), report)
         except Exception as exc:
             report.err(tr("%s can't be read: %s") % (where, exc))
             continue
@@ -684,8 +793,11 @@ def _sec_raw(path, report, ctx):
     needles = re.compile(rb"%%EOF|startxref|/Prev|/ObjStm|/Linearized|/Encrypt|/XFA|trailer")
     banner = re.compile(rb"/PTEX\.Fullbanner\s*\(([^)]{0,400})\)")
     header = re.compile(rb"%PDF-(\d\.\d)")
+    # The first-page xref section of a linearized file ends with its own "startxref 0".
+    first_footer = re.compile(rb"startxref\s+0\s+%%EOF")
 
     hits = {}
+    first_pages = set()     # offsets of the %%EOF that close such a section
     banners = []
     version = ""
     offset = 0
@@ -704,6 +816,8 @@ def _sec_raw(path, report, ctx):
                         version = m.group(1).decode("ascii", "replace")
                 for m in needles.finditer(buf):
                     hits.setdefault(m.group(0), set()).add(base + m.start())
+                for m in first_footer.finditer(buf):
+                    first_pages.add(base + m.end() - len(b"%%EOF"))
                 for m in banner.finditer(buf):
                     banners.append(m.group(1).decode("utf-8", "replace"))
                 offset += len(chunk)
@@ -733,7 +847,7 @@ def _sec_raw(path, report, ctx):
     ctx["raw_linearized"] = bool(hits.get(b"/Linearized"))
 
     if version:
-        report.add(Risk.PROVENANCE, tr("header"), tr("PDF version (%%PDF-)"), version,
+        report.add(Risk.PROVENANCE, tr("header"), tr("PDF version (%PDF-)"), version,
                    note=tr("The header version often disagrees with the file's features: a "
                            "specific producer sets it, and it identifies that producer."))
 
@@ -749,9 +863,19 @@ def _sec_raw(path, report, ctx):
     # The deciding sign is the number of %%EOF/startxref. /Prev in the trailer
     # only confirms it. A single revision is not an incremental update.
     revisions = max(n_eof, n_startxref)
+    # A linearized file (Fast Web View) has two of each by design: the first-page
+    # section at the top, whose trailer carries a /Prev to the main xref, and the
+    # main one at the end. That pair is not an earlier revision. Only the real
+    # pair counts: /Linearized in the first KB and the very first %%EOF closing a
+    # "startxref 0". Linearized files with xref streams may have just one %%EOF.
+    eofs = hits.get(b"%%EOF", ())
+    if (any(p < 1024 for p in hits.get(b"/Linearized", ())) and eofs and min(eofs) in first_pages
+            and n_eof >= 2 and n_startxref >= 2):
+        revisions -= 1
+        n_prev = max(0, n_prev - 1)
     if revisions > 1 or n_prev > 0:
         report.add(Risk.IDENTITY, tr("raw bytes"), tr("Incremental updates"),
-                   tr("%d revisions (by %%EOF), /Prev in the trailer: %d") % (revisions, n_prev),
+                   tr("%d revisions (by %%%%EOF), /Prev in the trailer: %d") % (revisions, n_prev),
                    note=tr("PREVIOUS VERSIONS of the document PHYSICALLY REMAIN in the file: old "
                            "objects, old xrefs and, in particular, text under \"redacted\" black "
                            "boxes: the box is drawn on top, while the text stays in the previous "
@@ -967,11 +1091,11 @@ def _one_signature(field, name, report):
         if key == "/M":
             human = _pdf_date(raw)
             raw = tr("%s   (original: %s)") % (human, raw) if human else raw
-        report.add(risk, "/AcroForm /Sig", "%s («%s»)" % (label, name), raw,
+        report.add(risk, "/AcroForm /Sig", tr("%s (\"%s\")") % (label, name), raw,
                    note=note, removable=False)
     br = _get(v, "/ByteRange")
     if br is not None:
-        report.add(Risk.PROVENANCE, "/AcroForm /Sig", "/ByteRange («%s»)" % name, _s(br),
+        report.add(Risk.PROVENANCE, "/AcroForm /Sig", tr("/ByteRange (\"%s\")") % name, _s(br),
                    note=tr("Byte range covered by the signature. Nothing inside it can be "
                            "changed. ")
                         + note, removable=False)
@@ -1065,7 +1189,7 @@ def _one_filespec(spec, where, report, label=""):
         if key.endswith("Date"):
             human = _pdf_date(raw)
             raw = tr("%s   (original: %s)") % (human, raw) if human else raw
-        report.add(risk, where, "%s «%s»" % (lbl, fname), raw)
+        report.add(risk, where, tr("%s \"%s\"") % (lbl, fname), raw)
 
 
 def _sec_active(pdf, report, ctx):
@@ -1458,7 +1582,7 @@ def _sec_overview(pdf, report, ctx):
                        "--linearize. It also drops all incremental revisions."))
     try:
         report.add(Risk.PROVENANCE, tr("structure"), tr("PDF version (as parsed)"), str(pdf.pdf_version),
-                   note=tr("The version QPDF sees. A mismatch with the %%PDF- header means the "
+                   note=tr("The version QPDF sees. A mismatch with the %PDF- header means the "
                            "file was rewritten."))
         if ctx.get("header_version") and str(pdf.pdf_version) != ctx["header_version"]:
             report.signal("inconsistent",
@@ -1608,11 +1732,9 @@ def _enrich_exiftool(path, report, ctx):
     for group_key, value in data[0].items():
         if added >= 120:
             break
-        tag = group_key.split(":")[-1]
-        if tag in ("SourceFile", "ExifToolVersion", "FileName", "Directory",
-                   "FileSize", "FileModifyDate", "FileAccessDate", "FileInodeChangeDate",
-                   "FilePermissions", "FileType", "FileTypeExtension", "MIMEType"):
-            continue
+        group, _, tag = group_key.rpartition(":")
+        if group in ("ExifTool", "System", "File") or tag == "SourceFile":
+            continue                # properties of the temporary copy, not of the document
         if tag.lower() in known:
             continue
         added += 1
