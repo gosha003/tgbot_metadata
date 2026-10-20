@@ -72,7 +72,7 @@ RU = {
     "%d OLE object(s) embedded in the RTF: inside each one is a separate container with its own metadata.":
         "В RTF встроено %d OLE-объект(ов): внутри каждого отдельный контейнер со своими метаданными.",
     "%d authors":
-        "%d авторов",
+        "авторов: %d",
     "%d bytes":
         "%d байт",
     "%d bytes of settings":
@@ -120,7 +120,7 @@ RU = {
     "%d part(s): %s":
         "%d часть(ей): %s",
     "%d parts":
-        "%d частей",
+        "частей: %d",
     "%d parts, %d bytes":
         "%d част., %d байт",
     "%d pcs":
@@ -132,7 +132,7 @@ RU = {
     "%d properties":
         "%d свойств(а)",
     "%d revisions":
-        "%d ревизий",
+        "ревизий: %d",
     "%d revisions (by %%%%EOF), /Prev in the trailer: %d":
         "ревизий (по %%%%EOF): %d, /Prev в трейлере: %d",
     "%d s":
@@ -162,7 +162,7 @@ RU = {
     "%s (%d B)%s":
         "%s (%d Б)%s",
     "%s (%d edits)":
-        "%s (%d правок)",
+        "%s (правок: %d)",
     "%s (%s bytes)":
         "%s (%s байт)",
     "%s (active: %s)":
@@ -1840,7 +1840,7 @@ RU = {
     "Original author":
         "Первоначальный автор",
     "Original values that survived cleaning: %d":
-        "Исходных значений, пережившихся чистку: %d",
+        "Исходных значений, переживших чистку: %d",
     "Other (signal kind not specified)":
         "Прочее (вид сигнала не указан)",
     "Other APP0 segment (%s)":
@@ -2364,11 +2364,11 @@ RU = {
     "The OLE class directly names the application that created the container.":
         "Класс OLE прямо называет приложение, создавшее контейнер.",
     "The PDF contains %d revisions: earlier page versions and \"crossed-out\" text can be extracted straight from the file":
-        "PDF содержит %d ревизий: прошлые версии страниц и «зачёркнутый» текст извлекаются из файла напрямую",
+        "Ревизий в PDF: %d. Прошлые версии страниц и «зачёркнутый» текст извлекаются из файла напрямую",
     "The PDF does not open (%s): the file is damaged or is not a PDF.":
         "PDF не открывается (%s): файл повреждён или это не PDF.",
     "The PDF has %d layers turned off: the hidden content is one click away":
-        "В PDF %d выключенных слоёв: скрытое содержимое включается одним кликом",
+        "В PDF есть выключенные слои (%d): скрытое содержимое включается одним кликом",
     "The PDF is digitally signed (%d /FT /Sig field(s)): cleaning the metadata WILL invalidate the signature":
         "PDF подписан электронной подписью (%d поле/полей /FT /Sig): чистка метаданных ГАРАНТИРОВАННО сделает подпись недействительной",
     "The PDF is encrypted and does NOT open with an empty password: content and metadata are unavailable without the owner/user password.":
@@ -2484,19 +2484,19 @@ RU = {
     "The document body contains saved revisions (track changes) from %d author(s), parts: %s.":
         "В теле документа сохранены исправления (track changes) от %d автор(ов), части: %s.",
     "The document has %d comments with authors: the visible text and the hidden discussion diverge.":
-        "В документе %d комментариев с авторами: видимый текст и скрытое обсуждение расходятся.",
+        "В документе есть комментарии с авторами (%d): видимый текст и скрытое обсуждение расходятся.",
     "The document has %d document-level JavaScript script(s)":
         "В документе %d JavaScript-скрипт(ов) уровня документа",
     "The document has %d editing sessions (rsid): the text was put together in at least that many sittings, even if the dates say otherwise.":
         "В документе %d сеансов правки (rsid): текст собирался минимум за столько заходов, даже если даты говорят иначе.",
     "The document has %d event handlers (script:event-listener): active content that runs on opening.":
-        "В документе %d обработчиков событий (script:event-listener): активное содержимое, запускающееся при открытии.",
+        "В документе есть обработчики событий (script:event-listener, %d шт.): активное содержимое, запускающееся при открытии.",
     "The document has %d words, but TotalTime %s: the editing time was zeroed or never set.":
         "В документе %d слов, а TotalTime %s: время редактирования обнулено или не проставлялось.",
     "The document is certified. ANY metadata edit breaks the signature: cleaning and the signature are mutually exclusive.":
-        "Документ сертифицирован. ЛЮБАЯ правка метаданных ломает подпись: чистка и подпись взаимоисключающи.",
+        "Документ сертифицирован. ЛЮБАЯ правка метаданных ломает подпись: чистка и подпись исключают друг друга.",
     "The document is digitally signed (%d): any metadata cleaning would destroy the signature. A signature and cleaning are mutually exclusive; to clean anyway and lose the signature, pass force_signed=True.":
-        "Документ подписан цифровой подписью (%d): любая чистка метаданных её уничтожит. Подпись и чистка взаимоисключающи; чтобы всё же очистить и потерять подпись, передайте force_signed=True.",
+        "Документ подписан цифровой подписью (%d): любая чистка метаданных её уничтожит. Подпись и чистка исключают друг друга; чтобы всё же очистить и потерять подпись, передайте force_signed=True.",
     "The document is labeled with Microsoft Purview: the label carries the tenant GUID and the email of the employee who applied it.":
         "Документ промаркирован Microsoft Purview: метка несёт GUID тенанта и email применившего её сотрудника.",
     "The document variable holds a person: a full name from a template or an EDMS.":
@@ -2570,7 +2570,7 @@ RU = {
     "The file weighs {mb} MB. The Telegram Bot API doesn't deliver files larger than {limit} MB to bots at all -- that is a limit of the Bot API itself, not of the bot. Send a smaller file.":
         "Файл весит {mb} МБ. Telegram Bot API вообще не отдаёт ботам файлы крупнее {limit} МБ -- это ограничение самого Bot API, а не бота. Пришлите файл меньшего размера.",
     "The first 32 characters of the structure are the printer name: often a host name, room number or office. The part was removed with its references from .rels (and r:id in the pageSetup of Excel sheets).":
-        "Первые 32 символа структуры -- имя принтера: часто имя хоста, номер кабинета или офис. Часть убрана с ссылками из .rels (и r:id в pageSetup листов Excel).",
+        "Первые 32 символа структуры -- имя принтера: часто имя хоста, номер кабинета или офис. Часть убрана вместе со ссылками на неё из .rels (и r:id в pageSetup листов Excel).",
     "The flag of an embedded OLE object on every \\object group. The object itself and its metadata sit in the neighbouring \\objdata of the same group.":
         "Флаг внедрённого OLE-объекта у каждой группы \\object. Сам объект и его метаданные лежат в соседнем \\objdata этой же группы.",
     "The flags declare which metadata blocks are in the file. A mismatch between the flags and the actual chunks is a sign of manual editing":
@@ -2612,7 +2612,7 @@ RU = {
     "The input file is empty (0 bytes); it may not have finished downloading.":
         "Входной файл пуст (0 байт), возможно, не докачался.",
     "The inspection core (core/inspect.py) is not ready yet. Try again a little later.":
-        "Ядро разбора (core/inspect.py) пока не готово -- его пишет параллельный агент. Попробуйте чуть позже.",
+        "Ядро разбора (core/inspect.py) пока не готово. Попробуйте чуть позже.",
     "The inspector considers the file built by a library or generator, not saved by an office application.":
         "Инспектор считает файл собранным библиотекой или генератором, а не сохранённым в офисном приложении.",
     "The inspector could not fully read the file (%d), so the check is incomplete: something could have remained in the unread part. Do not treat the file as cleaned until you have checked it.":
@@ -2668,7 +2668,7 @@ RU = {
     "The number of objects relative to pages is a rough producer fingerprint: generators produce predictably few objects per page.":
         "Число объектов относительно числа страниц -- грубый отпечаток продюсера: генераторы дают предсказуемо мало объектов на страницу.",
     "The number of pages, words, characters, tables and images. Indirectly reveals the volume of cut text if compared with the visible content.":
-        "Число страниц, слов, символов, таблиц, картинок. Косвенно выдаёт объём вырезанного текста, если сравнить со видимым содержимым.",
+        "Число страниц, слов, символов, таблиц, картинок. Косвенно выдаёт объём вырезанного текста, если сравнить с видимым содержимым.",
     "The object is laid into the RTF as a hex dump of a whole OLE container. Inside is ITS OWN metadata (author, dates, the path to the source file) and, if it's a pasted document, its full content, not just the visible picture.":
         "Объект уложен в RTF как hex-дамп целого OLE-контейнера. Внутри -- СВОИ метаданные (автор, даты, путь к исходному файлу) и, если это вставленный документ, его полное содержимое, а не только видимая картинка.",
     "The object is not embedded but LINKED to an external file: the document stores the path to the source and goes to it when the field is updated -- that is a path on someone else's machine, not the file's content.":
@@ -2694,7 +2694,7 @@ RU = {
     "The package is digitally signed (%d parts in _xmlsignatures/): cleaning the metadata WILL invalidate the signature; the cleaner refuses without force_signed":
         "Пакет подписан цифровой подписью (частей в _xmlsignatures/: %d): очистка метаданных сделает подпись недействительной; без force_signed очистка отклоняется",
     "The package is signed (%d parts in _xmlsignatures/): any edit invalidates the signature. File NOT cleaned; to clean it anyway and remove the signature, force_signed is required.":
-        "Пакет подписан (%d частей в _xmlsignatures/): любая правка делает подпись недействительной. Файл НЕ очищен; чтобы всё равно очистить и убрать подпись, нужен force_signed.",
+        "Пакет подписан (частей в _xmlsignatures/: %d): любая правка делает подпись недействительной. Файл НЕ очищен; чтобы всё равно очистить и убрать подпись, нужен force_signed.",
     "The package layout alone reveals both the generator and the document structure.":
         "Состав пакета сам по себе выдаёт и генератор, и структуру документа.",
     "The package was built by a library (python-docx/docxtpl or an AI generator), not by Word: %s.":
@@ -2788,9 +2788,9 @@ RU = {
     "The signature carries the signer's certificate (name or organization, email, validity period). It can be removed only together with the signature: the file stops being signed, and cleaning is refused without force_signed.":
         "Подпись содержит сертификат подписанта (имя или организацию, email, срок действия). Убрать его можно только вместе с подписью: файл перестанет быть подписанным, а очистка без force_signed отклоняется.",
     "The signature contains the signer's certificate (full name, organization, email). It cannot be removed without losing the signature.":
-        "Подпись содержит сертификат подписанта (ФИО, организация, почта). Удалить её без потери подписи невозможно.",
+        "Подпись содержит сертификат подписанта (ФИО, организация, почта). Удалить его без потери подписи невозможно.",
     "The signature contains the signer's certificate: a full name or organization name, email address, validity period, thumbprint. It can be removed only together with the signature itself: the file stops being signed.":
-        "Подпись содержит сертификат подписанта: ФИО или название организации, адрес почты, срок действия, отпечаток. Убрать её можно только вместе с самой подписью -- файл перестанет быть подписанным.",
+        "Подпись содержит сертификат подписанта: ФИО или название организации, адрес почты, срок действия, отпечаток. Убрать его можно только вместе с самой подписью -- файл перестанет быть подписанным.",
     "The signature covered the file's content: cleaning breaks it, and the recipient can see that it was signed":
         "Подпись покрывала содержимое файла: чистка её ломает, а сам факт подписи виден получателю",
     "The signature covers the file content: any cleaning is guaranteed to break it, and the very fact of a signature is visible to the recipient":
@@ -3452,7 +3452,7 @@ RU = {
     "errors during cleaning: %d":
         "ошибок при чистке: %d",
     "exiftool added %d fields not covered by pikepdf parsing":
-        "exiftool добавил %d полей, не покрытых разбором pikepdf",
+        "exiftool добавил поля, не покрытые разбором pikepdf: %d",
     "exiftool enrichment failed (not critical): %s":
         "Обогащение exiftool не удалось (не критично): %s",
     "exiftool failed (not critical): %s":
@@ -3688,7 +3688,7 @@ RU = {
     "no cleaning is provided for file type \"%s\"":
         "для типа файла «%s» чистка не предусмотрена",
     "no exiftool: MakerNotes are not decoded (how to install -- docs/GUIDE.md, section 7)":
-        "exiftool нет: MakerNotes не расшифровываются (как поставить -- docs/GUIDE.md, раздел 7)",
+        "exiftool нет: MakerNotes не расшифровываются (как поставить -- docs/GUIDE.ru.md, раздел 7)",
     "no line breaks":
         "переводов строк нет",
     "no meta.xml: nothing to clean, no output created.":
@@ -3906,7 +3906,7 @@ RU = {
     "rotated 180°":
         "поворот на 180°",
     "rotated 270° clockwise (90° counterclockwise)":
-        "поворот на 270° по часовой (90° против)",
+        "поворот на 270° по часовой стрелке (90° против часовой стрелки)",
     "rotated 90° clockwise":
         "поворот на 90° по часовой стрелке",
     "rsid attributes":
@@ -3930,7 +3930,7 @@ RU = {
     "set":
         "установлен",
     "settings.xml still holds %d entries with paths/printer: they aren't visible in the document properties and survive their cleaning.":
-        "В settings.xml осталось %d записей с путями/принтером: они не видны в свойствах документа и переживают их очистку.",
+        "В settings.xml остались записи с путями или принтером (%d): они не видны в свойствах документа и переживают их очистку.",
     "several EOCD signatures at the end of the file: parsers would read different archives":
         "в конце файла несколько сигнатур EOCD: парсеры прочтут разный архив",
     "signals were not built: %s: %s":
