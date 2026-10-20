@@ -333,6 +333,15 @@ def _selftest():
         blob2 = " ".join(f.value or "" for f in inspect_file(dst2).findings)
         assert RTF_GENERATOR not in blob2
         assert not survived_values(inspect_file(src), inspect_file(dst2))
+
+        # A \uN outside Unicode in a property must not abort the whole cleaning.
+        hostile = os.path.join(tmp, "hostile.rtf")
+        with open(hostile, "wb") as fh:
+            u = chr(92).encode() + b"u9999999 ?"
+            fh.write(rb"{\rtf1\ansi{\info{\author Ivanov" + u + rb"}{\company Acme}}}")
+        res3 = clean_rtf(hostile, os.path.join(tmp, "hostile_out.rtf"), Profile.STEALTH)
+        assert res3.ok and not res3.errors, res3.errors
+        assert b"Ivanov" not in open(os.path.join(tmp, "hostile_out.rtf"), "rb").read()
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
