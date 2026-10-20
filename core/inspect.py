@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import io
 import json
 import os
 import re
@@ -49,7 +50,7 @@ from enum import Enum
 from .model import Report, Risk
 from . import sniff
 from .insp_ooxml import inspect_ooxml
-from .insp_pdf import inspect_pdf
+from .insp_pdf import inspect_pdf, _stream_fits
 from .insp_image import inspect_image
 from .insp_legacy import inspect_ole, inspect_odf, inspect_rtf
 from .report import render_plain, summary_line
@@ -278,7 +279,11 @@ def _zip_entry_bytes(zf, info, cap):
 
 
 def _write_tmp(tmpdir, index, name):
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(name)) or "part"
+    """Temp path of an extracted object. index must be unique within the whole
+    inspection (the folder is shared by every recursion level); the name is cut
+    short, since the type is sniffed from the content and a long entry name would
+    fail to open."""
+    base = (re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(name)) or "part")[:60]
     return os.path.join(tmpdir, "%03d_%s" % (index, base))
 
 
@@ -303,7 +308,6 @@ def _extract_zip_children(rep, path, tmpdir, budget, match, kind_label):
         rep.err(tr("recursion: %s container failed to reopen: %s") % (kind_label, exc))
         return out
     with zf:
-        idx = 0
         for scanned, info in enumerate(zf.infolist()):
             if scanned >= MAX_ZIP_SCAN:
                 break
@@ -321,12 +325,17 @@ def _extract_zip_children(rep, path, tmpdir, budget, match, kind_label):
             if data is None:
                 rep.err(tr("recursion: %s exceeds the %d MB limit, skipped") % (name, cap // 1048576))
                 continue
-            idx += 1
             budget["objects"] += 1
             budget["bytes"] += len(data)
-            dest = _write_tmp(tmpdir, idx, name)
-            with open(dest, "wb") as fh:
-                fh.write(data)
+            dest = _write_tmp(tmpdir, budget["objects"], name)
+            try:
+                with open(dest, "wb") as fh:
+                    fh.write(data)
+            except OSError as exc:
+                # errno, not the message: the message carries the temp path
+                rep.err(tr("recursion: %s can't be written to the temp folder (errno %s), "
+                           "skipped") % (name, exc.errno))
+                continue
             out.append((name, dest))
     return out
 
@@ -396,27 +405,30 @@ def _extract_pdf_children(rep, path, tmpdir, budget):
                     stream = (ef.get("/F") or ef.get("/UF")) if ef is not None else None
                     if stream is None:
                         continue
-                    # check the raw (compressed) size first: the same bomb protection
-                    # as in insp_pdf._stream_text, before full decompression.
-                    if len(stream.read_raw_bytes()) > cap:
-                        rep.err(tr("recursion: PDF attachment %r exceeds the %d MB limit, skipped")
+                    # read_bytes() decodes the whole stream, so the decoded size has to be
+                    # bounded first (insp_pdf._stream_fits), not checked on the result.
+                    if not _stream_fits(stream, cap):
+                        rep.err(tr("recursion: PDF attachment %r exceeds the %d MB limit once "
+                                   "decompressed, or its size can't be bounded, skipped")
                                 % (label, cap // 1048576))
                         continue
                     data = stream.read_bytes()
-                    if len(data) > cap:
-                        rep.err(tr("recursion: PDF attachment %r decompressed beyond the %d MB "
-                                   "limit, skipped") % (label, cap // 1048576))
-                        continue
                 except Exception as exc:
                     rep.err(tr("recursion: PDF attachment %r can't be read: %s") % (label, exc))
                     continue
                 idx += 1
                 budget["objects"] += 1
                 budget["bytes"] += len(data)
-                dest = _write_tmp(tmpdir, idx, label or ("attach%d" % idx))
-                with open(dest, "wb") as fh:
-                    fh.write(data)
-                out.append((label or tr("attachment %d") % idx, dest))
+                shown = label or tr("attachment %d") % idx
+                dest = _write_tmp(tmpdir, budget["objects"], label or ("attach%d" % idx))
+                try:
+                    with open(dest, "wb") as fh:
+                        fh.write(data)
+                except OSError as exc:
+                    rep.err(tr("recursion: %s can't be written to the temp folder (errno %s), "
+                               "skipped") % (shown, exc.errno))
+                    continue
+                out.append((shown, dest))
     except Exception as exc:
         rep.err(tr("recursion: walking PDF attachments was interrupted: %s") % exc)
     return out
@@ -629,15 +641,92 @@ def _selftest():
         _case(OSError(22, "x"), None, "errno 22")                # not Windows / the call failed
         _case(PermissionError(13, "x"), 0x20, "no read access")
         _case(FileNotFoundError(2, "x"), None, "not found")
-        rep = inspect_file(os.path.join(tmp, "no_such_file.docx"))   # for real
+        rep = inspect_file(os.path.join(tmp, "нет_такого.docx"))   # for real
         assert rep.fmt == "unreadable" and any("not found" in e for e in rep.errors), rep.errors
         rep = inspect_file(tmp)                                      # directory
         assert rep.fmt == "unreadable" and any("directory" in e for e in rep.errors), rep.errors
 
         # 9. sniff on an unreadable file doesn't raise and isn't confused with 'unknown'.
-        assert sniff.sniff(os.path.join(tmp, "no_such_file.docx")) == "unreadable"
+        assert sniff.sniff(os.path.join(tmp, "нет_такого.docx")) == "unreadable"
         assert sniff.sniff("bad" + chr(0) + "path") == "unreadable"
         assert sniff.unreadable_reason("bad" + chr(0) + "path") == ("other", None)
+
+        # 10. Extracted embedded objects share one temp folder across recursion levels.
+        #     A nested B.docx used to overwrite the top-level B.docx before it was inspected.
+        def _docx_bytes(creator, children=()):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("[Content_Types].xml", "<Types xmlns='x'/>")
+                zf.writestr("word/document.xml", "<w:document xmlns:w='x'/>")
+                zf.writestr("docProps/core.xml",
+                            "<cp:coreProperties xmlns:cp='http://schemas.openxmlformats.org/package/2006/"
+                            "metadata/core-properties' xmlns:dc='http://purl.org/dc/elements/1.1/'>"
+                            "<dc:creator>%s</dc:creator></cp:coreProperties>" % creator)
+                for name, data in children:
+                    zf.writestr(name, data)
+            return buf.getvalue()
+
+        nested = os.path.join(tmp, "nested.docx")
+        with open(nested, "wb") as fh:
+            fh.write(_docx_bytes("TOP", [
+                ("word/embeddings/A.docx", _docx_bytes("ASECRET", [
+                    ("word/embeddings/x.docx", _docx_bytes("XSECRET")),
+                    ("word/embeddings/B.docx", _docx_bytes("FAKE"))])),
+                ("word/embeddings/B.docx", _docx_bytes("BSECRET"))]))
+        rep = inspect_file(nested)
+        seen = {f.location: f.value for f in rep.findings if f.value in ("BSECRET", "FAKE")}
+        assert seen.get("word/embeddings/B.docx > docProps/core.xml") == "BSECRET", seen
+        assert seen.get("word/embeddings/A.docx > word/embeddings/B.docx > docProps/core.xml") == "FAKE", seen
+
+        # 11. One bad embedded item must not take the rest down: a very long entry name
+        #     used to fail the open() and abort the whole recursion; now the name is cut
+        #     short, and a write that fails anyway costs only that item.
+        longname = os.path.join(tmp, "longname.docx")
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+        with zipfile.ZipFile(longname, "w") as zf:
+            zf.writestr("[Content_Types].xml", "<Types xmlns='x'/>")
+            zf.writestr("word/document.xml", "<w:document xmlns:w='x'/>")
+            zf.writestr("word/media/" + "a" * 300 + ".png", png)
+            zf.writestr("word/media/image2.png", png)
+        rep = inspect_file(longname)
+        assert not any("crashed entirely" in e for e in rep.errors), rep.errors
+        assert any(p["name"] == "word/media/image2.png" for p in rep.parts), rep.parts
+
+        g = globals()
+        real_write_tmp = g["_write_tmp"]
+        g["_write_tmp"] = lambda tmpdir, index, name: (
+            os.path.join(tmpdir, "no_such_dir", "x") if "a" * 50 in name else real_write_tmp(tmpdir, index, name))
+        try:
+            rep = inspect_file(longname)
+        finally:
+            g["_write_tmp"] = real_write_tmp
+        assert any("temp folder" in e and "errno" in e for e in rep.errors), rep.errors
+        assert not any("crashed entirely" in e for e in rep.errors), rep.errors
+        assert any(p["name"] == "word/media/image2.png" for p in rep.parts), rep.parts
+        assert not any(tmp in e for e in rep.errors), rep.errors      # the temp path didn't leak
+
+        # 12. A PDF attachment that inflates past the limit is refused, not inflated first.
+        import pikepdf
+        import zlib
+
+        pdf = pikepdf.Pdf.new()
+        pdf.add_blank_page()
+        spec = pikepdf.AttachedFileSpec(pdf, b"x", filename="bomb.bin")
+        body = pdf.make_stream(b"")
+        body.write(zlib.compress(b"\x00" * (8 << 20)), filter=pikepdf.Name.FlateDecode)
+        spec.obj["/EF"]["/F"] = body
+        pdf.attachments["bomb.bin"] = spec
+        bomb = os.path.join(tmp, "attach_bomb.pdf")
+        pdf.save(bomb)
+        pdf.close()
+        old_item_read = g["MAX_ITEM_READ"]
+        g["MAX_ITEM_READ"] = 1 << 20
+        try:
+            rep = inspect_file(bomb)
+        finally:
+            g["MAX_ITEM_READ"] = old_item_read
+        assert any("once decompressed" in e for e in rep.errors), rep.errors
+        assert not any(str(p["kind"]).startswith("nested:") for p in rep.parts), rep.parts
 
         print("OK: dispatcher self-test passed")
     finally:

@@ -133,8 +133,8 @@ RU = {
         "%d свойств(а)",
     "%d revisions":
         "%d ревизий",
-    "%d revisions (by %%EOF), /Prev in the trailer: %d":
-        "%d ревизий (по %%EOF), /Prev в трейлере: %d",
+    "%d revisions (by %%%%EOF), /Prev in the trailer: %d":
+        "ревизий (по %%%%EOF): %d, /Prev в трейлере: %d",
     "%d s":
         "%d с",
     "%d segm., %d bytes":
@@ -153,6 +153,10 @@ RU = {
         "%dx%d, кадров %d",
     "%s   (original: %s)":
         "%s   (оригинал: %s)",
+    "%s \"%s\"":
+        "%s «%s»",
+    "%s (\"%s\")":
+        "%s («%s»)",
     "%s (%d B)":
         "%s (%d Б)",
     "%s (%d B)%s":
@@ -273,6 +277,8 @@ RU = {
         "%s: поток слишком велик (%d байт сжатых), не распаковываем.",
     "%s: suspicious compression ratio %dx":
         "%s: подозрительный коэффициент сжатия %dx",
+    "%s: the stream expands beyond %d MB or its size can't be bounded, not decompressed.":
+        "%s: при распаковке поток превысит %d МБ или его размер не удаётся ограничить, не распаковываем.",
     "%s: unknown byte order %r":
         "%s: неизвестный порядок байтов %r",
     "(VT type 0x%02X, cannot be parsed)":
@@ -299,6 +305,8 @@ RU = {
         "- %s (уверенность: %s)",
     ". The source has no SOF: the image didn't decode before cleaning either; dimensions weren't checked":
         ". В исходнике нет SOF: изображение не декодировалось и до чистки, размеры не проверялись",
+    "/ByteRange (\"%s\")":
+        "/ByteRange («%s»)",
     "/Encrypt parameters can't be read: %s":
         "Параметры /Encrypt не читаются: %s",
     "/Encrypt permissions can't be read: %s":
@@ -375,6 +383,8 @@ RU = {
         "<путь скрыт>",
     "<pre>%s</pre>\nDetails for each file -- in the document below.":
         "<pre>%s</pre>\nПодробно по каждому файлу -- документом ниже.",
+    "<stream not decompressed: it may expand beyond the limit>":
+        "<поток не распаковываем: он может раздуться сверх лимита>",
     "<stream too large to decompress: %d compressed bytes>":
         "<поток слишком велик для распаковки: %d байт сжатых>",
     "<unparsed>":
@@ -1863,8 +1873,8 @@ RU = {
         "PARANOID: значение поля формы. Внешний вид поля перерисует просмотрщик.",
     "PARANOID: the packet is empty, the stream is removed entirely.":
         "PARANOID: пакет пуст, поток убран целиком.",
-    "PDF version (%%PDF-)":
-        "Версия PDF (%%PDF-)",
+    "PDF version (%PDF-)":
+        "Версия PDF (%PDF-)",
     "PDF version (as parsed)":
         "Версия PDF (по разбору)",
     "PDF version can't be read: %s":
@@ -2313,6 +2323,8 @@ RU = {
         "Поле 'Руководитель' в свойствах документа.",
     "The .doc format physically stores more than it shows. The table stream (%s) holds the SttbfRMark revision author table: a list of EVERYONE who ever edited the document, even if the changes were accepted long ago. When saving in fast-save mode Word doesn't rewrite the file from scratch but appends the changes at the end: the DELETED TEXT of earlier versions stays in the file physically and can be extracted with any hex editor. On top of that, unused sectors of the OLE container could previously have belonged to OTHER files on the same disk, and their fragments travel with the document. This cannot be cleaned by editing the properties.":
         "Формат .doc физически хранит больше, чем показывает. В потоке таблицы (%s) лежит таблица авторов правок SttbfRMark -- список ВСЕХ, кто когда-либо редактировал документ, даже если сами правки давно приняты. При сохранении в режиме быстрого сохранения Word не переписывает файл заново, а дописывает изменения в конец: УДАЛЁННЫЙ ТЕКСТ предыдущих версий остаётся в файле физически и извлекается любым hex-редактором. Сверх того, неиспользованные секторы OLE-контейнера ранее могли принадлежать ДРУГИМ файлам с того же диска, и их фрагменты уезжают вместе с документом. Вычистить это редактированием свойств невозможно.",
+    "The /Metadata stream expands beyond %d MB or its size can't be bounded: not decompressed, bomb protection.":
+        "Поток /Metadata при распаковке превысит %d МБ или его размер не удаётся ограничить -- не распаковываем, защита от бомбы.",
     "The /Metadata stream is too large (%d bytes compressed): not decompressed, bomb protection.":
         "Поток /Metadata слишком велик (%d байт в сжатом виде) -- не распаковываем, защита от бомбы.",
     "The Excel serial date of the cache refresh.":
@@ -2729,8 +2741,8 @@ RU = {
         "Профиль regenerate требует LibreOffice, его на машине нет, фаза 4. Чистка на месте не подменяется: незаметность была бы другой. Файл НЕ очищен, выходной файл не создан.",
     "The report covers metadata only: it doesn't assess writing style or the content itself.":
         "Отчёт касается только метаданных: стиль текста и сам контент он не оценивает.",
-    "The result has %d %%EOF markers (expected 1): possibly a string inside a stream.":
-        "В результате %d маркеров %%EOF (ожидался 1): возможно, строка внутри потока.",
+    "The result has %d %%%%EOF markers (expected 1): possibly a string inside a stream.":
+        "В результате %d маркеров %%%%EOF (ожидался 1): возможно, строка внутри потока.",
     "The revision author table lists %d people: more than one person worked on the file, although the document properties name a single author.":
         "В таблице авторов правок %d человек(а): над файлом работал не один, хотя в свойствах документа автор указан один.",
     "The revision author table. The names stay in the file even after the changes themselves are accepted or rejected.":
@@ -2823,8 +2835,8 @@ RU = {
         "Значение похоже на локальный путь: выдаёт имя пользователя и структуру диска.",
     "The values are form content, the user filled them in deliberately. PARANOID clears them.":
         "Значения -- содержимое формы, пользователь заполнил их осознанно. PARANOID очищает.",
-    "The version QPDF sees. A mismatch with the %%PDF- header means the file was rewritten.":
-        "Версия, которую видит QPDF. Расхождение с заголовком %%PDF- означает, что файл переписывали.",
+    "The version QPDF sees. A mismatch with the %PDF- header means the file was rewritten.":
+        "Версия, которую видит QPDF. Расхождение с заголовком %PDF- означает, что файл переписывали.",
     "The viewer is told to redraw fields from their values: field values exist in the file even where it looks empty.":
         "Просмотрщику приказано перерисовать поля по их значениям: значения полей в файле есть даже там, где визуально пусто.",
     "The whole comment body: working correspondence that's invisible in normal viewing.":
@@ -3801,16 +3813,16 @@ RU = {
         "реальное время сохранения",
     "rebuilding the ODF failed":
         "пересборка ODF не удалась",
+    "recursion: %s can't be written to the temp folder (errno %s), skipped":
+        "рекурсия: %s не удалось записать во временную папку (errno %s), пропущен",
     "recursion: %s container failed to reopen: %s":
         "рекурсия: %s-контейнер повторно не открылся: %s",
     "recursion: %s exceeds the %d MB limit, skipped":
         "рекурсия: %s больше лимита %d МБ, пропущен",
     "recursion: PDF attachment %r can't be read: %s":
         "рекурсия: вложение PDF %r не читается: %s",
-    "recursion: PDF attachment %r decompressed beyond the %d MB limit, skipped":
-        "рекурсия: вложение PDF %r распаковалось больше лимита %d МБ, пропущено",
-    "recursion: PDF attachment %r exceeds the %d MB limit, skipped":
-        "рекурсия: вложение PDF %r больше лимита %d МБ, пропущено",
+    "recursion: PDF attachment %r exceeds the %d MB limit once decompressed, or its size can't be bounded, skipped":
+        "рекурсия: вложение PDF %r после распаковки превысит лимит %d МБ или его размер не удаётся ограничить, пропущено",
     "recursion: embedded-object budget exhausted in %s; some embedded items were not inspected":
         "рекурсия: бюджет вложенных объектов исчерпан в %s, часть вложений не инспектирована",
     "recursion: embedded-object budget exhausted in the PDF; some attachments were not inspected":
