@@ -1279,10 +1279,11 @@ def test_16_image_hidden_payload_and_bomb(tmp):
 
 
 def _claims_clean(text):
-    """Whether the report text declares the file clean. "NOT CLEANED" doesn't, and
-    render_plain wraps lines (textwrap), so whitespace is normalized."""
+    """Whether the report text declares the file clean (a "CLEAN:" headline). "NOT CLEAN:"
+    and "NOT CLEANED:" don't, and render_plain wraps lines (textwrap), so whitespace is
+    normalized."""
     flat = " ".join(text.split())
-    return "CLEAN: re-inspection" in flat or re.search(r"(?<!NOT )CLEANED", flat) is not None
+    return re.search(r"(?<!NOT )CLEAN:", flat) is not None
 
 
 def _phases(text):
@@ -1762,9 +1763,9 @@ def test_15_honest_verdicts(tmp):
 def test_97_cli_verdict_text(tmp):
     """python -m core.clean prints the dispatcher's summary ON TOP and the
     cleanreport report below. That's the text the user reads, so the summary
-    must not say "some of the original values remained" when the same printout
-    says "survived cleaning: 0" (the case: the inspector couldn't parse part of
-    the original, so the proof is incomplete, but nobody saw a leak)."""
+    must not say "NOT FULLY CLEANED: N original values remain" when the same
+    printout says "survived cleaning: 0" (the case: the inspector couldn't parse
+    part of the original, so the proof is incomplete, but nobody saw a leak)."""
     import contextlib
 
     def run_cli(src, extra=()):
@@ -1784,9 +1785,10 @@ def test_97_cli_verdict_text(tmp):
     survived_zero = "survived cleaning: 0" in text
     _check("CLI, zTXt bomb: the file is produced, cleanliness not proven -> exit code 2", rc == 2 and os.path.isfile(out), rc)
     _check("CLI, zTXt bomb: the printout has \"survived cleaning: 0\" (precondition)", survived_zero, text[:400])
-    _check("CLI, zTXt bomb: the summary doesn't claim \"some of the original values remained\" "
+    _check("CLI, zTXt bomb: the summary says \"CLEANLINESS NOT PROVEN\", not \"NOT FULLY CLEANED\" "
            "with zero survivors",
-           not (survived_zero and "some of the original values remained" in text), text[:300])
+           "CLEANLINESS NOT PROVEN" in text and not (survived_zero and "NOT FULLY CLEANED" in text),
+           text[:300])
 
     path = fixtures.make_pdf(tmp)[0]
     rc, text, out = run_cli(path)
@@ -1968,6 +1970,7 @@ def test_22_oracle_short_values():
     being skipped.
     """
     from core.clean import survived_values
+    from core.i18n import both
     from core.model import Report, Risk
 
     def rep(value, risk=Risk.IDENTITY):
@@ -1991,10 +1994,14 @@ def test_22_oracle_short_values():
                                rep("Подготовил Иванов Иван, отдел"))) == 1)
 
     # Presence markers are report markup, not data: "present" in the original and
-    # "present" in the output is not a leak that survived cleaning.
-    for marker in ("present", "no", "yes", "true"):
-        _check("oracle: the marker %r is not counted as a leak" % marker,
-               not survived_values(rep(marker), rep(marker)), marker)
+    # "present" in the output is not a leak that survived cleaning. They are matched in
+    # both languages, since the report is rendered in either.
+    for base in ("present", "absent", "empty", "not set", "yes", "no", "on", "off"):
+        for marker in set(both(base)) | {"true", "false", "none", "n/a"}:
+            _check("oracle: the marker %r is not counted as a leak" % marker,
+                   not survived_values(rep(marker), rep(marker)), marker)
+    _check("oracle: the Russian markers are covered too",
+           all(both(b)[1] != b for b in ("present", "no", "yes", "empty")))
 
 
 def _pdf_with_photo(tmp, jpg):
@@ -2475,7 +2482,7 @@ def test_98_verdicts_agree():
     _check("the file is PROVEN clean (dispatcher) -- the report doesn't shout \"NOT CLEAN\" (a "
            "false alarm)",
            not false_alarm, false_alarm[:6])
-    overclaim = [l for l, r in seen if r.ok and not r.clean and "CLEAN: re-inspection" in cleanreport.render_plain(r)]
+    overclaim = [l for l, r in seen if r.ok and not r.clean and _claims_clean(cleanreport.render_plain(r))]
     _check("cleanliness NOT proven (dispatcher) -- the report doesn't call the file clean", not overclaim, overclaim[:6])
     refused_ok = [l for l, r in seen if not r.ok and _claims_clean(cleanreport.render_plain(r))]
     _check("the file is NOT produced -- the report never calls it clean", not refused_ok, refused_ok[:6])

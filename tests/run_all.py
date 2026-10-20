@@ -5,11 +5,14 @@
 
 Each suite runs in its own process (the self-tests patch module globals, so one
 process per suite keeps them independent). A suite fails when its process exits
-with a non-zero code; the tail of its output is printed for diagnosis.
+with a non-zero code or prints a "TOTAL: N checks, M failed" line with M > 0; the tail
+of its output is printed for diagnosis. An unknown suite name exits 2.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import re
 import subprocess
@@ -39,6 +42,7 @@ SUITES = [
     ("core.lint", ["-m", "core.lint"]),
     ("bot", ["bot.py", "--selftest"]),
     ("tests.real_office", ["-m", "tests.real_office"]),  # skipped without Microsoft Word
+    ("tests.run_all", ["-m", "tests.run_all", "--selftest"]),
 ]
 
 _TOTAL = re.compile(r"TOTAL: (\d+) checks?, (\d+) failed")
@@ -46,6 +50,10 @@ _TOTAL = re.compile(r"TOTAL: (\d+) checks?, (\d+) failed")
 
 def main(argv=None) -> int:
     only = set(argv or sys.argv[1:])
+    unknown = only - {name for name, _ in SUITES}
+    if unknown:
+        print("unknown suite(s): %s" % ", ".join(sorted(unknown)), file=sys.stderr)
+        return 2
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     failed, checks = [], 0
     for name, args in SUITES:
@@ -55,9 +63,10 @@ def main(argv=None) -> int:
         proc = subprocess.run([sys.executable] + args, cwd=ROOT, env=env, capture_output=True,
                               text=True, encoding="utf-8", errors="replace")
         out = proc.stdout + proc.stderr
-        counted = sum(int(m.group(1)) for m in _TOTAL.finditer(out))
+        totals = [(int(m.group(1)), int(m.group(2))) for m in _TOTAL.finditer(out)]
+        counted = sum(n for n, _ in totals)
         checks += counted
-        ok = proc.returncode == 0
+        ok = proc.returncode == 0 and not any(bad for _, bad in totals)
         print("%-20s %s  %6.1fs%s" % (name, "ok  " if ok else "FAIL", time.time() - start,
                                       "  (%d checks)" % counted if counted else ""), flush=True)
         if not ok:
@@ -71,9 +80,28 @@ def main(argv=None) -> int:
     return 1 if failed else 0
 
 
+def _selftest() -> int:
+    """The runner's own verdicts, against stand-in suites: a clean TOTAL line passes, a
+    failed one fails the suite even with exit code 0, an unknown name exits 2."""
+    global SUITES
+    real = SUITES
+    SUITES = [("clean", ["-c", "print('TOTAL: 5 checks, 0 failed')"]),
+              ("failing", ["-c", "print('TOTAL: 5 checks, 2 failed')"])]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            got = [main(["clean"]), main(["failing"]), main(["no_such_suite"])]
+    finally:
+        SUITES = real
+    bad = got != [0, 1, 2]
+    print("TOTAL: 3 checks, %d failed" % bad)
+    if bad:
+        print("exit codes (clean, failing, unknown) = %r, expected [0, 1, 2]" % (got,))
+    return int(bad)
+
+
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
-    raise SystemExit(main())
+    raise SystemExit(_selftest() if sys.argv[1:] == ["--selftest"] else main())

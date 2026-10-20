@@ -6,7 +6,7 @@ values across two reports, and a value written in one language must not be
 compared with a value written in the other: a stray English marker in a Russian
 run would turn a clean file into "NOT CLEAN". So the main check here runs every
 fixture through inspection and cleaning in both languages and requires the
-structural results to be identical.
+structural results, and the verdict the user is shown, to be identical.
 
 The static checks guard the translation table itself: every string passed to
 tr() / N_() has a Russian version with the same placeholders, and tr() is never
@@ -32,8 +32,8 @@ sys.path.insert(0, ROOT)
 
 from core import cleanreport, report  # noqa: E402
 from core.clean import clean_file  # noqa: E402
-from core.cleanmodel import Profile  # noqa: E402
-from core.i18n import RU_PLURAL, use_lang  # noqa: E402
+from core.cleanmodel import CleanResult, Profile  # noqa: E402
+from core.i18n import RU_PLURAL, tr, use_lang  # noqa: E402
 from core.i18n_ru import RU  # noqa: E402
 from core.inspect import inspect_file  # noqa: E402
 
@@ -46,9 +46,19 @@ _RESULTS = []
 _PH = re.compile(r"%(?:\([^)]*\))?[-#0 +]*\d*(?:\.\d+)?[sdirfgxXeEc%]"
                  r"|\{(?:[A-Za-z_]\w*|\d*)(?:![rsa])?(?::[^{}]*)?\}")
 
-_FIXTURES = ("make_docx", "make_docx_wordlike", "make_xlsx", "make_pptx", "make_pdf",
-             "make_pdf_incremental", "make_jpeg", "make_png", "make_rtf", "make_odt",
-             "make_doc", "make_xls", "make_ppt", "make_broken")
+# Every builder in tests/fixtures.py, so a new one is covered without being listed here.
+_FIXTURES = tuple(sorted(n for n in dir(fixtures) if n.startswith("make_")))
+
+# Cleaning paths the default run never takes: a whitelist that leaves survivors
+# behind, and a run without re-inspection.
+_CONFIGS = (
+    ("make_docx", {"keep": {"dc:creator", "Company"}}),
+    ("make_xlsx", {"keep": {"dc:creator", "Company"}}),
+    ("make_pdf", {"keep": {"/Author"}}),
+    ("make_jpeg", {"keep": {"icc"}}),
+    ("make_docx", {"verify": False}),
+    ("make_pdf", {"verify": False}),
+)
 
 
 def _check(name, condition, detail=""):
@@ -144,8 +154,11 @@ def _inspect_signature(rep):
 
 def _clean_signature(res):
     acts = collections.Counter(getattr(a.act, "value", a.act) for a in res.actions)
-    return (res.ok, getattr(res, "verified", None), res.clean, len(getattr(res, "survived", [])),
-            len(getattr(res, "residual", [])), len(getattr(res, "gaps", [])),
+    # The verdict the user is shown: its kind and mark, not its wording.
+    v = cleanreport._verdict(cleanreport._snap(res))
+    return (v.kind, v.mark, bool(v.short), res.ok, getattr(res, "verified", None), res.clean,
+            len(getattr(res, "survived", [])), len(getattr(res, "residual", [])),
+            len(getattr(res, "gaps", [])),
             res.critical_before, res.critical_after, res.sensitive_before, res.sensitive_after,
             getattr(res, "planned_phase", 0), sorted(acts.items()), len(res.errors),
             # new_signals holds (kind, detail); the detail is display text.
@@ -175,27 +188,73 @@ def test_10_inspection_is_language_independent():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _clean_signatures(src, dst_base, prof, **kwargs):
+    sigs = {}
+    for lang in ("en", "ru"):
+        with use_lang(lang):
+            sigs[lang] = _clean_signature(clean_file(src, "%s_%s.out" % (dst_base, lang), prof,
+                                                     **kwargs))
+    return sigs
+
+
 def test_11_cleaning_verdict_is_language_independent():
     tmp = tempfile.mkdtemp(prefix="i18n_")
     try:
         for name, src in (p for f in _FIXTURES for p in _fixture_paths(f, tmp)):
             for prof in (Profile.STEALTH, Profile.PARANOID):
-                sigs = {}
-                for lang in ("en", "ru"):
-                    dst = os.path.join(tmp, "%s_%s_%s.out" % (name, prof.value, lang))
-                    with use_lang(lang):
-                        sigs[lang] = _clean_signature(clean_file(src, dst, prof))
+                sigs = _clean_signatures(src, os.path.join(tmp, "%s_%s" % (name, prof.value)), prof)
                 _check("%s/%s: cleaning verdict identical in EN and RU" % (name, prof.value),
                        sigs["en"] == sigs["ru"], (sigs["en"], sigs["ru"]))
+        not_clean = 0
+        for fixture, kwargs in _CONFIGS:
+            src = _fixture_paths(fixture, tmp)[0][1]
+            label = "%s+%s" % (fixture, "+".join(sorted(kwargs)))
+            for prof in (Profile.STEALTH, Profile.PARANOID):
+                sigs = _clean_signatures(src, os.path.join(tmp, "%s_%s" % (label, prof.value)),
+                                         prof, **kwargs)
+                not_clean += sigs["en"][0] == "residual"      # the verdict kind comes first
+                _check("%s/%s: cleaning verdict identical in EN and RU" % (label, prof.value),
+                       sigs["en"] == sigs["ru"], (sigs["en"], sigs["ru"]))
+        _check("the keep configurations leave survivors: the NOT CLEAN verdict is exercised",
+               not_clean)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_12_report_verdict_ignores_note_wording():
+    """The report counts entries kept per the user's whitelist by their note, which is
+    display text. 3 critical findings = a regenerated /ID (2) + one kept field, so
+    the remainder is explained in either language."""
+    # The Russian note is swapped for a wording without the Latin word "whitelist", so
+    # a match on that substring (instead of the whole note in both languages) fails here.
+    key = "kept per the user's whitelist (keep)"
+    saved = RU[key]
+    RU[key] = "оставлено по списку пользователя (keep)"
+    verdicts, texts = {}, {}
+    try:
+        for lang in ("en", "ru"):
+            with use_lang(lang):
+                res = CleanResult(src="x.pdf", dst="y.pdf", fmt="pdf", profile="stealth", ok=True)
+                res.critical_before, res.critical_after = 7, 3
+                res.act("regenerated", "trailer", "/ID", "aa", "bb")
+                res.act("kept", "/Info", "/Author", "x", note=tr(key))
+                v = cleanreport._verdict(cleanreport._snap(res))
+                verdicts[lang] = (v.kind, v.mark)
+                texts[lang] = "\n".join(cleanreport.render_telegram(res))
+    finally:
+        RU[key] = saved
+    _check("kept per the whitelist: the verdict is identical in EN and RU",
+           verdicts["en"] == verdicts["ru"], verdicts)
+    _check("kept per the whitelist: the remainder is explained, not \"bad\" (EN and RU)",
+           all(mark == "warn" for _kind, mark in verdicts.values()), verdicts)
+    _check("kept per the whitelist: no \"NOT EXPLAINED\" line in either report",
+           all("NOT EXPLAINED" not in t and "НЕ ОБЪЯСНЕН" not in t for t in texts.values()),
+           {k: t[:200] for k, t in texts.items()})
 
 
 # ---------------------------------------------------------------------------
 # rendering
 # ---------------------------------------------------------------------------
-
-_CYR = re.compile(r"[Ѐ-ӿ]")
 
 
 def test_20_reports_render_in_the_selected_language():
