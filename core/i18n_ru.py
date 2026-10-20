@@ -273,12 +273,16 @@ RU = {
         "%s: рекурсивная инспекция вложения упала: %s: %s",
     "%s: resource 0x%04X declares %d bytes, truncated":
         "%s: ресурс 0x%04X объявляет %d байт, обрезан",
+    "%s: skipped, total inflation budget spent":
+        "%s: пропущено, общий лимит распаковки исчерпан",
     "%s: stream too large (%d compressed bytes), not decompressed.":
         "%s: поток слишком велик (%d байт сжатых), не распаковываем.",
     "%s: suspicious compression ratio %dx":
         "%s: подозрительный коэффициент сжатия %dx",
     "%s: the stream expands beyond %d MB or its size can't be bounded, not decompressed.":
         "%s: при распаковке поток превысит %d МБ или его размер не удаётся ограничить, не распаковываем.",
+    "%s: truncated zlib stream":
+        "%s: zlib-поток обрезан",
     "%s: unknown byte order %r":
         "%s: неизвестный порядок байтов %r",
     "(VT type 0x%02X, cannot be parsed)":
@@ -1393,8 +1397,10 @@ RU = {
         "Структура контейнера ISOBMFF",
     "Identity and PII":
         "Личность и PII",
-    "Identity blanked, elements kept: their absence would itself be a cleaning trace. Generator %s.":
-        "Личность обнулена, элементы оставлены: их отсутствие само признак чистки. Генератор %s.",
+    "Identity blanked, elements kept: their absence would itself be a cleaning trace. Generator kept.":
+        "Личность обнулена, элементы оставлены: их отсутствие само признак чистки. Генератор сохранён.",
+    "Identity blanked, elements kept: their absence would itself be a cleaning trace. Generator removed.":
+        "Личность обнулена, элементы оставлены: их отсутствие само признак чистки. Генератор убран.",
     "Identity or environment in XMP: survives the cleaning of /Info.":
         "Идентичность или окружение в XMP: переживает чистку /Info.",
     "Identity or environment: removed in every profile.":
@@ -1945,6 +1951,8 @@ RU = {
         "Разбор дошёл не до конца (ошибки ниже), поэтому пустой результат здесь <b>не</b> значит, что файл чист: в непрочитанных частях может лежать что угодно. Судить о чистоте файла по такому отчёту нельзя.",
     "Parsing interrupted: %s: %s":
         "Разбор прерван: %s: %s",
+    "Part %s is larger than %d MB once unpacked: not cleaned. No output created.":
+        "Часть %s после распаковки больше %d МБ: файл не очищен. Выход не создан.",
     "Part titles":
         "Названия частей",
     "Part titles contained personal data: removed together with HeadingPairs.":
@@ -2313,8 +2321,8 @@ RU = {
         "Путь к шаблону. Пустая группа -- как у файла без шаблона.",
     "Template — template":
         "Template — шаблон",
-    "Text chunk ":
-        "Текстовый чанк ",
+    "Text chunk %s \"%s\"":
+        "Текстовый чанк %s «%s»",
     "Text comment. Encoders write their own name and version here, people write anything":
         "Текстовый комментарий. Кодировщики пишут сюда своё имя и версию, люди -- всё что угодно",
     "Text/CSV":
@@ -4185,6 +4193,8 @@ RU = {
         "без изменений",
     "unexpected marker 0x%02X outside entropy-coded data":
         "неожиданный маркер 0x%02X вне энтропийных данных",
+    "unknown application":
+        "неизвестное приложение",
     "unknown block 0x%02X at offset %d":
         "неизвестный блок 0x%02X на смещении %d",
     "unknown cleaning profile: %s":

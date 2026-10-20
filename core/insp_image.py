@@ -32,6 +32,8 @@ from core.i18n import N_, tr
 
 MAX_FILE = 50 * 1024 * 1024      # never load more than this into memory
 MAX_INFLATE = 16 * 1024 * 1024   # limit on inflating a single zlib stream
+MAX_INFLATE_TOTAL = 4 * MAX_INFLATE   # the same for all streams of one file together
+MAX_TEXT_VALUE = 4096            # a PNG text value is kept to this many characters (display is 400)
 MAX_RATIO = 500                  # compression ratio limit (zip bomb)
 MAX_SEGMENTS = 512               # JPEG markers
 MAX_CHUNKS = 1024                # PNG chunks
@@ -67,20 +69,36 @@ def _hexdump(raw, n=16):
     return bytes(raw[:n]).hex(" ")
 
 
-def _inflate(blob, report, loc):
-    """zlib inflate with double protection: by output size and by compression ratio."""
+def _inflate(blob, report, loc, ctx=None):
+    """zlib inflate with protection by output size and by compression ratio.
+
+    With ctx, the output of all streams of one file is also counted against
+    MAX_INFLATE_TOTAL: a file can carry a thousand small streams that each unpack to the limit.
+    """
     if not blob:
+        return b""
+    used = ctx.get("inflated", 0) if ctx is not None else 0
+    if used >= MAX_INFLATE_TOTAL:
+        report.err(tr("%s: skipped, total inflation budget spent") % loc)
         return b""
     try:
         d = zlib.decompressobj()
         out = d.decompress(bytes(blob), MAX_INFLATE)
-        if not d.eof or d.unconsumed_tail:
-            report.err(tr("%s: inflation cut off at the limit of %d bytes") % (loc, MAX_INFLATE))
+        if ctx is not None:
+            ctx["inflated"] = used + len(out)
+        if not d.eof:
+            if d.unconsumed_tail or len(out) >= MAX_INFLATE:
+                report.err(tr("%s: inflation cut off at the limit of %d bytes") % (loc, MAX_INFLATE))
+            else:
+                report.err(tr("%s: truncated zlib stream") % loc)
         if len(blob) and len(out) // max(len(blob), 1) > MAX_RATIO:
             report.err(tr("%s: suspicious compression ratio %dx") % (loc, len(out) // max(len(blob), 1)))
             return out[:MAX_INFLATE]
         return out
     except zlib.error as exc:
+        if ctx is not None:
+            # The partial output is lost: charge what the highest ratio we still call sane allows.
+            ctx["inflated"] = used + min(MAX_INFLATE, len(blob) * MAX_RATIO)
         report.err(tr("%s: corrupt zlib stream (%s)") % (loc, exc))
         return b""
 
@@ -772,7 +790,54 @@ def _jpeg(report, data, ctx):
                note=tr("Full list of markers with sizes: shows what exactly is about to be cut "
                        "out and what will remain"))
     ctx["segments"] = seg_map
-    _trailing(report, data, b"\xff\xd9", "JPEG", "EOI")
+    # The loop above stops at SOS; the real end of the image is found by its own walk.
+    eoi_end = _jpeg_end(data)
+    if eoi_end is None:                           # the walk failed: the last EOI is the best guess
+        idx = data.rfind(b"\xff\xd9")
+        eoi_end = idx + 2 if idx != -1 else None
+    _trailing(report, data, eoi_end, "JPEG", "EOI")
+
+
+# The entropy-coded data after SOS ends at the first 0xFF that isn't a stuffed 0xFF00,
+# a restart marker (RSTn) or a fill byte.
+_SCAN_END = re.compile(rb"\xff(?=[^\x00\xd0-\xd7\xff])")
+
+
+def _jpeg_end(data):
+    """Offset right after the EOI that ends the image, or None if the walk can't reach it.
+
+    Walks the markers through every scan (progressive files have several). The inspector
+    keeps its own walk instead of the cleaner's: it is the cleaner's oracle.
+    """
+    n = len(data)
+    if data[:2] != b"\xff\xd8":
+        return None
+    pos = 2
+    for _ in range(MAX_SEGMENTS):
+        if pos + 1 >= n or data[pos] != 0xFF:
+            return None
+        while pos + 1 < n and data[pos + 1] == 0xFF:      # fill bytes
+            pos += 1
+        if pos + 1 >= n:
+            return None
+        m = data[pos + 1]
+        if m == 0xD9:
+            return pos + 2
+        if m == 0x01 or 0xD0 <= m <= 0xD7:                # TEM, stray RSTn: no length
+            pos += 2
+            continue
+        if pos + 4 > n:
+            return None
+        stop = pos + 2 + struct.unpack_from(">H", data, pos + 2)[0]
+        if stop > n:
+            return None
+        if m == 0xDA:
+            hit = _SCAN_END.search(data, stop)
+            if hit is None:
+                return None
+            stop = hit.start()
+        pos = stop
+    return None
 
 
 def _jpeg_segment(report, marker, name, seg, ctx):
@@ -886,17 +951,16 @@ def _jpeg_segment(report, marker, name, seg, ctx):
     return 0
 
 
-def _trailing(report, data, eof_marker, fmt, label, extra=0):
+def _trailing(report, data, stop, fmt, label):
     """Data after the logical end of the file -- a classic hiding place.
 
-    extra -- how many bytes normally follow the marker itself (in PNG the
-    IEND chunk type is followed by its CRC, and that is not a tail yet).
+    stop -- the offset right after the end marker (for PNG, after the whole IEND chunk), or
+    None if the walk never reached it. The last marker in the file won't do: the hidden
+    data may carry an EOI or an IEND of its own.
     """
-    idx = data.rfind(eof_marker)
-    if idx == -1:
+    if stop is None:
         report.err(tr("%s: marker %s not found, the file is truncated") % (fmt, label))
         return
-    stop = idx + len(eof_marker) + extra
     tail = len(data) - stop
     if tail > 0:
         report.add(Risk.ENVIRONMENT, fmt, tr("Data after %s") % label,
@@ -927,6 +991,7 @@ def _png(report, data, ctx):
     """Walk the PNG chunks: length(4) type(4) data CRC(4)."""
     pos, guard = 8, 0
     chunk_map, texts = [], 0
+    iend_end = None
     while pos + 8 <= len(data) and guard < MAX_CHUNKS:
         guard += 1
         length = _u32(data, pos)
@@ -954,7 +1019,7 @@ def _png(report, data, ctx):
                 _walk_tiff(report, body, "PNG:eXIf", ctx)
             elif ctype == b"iCCP":
                 name, _, rest = bytes(body).partition(b"\x00")
-                profile = _inflate(rest[1:], report, "PNG:iCCP")
+                profile = _inflate(rest[1:], report, "PNG:iCCP", ctx)
                 desc = _icc_desc(profile)
                 report.add(Risk.STRUCTURAL, "PNG:iCCP", tr("ICC profile"),
                            "%s%s" % (_text(name), (tr(", description: ") + desc) if desc else ""),
@@ -1000,6 +1065,7 @@ def _png(report, data, ctx):
             report.err(tr("PNG: chunk %s was not parsed (%s: %s)") % (_text(ctype), type(exc).__name__, exc))
         pos = end
         if ctype == b"IEND":
+            iend_end = end
             break
     if guard >= MAX_CHUNKS:
         report.err(tr("PNG: reached the limit of %d chunks") % MAX_CHUNKS)
@@ -1007,7 +1073,21 @@ def _png(report, data, ctx):
                "; ".join(chunk_map[:60]),
                note=tr("Full list of chunks with sizes"))
     ctx["png_texts"] = texts
-    _trailing(report, data, b"IEND", "PNG", "IEND", extra=4)   # +4 = CRC of the IEND chunk
+    if iend_end is None and guard >= MAX_CHUNKS:
+        # Past the parse limit (large images and APNGs have thousands of chunks): find
+        # IEND by the chunk lengths alone, so data after it is still caught.
+        p = pos
+        for _ in range(100_000):
+            if p + 12 > len(data):
+                break
+            end = p + 12 + _u32(data, p)
+            if end > len(data):
+                break
+            if bytes(data[p + 4:p + 8]) == b"IEND":
+                iend_end = end
+                break
+            p = end
+    _trailing(report, data, iend_end, "PNG", "IEND")
 
 
 # PNG text keys that usually have a person behind them.
@@ -1024,7 +1104,7 @@ def _png_text(report, ctype, body, ctx):
     if ctype == b"tEXt":
         value = _text(rest, "latin-1")
     elif ctype == b"zTXt":
-        value = _text(_inflate(rest[1:], report, loc + ":" + key), "latin-1")
+        value = _text(_inflate(rest[1:], report, loc + ":" + key, ctx), "latin-1")
     else:                                          # iTXt
         if len(rest) < 2:
             report.err(tr("%s: chunk %s is truncated") % (loc, key))
@@ -1033,7 +1113,7 @@ def _png_text(report, ctype, body, ctx):
         tail = rest[2:]
         lang, _, tail = tail.partition(b"\x00")
         translated, _, tail = tail.partition(b"\x00")
-        value = _text(_inflate(tail, report, loc + ":" + key)) if compressed else _text(tail)
+        value = _text(_inflate(tail, report, loc + ":" + key, ctx)) if compressed else _text(tail)
         if lang or translated:
             key = "%s [%s/%s]" % (key, _text(lang), _text(translated))
     low = key.lower()
@@ -1043,6 +1123,10 @@ def _png_text(report, ctype, body, ctx):
     if "xmp" in low or value.lstrip()[:40].startswith(("<?xpacket", "<x:xmpmeta")):
         _parse_xmp(report, value, loc + ":XMP", ctx)
         return
+    # Only the head is kept: the value is clipped for display anyway, and clip() walks it
+    # character by character. Whitespace is collapsed first, so padding can't push the real
+    # value past the cap. The raw-profile and XMP branches above need the whole text.
+    value = " ".join(value.split())[:MAX_TEXT_VALUE]
     risk = Risk.IDENTITY if any(k in low for k in _PNG_ID_KEYS) else Risk.PROVENANCE
     report.add(risk, loc, key, value,
                note=tr("PNG text chunk. Written by both people and generators: prompts, model "
@@ -1747,6 +1831,52 @@ def _demo():
         rep = inspect_image(paths[broken])
         assert isinstance(rep, Report), broken
         assert rep.errors, "%s: expected entries in errors" % broken
+
+    # --- hidden data after the real end of the image ----------------------
+    # The tail may carry an EOI or an IEND of its own, so the last marker in the file
+    # is not the end of the image.
+    def tail_of(handler, blob):
+        sub = Report(path="", fmt="image")
+        handler(sub, blob, {})
+        return [f for f in sub.findings if f.label.startswith("Data after")]
+
+    for name, handler, base, hidden in (
+            ("JPEG + SECRET + EOI", _jpeg, jpeg, b"SECRET" + b"\xff\xd9"),
+            ("JPEG + JPEG", _jpeg, jpeg, jpeg),
+            ("PNG + SECRET*50 + PNG", _png, png, b"SECRET" * 50 + png)):
+        found = tail_of(handler, base + hidden)
+        assert len(found) == 1, (name, [f.label for f in found])
+        want = "%d bytes, starts with: %s" % (len(hidden), _hexdump(hidden))
+        assert found[0].value == want, (name, found[0].value, want)
+    assert not tail_of(_jpeg, jpeg) and not tail_of(_png, png), "a clean image has no tail"
+
+    # --- zlib streams: a truncated one isn't a limit hit; the budget is per file --
+    rep = Report(path="", fmt="png")
+    _inflate(zlib.compress(b"hello world " * 100)[:20], rep, "PNG:zTXt")
+    assert len(rep.errors) == 1 and "truncated zlib stream" in rep.errors[0], rep.errors
+    assert "limit of" not in rep.errors[0], rep.errors
+
+    bomb = zlib.compress(b"A" * (20 << 20))
+    bomb_png = (b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                + b"".join(chunk(b"zTXt", b"k%d\x00\x00" % i + bomb) for i in range(8))
+                + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff")) + chunk(b"IEND", b""))
+    sub = Report(path="", fmt="png")
+    _png(sub, bomb_png, {})
+    assert any("total inflation budget spent" in e for e in sub.errors), sub.errors
+    # One unpacked text chunk must not stay in memory (and go through clip()) in full.
+    tctx = {}
+    _png_text(Report(path="", fmt="png"), b"zTXt", b"key\x00\x00" + bomb, tctx)
+    assert len(tctx["fields"][0][1]) == MAX_TEXT_VALUE, len(tctx["fields"][0][1])
+    # Padding can't push the real value out: whitespace is collapsed before the cap.
+    sub = Report(path="", fmt="png")
+    _png_text(sub, b"tEXt", b"Author\x00" + b" " * 5000 + b"Ivan Petrov", {})
+    assert [f.value for f in sub.findings] == ["Ivan Petrov"], [f.value for f in sub.findings]
+    # Past the 1024-chunk parse limit the hidden tail is still found, by chunk lengths.
+    many = (png[:33] + b"".join(chunk(b"tEXt", b"k\x00v") for _ in range(MAX_CHUNKS + 5))
+            + png[33:] + b"HIDDEN")
+    found = tail_of(_png, many)
+    assert len(found) == 1 and found[0].value.startswith("6 bytes"), [f.value for f in found]
 
     print("=" * 72)
     print("self-test passed")

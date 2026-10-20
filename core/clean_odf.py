@@ -34,6 +34,7 @@ from core.i18n import tr
 __all__ = ["clean_odf"]
 
 MAX_PICTURE = 64 * 1024 * 1024   # one image from Pictures/, like MAX_NESTED for OOXML
+MAX_PART = 128 * 1024 * 1024     # one XML part once unpacked, like clean_ooxml.MAX_XML
 
 # Leaves whose text is identity or environment. Any namespace prefix:
 # Word and LibreOffice use different ones.
@@ -48,8 +49,18 @@ _PROV = frozenset((
 
 _LEAF = re.compile(
     br"<((?:[\w.-]+:)?)([\w.-]+)([^>]*)>([^<]*)</\1\2>")
+# "annotation" must end at whitespace or ">": \b would also match the start of
+# <office:annotation-end/>, and the lazy tail would swallow the text up to the next
+# comment's closing tag. Start tags are read quote-aware (an attribute value may hold
+# ">" or "/>") and never past the next "<", so a malformed tag can't make the scan
+# run to the end of the document for every start.
 _ANN = re.compile(
-    br"<((?:[\w.-]+:)?)annotation\b[^>]*>.*?</\1annotation>", re.DOTALL)
+    br"""<((?:[\w.-]+:)?)annotation(?=[\s>])(?:[^<>"']|"[^"<]*"|'[^'<]*')*(?<!/)>.*?"""
+    br"</\1annotation>", re.DOTALL)
+# Ranged-comment end markers are empty elements, so they need their own pattern.
+_ANN_END = re.compile(
+    br"<((?:[\w.-]+:)?)annotation-end(?=[\s/>])"
+    br"""(?:[^<>"']|"[^"<]*"|'[^'<]*')*?(?:/>|>\s*</\1annotation-end\s*>)""")
 _STAT = re.compile(
     br"<((?:[\w.-]+:)?)document-statistic\b[^>]*/>")
 _ENTRY = re.compile(
@@ -105,7 +116,7 @@ def _strip_annotations(xml):
     while prev != xml:
         prev = xml
         xml = _ANN.sub(b"", xml)
-    return xml
+    return _ANN_END.sub(b"", xml)
 
 
 def _strip_stats(xml):
@@ -122,12 +133,26 @@ def _strip_thumb_entries(xml):
     return _ENTRY.sub(sub, xml)
 
 
-def _read(path, name):
+class _TooBig(Exception):
+    """A part over MAX_PART once unpacked: refused as too large, not as corruption."""
+
+    def __init__(self, name, limit):
+        super().__init__(name)
+        self.name, self.limit = name, limit
+
+
+def _read(path, name, limit=None):
+    limit = MAX_PART if limit is None else limit
     with zipfile.ZipFile(path) as zf:
         try:
-            return zf.read(name)
+            fh = zf.open(name)
         except KeyError:
             return None
+        with fh:
+            data = fh.read(limit + 1)      # file_size in the header may lie: read with our own cap
+    if len(data) > limit:
+        raise _TooBig(name, limit)
+    return data
 
 
 def _names(path):
@@ -267,9 +292,10 @@ def _clean(res, src, dst, prof, keep):
         replace["meta.xml"] = new_meta
         res.act(Act.BLANKED, "meta.xml", tr("document properties"), "", "",
                 tr("Identity blanked, elements kept: their absence would itself be a cleaning "
-                   "trace. Generator %s.")
-                % (tr("removed") if paranoid and "generator" in want
-                   else tr("kept")))
+                   "trace. Generator removed.")
+                if paranoid and "generator" in want else
+                tr("Identity blanked, elements kept: their absence would itself be a cleaning "
+                   "trace. Generator kept."))
     if gen and not _kept(keep, "zip-time"):
         word = "microsoft" in gen.lower()
         res.act(Act.KEPT, "ZIP", tr("entry times"), "", "",
@@ -338,7 +364,10 @@ def clean_odf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) 
         _clean(res, str(src), str(dst), prof, keep)
     except Exception as exc:  # noqa: BLE001
         res.ok = False
-        if isinstance(exc, (zipfile.BadZipFile, zlib.error, EOFError)):
+        if isinstance(exc, _TooBig):
+            res.err(tr("Part %s is larger than %d MB once unpacked: not cleaned. No output "
+                       "created.") % (exc.name, exc.limit >> 20))
+        elif isinstance(exc, (zipfile.BadZipFile, zlib.error, EOFError)):
             # A broken entry (CRC, truncated deflate) is file corruption, not our error.
             res.err(tr("The ODF container is damaged: a part won't unpack (%s). No output "
                        "created.")
@@ -355,7 +384,9 @@ def clean_odf(src, dst, profile=Profile.STEALTH, keep=None, force_signed=False) 
 
 def _selftest():
     import shutil
+    import struct
     import tempfile
+    import tracemalloc
 
     from core.clean import survived_values
     from core.inspect import inspect_file
@@ -381,6 +412,85 @@ def _selftest():
         blob2 = " ".join(f.value or "" for f in inspect_file(dst2).findings)
         assert ODT_GENERATOR not in blob2
         assert not survived_values(inspect_file(src), inspect_file(dst2))
+        notes = {p: [a.note for a in r.actions if a.location == "meta.xml"
+                     and a.label == tr("document properties")]
+                 for p, r in (("stealth", res), ("paranoid", res2))}
+        assert notes["stealth"][0].endswith("Generator kept."), notes
+        assert notes["paranoid"][0].endswith("Generator removed."), notes
+
+        # Two ranged comments with text between them: the end marker of the first must not
+        # open a match that swallows the text up to the closing tag of the second.
+        ranged = (b'<text:p>Hello <office:annotation office:name="a"><dc:creator>X</dc:creator>'
+                  b'<text:p>c1</text:p></office:annotation>world'
+                  b'<office:annotation-end office:name="a"/> KEEP THIS MIDDLE TEXT '
+                  b'<office:annotation office:name="b"><text:p>c2</text:p></office:annotation>'
+                  b'tail<office:annotation-end office:name="b"/> end</text:p>')
+        out = _strip_annotations(ranged)
+        assert out == b'<text:p>Hello world KEEP THIS MIDDLE TEXT tail end</text:p>', out
+        src3 = os.path.join(tmp, "ranged.odt")
+        content = (b'<?xml version="1.0" encoding="UTF-8"?><office:document-content '
+                   b'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+                   b'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+                   b'xmlns:dc="http://purl.org/dc/elements/1.1/"><office:body><office:text>'
+                   + ranged + b'</office:text></office:body></office:document-content>')
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(src3, "w") as zout:
+            for info in zin.infolist():
+                zout.writestr(info, content if info.filename == "content.xml" else zin.read(info))
+        dst3 = os.path.join(tmp, "out3.odt")
+        res3 = clean_odf(src3, dst3, Profile.STEALTH)
+        assert res3.ok and not res3.errors, res3.errors
+        cleaned = _read(dst3, "content.xml")
+        assert b"KEEP THIS MIDDLE TEXT" in cleaned and b"tail" in cleaned, cleaned
+        assert b"annotation" not in cleaned and b"c1" not in cleaned, cleaned
+
+        # A part bigger than the read cap is refused, and a header that understates the
+        # size doesn't let the stream inflate past the cap.
+        bomb = os.path.join(tmp, "bomb.odt")
+        with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("content.xml", b" " * (16 << 20))
+        for lie in (False, True):
+            if lie:
+                raw = bytearray(open(bomb, "rb").read())
+                struct.pack_into("<I", raw, raw.rfind(b"PK\x01\x02") + 24, 100)
+                open(bomb, "wb").write(raw)
+            tracemalloc.start()
+            try:
+                _read(bomb, "content.xml", 1 << 20)
+            except (_TooBig, zipfile.BadZipFile):    # our cap, or zipfile's CRC check on a lying header
+                pass
+            else:
+                raise AssertionError("an oversized part was read in full")
+            finally:
+                peak = tracemalloc.get_traced_memory()[1]
+                tracemalloc.stop()
+            assert peak < 6 << 20, "the bomb was inflated in full: peak %d bytes" % peak
+        assert _read(src, "content.xml") and _read(src, "no/such.xml") is None
+
+        # An oversized part is refused as too large, not reported as a damaged container.
+        global MAX_PART
+        saved_part, MAX_PART = MAX_PART, 100
+        try:
+            res4 = clean_odf(src3, os.path.join(tmp, "out4.odt"), Profile.STEALTH)
+        finally:
+            MAX_PART = saved_part
+        assert not res4.ok and any("larger than" in e for e in res4.errors), res4.errors
+        assert not any("damaged" in e for e in res4.errors), res4.errors
+
+        # Quotes in attributes: "/>" or ">" inside a value doesn't hide the comment, and a
+        # self-closing annotation (no body) is left alone.
+        for q in (b'"x/>y"', b"'x/>y'", b'"a>b"'):
+            got = _strip_annotations(b'<text:p>A<office:annotation office:name=' + q
+                                     + b'><dc:creator>I</dc:creator><text:p>secret</text:p>'
+                                       b'</office:annotation>B</text:p>')
+            assert got == b"<text:p>AB</text:p>", (q, got)
+        assert _strip_annotations(b"<text:p>A<office:annotation/>B</text:p>") == \
+            b"<text:p>A<office:annotation/>B</text:p>"
+        # Malformed starts without a closing ">" stay linear (the scan stops at the next "<").
+        import time
+        junk = b"<office:annotation-end x='1" * 20000 + b"<office:annotation a " * 20000
+        t0 = time.time()
+        _strip_annotations(junk)
+        assert time.time() - t0 < 5, "annotation patterns went quadratic"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("OK")

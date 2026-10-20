@@ -641,7 +641,7 @@ def _png_text_act(res, ctype, body) -> None:
         val = tr("<compressed, %d bytes>") % len(rest)
     xmp = ctype == b"iTXt" and "xmp" in key.lower()
     res.act(Act.REMOVED, "PNG:" + name,
-            (tr("XMP packet (iTXt \"%s\")") if xmp else tr("Text chunk ") + name + " «%s»") % key, val,
+            tr("XMP packet (iTXt \"%s\")") % key if xmp else tr("Text chunk %s \"%s\"") % (name, key), val,
             note=tr("XMP: document GUID, authorship, edit history") if xmp else
                  tr("Written by people and generators alike: prompts, model parameters and the "
                     "source path end up here too"))
@@ -1189,7 +1189,10 @@ def _run(res, state, src, dst, profile, keep) -> None:
     res.fmt = fmt
     if fmt == "unreadable":
         reason, code = sniff.unreadable_reason(src)
-        res.err("%s (errno %s)" % (tr(_UNREADABLE.get(reason, "the file can't be read")), code))
+        if reason in _UNREADABLE:
+            res.err("%s (errno %s)" % (tr(_UNREADABLE[reason]), code))
+        else:
+            res.err(tr("the file can't be read (errno %s)") % code)
         return
     if fmt in _REFUSE:
         res.err(tr(_REFUSE[fmt]))
@@ -1735,8 +1738,25 @@ def _selftest() -> int:
         sha0 = _file_sha(src)
         res = clean_image(src, src)
         check("dst == src: refused, input intact", (not res.ok) and _file_sha(src) == sha0, res.errors)
-        res = clean_image(os.path.join(tmp, "no_such_file.jpg"), os.path.join(outdir, "x.jpg"))
+        res = clean_image(os.path.join(tmp, "нет_такого_файла.jpg"), os.path.join(outdir, "x.jpg"))
         check("missing input: refused without an exception", (not res.ok) and bool(res.errors))
+        # an unreadable file whose reason isn't one of the listed ones: translated message
+        from core.i18n import use_lang
+        real_sniff, real_reason = sniff.sniff, sniff.unreadable_reason
+        sniff.sniff, sniff.unreadable_reason = (lambda p: "unreadable"), (lambda p: ("other", 5))
+        try:
+            res = clean_image(src, os.path.join(outdir, "x.jpg"))
+            with use_lang("ru"):
+                res_ru = clean_image(src, os.path.join(outdir, "x.jpg"))
+        finally:
+            sniff.sniff, sniff.unreadable_reason = real_sniff, real_reason
+        check("unreadable, unlisted reason: its own message in both languages",
+              res.errors == ["the file can't be read (errno 5)"]
+              and res_ru.errors == ["файл не читается (errno 5)"], (res.errors, res_ru.errors))
+        probe = CleanResult(src="", dst="", fmt="png", profile="stealth")
+        _png_text_act(probe, b"tEXt", b"Author\0Ivan")
+        check("PNG text chunk label uses the same quotes as its neighbours",
+              probe.actions[0].label == 'Text chunk tEXt "Author"', probe.actions[0].label)
         res = clean_image(src, os.path.join(outdir, "x.jpg"), profile="no-such-profile")
         check("unknown profile: refused without an exception", (not res.ok) and bool(res.errors))
         res = clean_image(src, os.path.join(outdir, "kept_icc.jpg"), Profile.PARANOID, keep={"icc"})

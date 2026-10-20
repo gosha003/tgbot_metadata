@@ -626,7 +626,7 @@ def _ole_root(ole, report):
         root = ole.root
         clsid = (getattr(root, "clsid", "") or "").upper()
         if clsid and clsid.strip("0-"):
-            app = tr(_CLSID_APPS.get(clsid, "unknown application"))
+            app = tr(_CLSID_APPS.get(clsid, N_("unknown application")))
             report.add(Risk.PROVENANCE, "Root Entry", tr("Root storage CLSID"),
                        "%s (%s)" % (clsid, app),
                        tr("The OLE class directly names the application that created the "
@@ -1175,10 +1175,16 @@ def _zip_safe_read(zf, info, report) -> bytes:
                    % (info.filename, ratio))
         return b""
     try:
-        return zf.read(info)
+        with zf.open(info, "r") as fh:
+            # The sizes in the header may lie: cap what the stream really inflates to.
+            data = fh.read(MAX_READ + 1)
     except Exception as exc:
         report.err(tr("part %s could not be read: %r") % (info.filename, exc))
         return b""
+    if len(data) > MAX_READ:
+        report.err(tr("part %s skipped: %d bytes, over the limit") % (info.filename, MAX_READ))
+        return b""
+    return data
 
 
 def _odf_xml(zf, by_name, name, report):
@@ -1714,13 +1720,19 @@ def _rtf_plain(text, enc="cp1252") -> str:
             word, arg = m.group(2), m.group(3)
             i = m.end()
             if word == "uc" and arg is not None:
-                uc = max(0, int(arg))
+                try:
+                    uc = max(0, int(arg))
+                except ValueError:                # absurdly long digit string
+                    uc = 1
             elif word == "u" and arg is not None:
                 flush()
-                code = int(arg)
-                if code < 0:
-                    code += 65536
-                out.append(chr(code))
+                try:
+                    code = int(arg)
+                    if code < 0:
+                        code += 65536
+                    out.append(chr(code))
+                except (ValueError, OverflowError):   # out of range, or too many digits
+                    out.append("\ufffd")
                 # \uN is followed by a fallback ANSI representation -- skip uc units
                 skipped = 0
                 while skipped < uc and i < n:
@@ -1756,8 +1768,10 @@ def _dest_body(text, dest):
 
 def _rtf_date(fragment) -> str:
     """\\yr2024\\mo3\\dy5\\hr14\\min7 -> '2024-03-05 14:07:00'."""
+    # At most 9 digits: a hostile run of thousands would make int() raise and take the
+    # whole \info group down with it.
     parts = {m.group(1): int(m.group(2))
-             for m in re.finditer(r"\\(yr|mo|dy|hr|min|sec)(-?\d+)", fragment)}
+             for m in re.finditer(r"\\(yr|mo|dy|hr|min|sec)(-?\d{1,9})", fragment)}
     if not parts:
         return ""
     return "%04d-%02d-%02d %02d:%02d:%02d" % (
@@ -1852,7 +1866,10 @@ def _rtf_info(text, enc, report):
             continue
         value = m2.group(1)
         if word == "edmins":
-            value = _dur_secs(int(value) * 60)
+            try:
+                value = _dur_secs(int(value) * 60)
+            except ValueError:                    # an absurd digit run: keep the raw digits
+                value = clip(value, 80)
         report.add(risk, "\\info\\%s" % word, tr(label), value, tr(note))
 
 
@@ -1972,13 +1989,15 @@ def _rtf_scan(path, enc, report):
     tail = ""
     total = 0
     with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
         while True:
             chunk = fh.read(RTF_CHUNK)
             if not chunk:
                 break
             total += len(chunk)
             text = tail + chunk.decode("latin-1")
-            last = len(chunk) < RTF_CHUNK
+            # A full-size final chunk is still the last one: the next read would be empty.
+            last = len(chunk) < RTF_CHUNK or total >= size
             # The overlap is needed so that a match isn't cut at the chunk boundary,
             # but nothing may be counted in it: it will arrive again with the next chunk.
             cut = len(text) if last else max(0, len(text) - RTF_OVERLAP)
@@ -2202,7 +2221,10 @@ def _demo_ole_real(tmp, show):
 
 
 def _demo():
+    global MAX_READ
+    import io
     import tempfile
+    import tracemalloc
 
     tmp = tempfile.mkdtemp(prefix="insp_legacy_")
 
@@ -2384,6 +2406,27 @@ def _demo():
     assert _rtf_plain(r"\u1055 ?\u1105 ?\u1090 ?\u1088 !") == "Пётр", \
         _rtf_plain(r"\u1055 ?\u1105 ?\u1090 ?\u1088 !")
 
+    # A \uN outside Unicode, or with an absurd digit count, must not raise: an exception
+    # here aborts the whole streaming pass and hides the objects and paths after it.
+    bs = chr(92)
+    for bad in (bs + "u9999999 ?", bs + "u-99999 ?", bs + "u" + "9" * 5000,
+                bs + "uc" + "9" * 5000 + bs + "u9999999 ?"):
+        assert "\ufffd" in _rtf_plain(bad), bad[:20]
+    assert _rtf_plain(bs + "uc" + "9" * 5000 + bs + "u65 ?") == "A"
+    hostile_path = os.path.join(tmp, "hostile.rtf")
+    with open(hostile_path, "w", encoding="latin-1") as fh:
+        fh.write(r"{\rtf1\ansi{\*\objdata 0105}C:\Users\ivanov\x" + bs + "u9999999 ?.doc}")
+    r_hostile = inspect_rtf(hostile_path)
+    assert not r_hostile.errors, r_hostile.errors
+    assert any(f.label == "Embedded OLE objects" for f in r_hostile.findings)
+    # The same for absurd digit runs in the \info dates and editing time: the group survives.
+    with open(hostile_path, "w", encoding="latin-1") as fh:
+        fh.write(r"{\rtf1\ansi{\info{\author Ivanov}{\creatim\yr" + "9" * 5000 + r"\mo3}{\edmins"
+                 + "9" * 5000 + r"}}}")
+    r_hostile = inspect_rtf(hostile_path)
+    assert not r_hostile.errors, r_hostile.errors
+    assert {f.label: f.value for f in r_hostile.findings}.get("Author") == "Ivanov"
+
     values = {f.label: f.value for f in r_rtf.findings}
     assert values.get("Author") == "Иванов Иван", values.get("Author")
     assert values.get("Last saved by") == "Петров Петр", values
@@ -2423,6 +2466,35 @@ def _demo():
     show(r_big, "RTF: a file larger than one chunk (overlap check)")
     objs = {f.label: f.value for f in r_big.findings}.get("Embedded OLE objects", "")
     assert objs.startswith("2 pcs"), objs
+
+    # A file of exactly one chunk: the last chunk is full-size, and its tail still gets scanned.
+    exact_path = os.path.join(tmp, "exact.rtf")
+    head = r"{\rtf1\ansi" + "A" * (RTF_CHUNK - 400) + r"{\object\objemb{\*\objdata 0105}}"
+    with open(exact_path, "w", encoding="latin-1") as fh:
+        fh.write(head + "B" * (RTF_CHUNK - 1 - len(head)) + "}")
+    assert os.path.getsize(exact_path) == RTF_CHUNK
+    exact = {f.label: f.value for f in inspect_rtf(exact_path).findings}
+    assert exact.get("Embedded OLE objects", "").startswith("1 pcs"), exact
+    assert exact.get(r"Embedded objects (\objemb)", "").startswith("1 pcs"), exact
+
+    # The header of a ZIP entry may understate its size: the real read is capped anyway.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("meta.xml", b" " * (16 << 20))
+    raw = bytearray(buf.getvalue())
+    struct.pack_into("<I", raw, raw.rfind(b"PK\x01\x02") + 24, 100)   # file_size in the directory
+    saved, MAX_READ = MAX_READ, 1 << 20
+    try:
+        with zipfile.ZipFile(io.BytesIO(bytes(raw))) as zf:
+            r_cap = Report(path="", fmt="odt")
+            tracemalloc.start()
+            got = _zip_safe_read(zf, zf.infolist()[0], r_cap)
+            peak = tracemalloc.get_traced_memory()[1]
+            tracemalloc.stop()
+    finally:
+        MAX_READ = saved
+    assert got == b"" and r_cap.errors, r_cap.errors
+    assert peak < 6 << 20, "the bomb was inflated in full: peak %d bytes" % peak
 
     ovalues = {f.label: f.value for f in r_odf.findings}
     assert ovalues.get("Original author") == "Иванов Иван", ovalues
