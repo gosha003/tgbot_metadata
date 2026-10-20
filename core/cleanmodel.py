@@ -21,7 +21,7 @@ import dataclasses
 from enum import Enum
 
 from core.model import Risk, clip
-from core.i18n import N_
+from core.i18n import N_, tr
 
 
 class Profile(str, Enum):
@@ -43,8 +43,8 @@ class Profile(str, Enum):
       * the application and its version: KEEP as is. It's true, the file
         really was made in that application, and a mismatched pair like
         Creator=Word + Producer=qpdf is detected instantly;
-      * dates: keep a plausible gap between creation and modification
-        instead of collapsing them into one second;
+      * dates: keep the original creation and modification dates (never
+        collapse or substitute them);
       * structural (STRUCTURAL): keep language, accessibility tags,
         ICC profile, outline."""
 
@@ -135,7 +135,7 @@ class CleanResult:
         goes to the user's chat."""
         from core.model import _ABS_PATH, PATH_STUB
 
-        self.errors.append(clip(_ABS_PATH.sub(PATH_STUB, str(message)), 600))
+        self.errors.append(clip(_ABS_PATH.sub(tr(PATH_STUB), str(message)), 600))
 
     def count(self, *acts) -> int:
         if not acts:

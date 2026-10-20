@@ -9,6 +9,7 @@ the token and exit, not a module import.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +39,7 @@ def _ids(raw) -> list:
     out = []
     for part in str(raw or "").replace(";", ",").split(","):
         part = part.strip()
-        if part.lstrip("-").isdigit():
+        if re.fullmatch(r"-?[0-9]+", part):
             out.append(int(part))
     return out
 

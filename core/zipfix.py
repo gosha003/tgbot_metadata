@@ -1091,7 +1091,7 @@ def _selftest():
         enc = bytearray(plain)
         struct.pack_into("<H", enc, struct.unpack_from("<L", enc, enc.rfind(_SIG_EOCD) + 16)[0] + 8, 1)
         bad("encryption flag", bytes(enc))
-        bad("replace a part that doesn't exist", plain, replace={"missing.xml": b"1"})
+        bad("replace a part that doesn't exist", plain, replace={"нет.xml": b"1"})
         bad("replace and drop of the same part", plain,
             replace={"docProps/app.xml": b"1"}, drop={"docProps/app.xml"})
         bad("replace: not bytes", plain, replace={"docProps/app.xml": "string"})
@@ -1119,13 +1119,13 @@ def _selftest():
         keep = wr("keep.zip", b"old content")
         r = rebuild(wr("p2.zip", b"junk" * 20), keep)
         chk("a refusal doesn't touch an existing dst", (not r.ok) and open(keep, "rb").read() == b"old content")
-        r = rebuild(P("no_such_file.zip"), P("q.zip"))
+        r = rebuild(P("нет_такого.zip"), P("q.zip"))
         chk("no input file: ok=False, no exception, no path in the text",
             (not r.ok) and r.errors and td not in " ".join(r.errors), r.errors)
-        r = rebuild(wr("p3.zip", plain), os.path.join(td, "no_such_dir", "o.zip"))
+        r = rebuild(wr("p3.zip", plain), os.path.join(td, "нет_каталога", "o.zip"))
         chk("output can't be written: ok=False without an exception", not r.ok and bool(r.errors))
         chk("entries() on junk and on a missing file: []",
-            entries(wr("g.zip", b"PK\x03\x04 junk")) == [] and entries(P("missing")) == [])
+            entries(wr("g.zip", b"PK\x03\x04 junk")) == [] and entries(P("нет")) == [])
         src = wr("e.zip", plain)
         with zipfile.ZipFile(src) as zf:
             want = [(i.filename, i.date_time, i.compress_type, i.compress_size, i.file_size, i.CRC,

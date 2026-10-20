@@ -531,6 +531,8 @@ RU = {
         "ОЦЕНКА: файл выглядит собранным программой, а не сохранённым в офисном приложении. Для многих задач это хуже следа чистки.",
     "ASSESSMENT: the file looks scrubbed. No original values leak, but the fact of processing is visible.":
         "ОЦЕНКА: файл выглядит чищеным. Утечки исходных значений нет, но сам факт обработки виден.",
+    "ASSESSMENT: the file looks scrubbed: the fact of processing is visible.":
+        "ОЦЕНКА: файл выглядит чищеным: сам факт обработки виден.",
     "ASSESSMENT: the inspector sees no signs of processing. This is not a guarantee: it only sees metadata, not writing style or watermarks.":
         "ОЦЕНКА: инспектор не видит признаков обработки. Это не гарантия: он видит только метаданные, не стиль текста и не водяные знаки.",
     "ATTACHMENT REMOVED: a whole source document may have been inside.":
@@ -749,8 +751,12 @@ RU = {
         "ПОЧИЩЕНО: ни одно исходное значение не найдено в результате",
     "CLEANLINESS NOT PROVEN: no original values found, but the check could not be completed (%s)":
         "ЧИСТОТА НЕ ДОКАЗАНА: исходных значений не найдено, но проверку провести полностью не удалось (%s)",
+    "CLEANLINESS NOT PROVEN: no original values found, but the check could not be completed.":
+        "ЧИСТОТА НЕ ДОКАЗАНА: исходных значений не найдено, но проверку провести полностью не удалось.",
     "CLEANLINESS NOT PROVEN: reason unknown":
         "ЧИСТОТА НЕ ДОКАЗАНА: причина не определена",
+    "CONCLUSIONS":
+        "ВЫВОДЫ",
     "COULD NOT PARSE — %d":
         "НЕ УДАЛОСЬ РАЗОБРАТЬ — %d",
     "CRITICAL FINDINGS LEFT: %d (%s). The action list explains them via the entries below; the file is not declared clean.":
@@ -821,6 +827,8 @@ RU = {
         "Чистка не уложилась в {}с и прервана -- файл слишком сложный или повреждён. Почищенного файла нет: ничего не отправляйте как почищенное. Исходный файл не изменён; чтобы повторить, пришлите его ещё раз.",
     "Cleaning for this format is planned for phase %d.":
         "Чистка этого формата запланирована на фазу %d.",
+    "Cleaning introduced signs of processing that weren't in the original (%s).":
+        "После чистки появились признаки обработки, которых в исходнике не было (%s).",
     "Cleaning is a separate command: python -m core.clean <file>.":
         "Чистка -- отдельная команда: python -m core.clean <файл>.",
     "Cleaning the attachment crashed (%s): metadata inside remains.":
@@ -2109,8 +2117,6 @@ RU = {
         "Корень «%s» не опознан, а внутри есть значения. Убрать вслепую нельзя: на customXml опирается привязка элементов содержимого (w:dataBinding), и обнуление части стёрло бы видимый текст документа. Значения остались в файле.",
     "Root storage CLSID":
         "CLSID корневого хранилища",
-    "SIGNALS":
-        "ВЫВОДЫ",
     "SIGNATURE DESTROYED: any metadata cleaning breaks the signature, and force_signed=True allowed it. The field is left as an empty placeholder.":
         "ПОДПИСЬ УНИЧТОЖЕНА: любая чистка метаданных ломает подпись, force_signed=True это разрешил. Поле осталось пустой заготовкой.",
     "SOF not found":
@@ -2609,6 +2615,8 @@ RU = {
         "Ядро разбора (core/inspect.py) пока не готово -- его пишет параллельный агент. Попробуйте чуть позже.",
     "The inspector considers the file built by a library or generator, not saved by an office application.":
         "Инспектор считает файл собранным библиотекой или генератором, а не сохранённым в офисном приложении.",
+    "The inspector could not fully read the file (%d), so the check is incomplete: something could have remained in the unread part. Do not treat the file as cleaned until you have checked it.":
+        "Инспектор не смог полностью прочитать файл (%d), поэтому проверка неполная: в непрочитанной части могло что-то остаться. Не считайте файл почищенным, пока не проверите его сами.",
     "The inspector couldn't parse part of the file (%d); the proof is incomplete:":
         "Инспектор не разобрал часть файла (%d), доказательство неполное:",
     "The internal version number of the application.":
@@ -3285,6 +3293,8 @@ RU = {
         "чистка не вернула результата: файл НЕ почищен",
     "cleaning: module failed to load":
         "чистка: модуль не загрузился",
+    "cleanliness not proven":
+        "чистота не доказана",
     "code %d":
         "код %d",
     "coding parameters":
@@ -3719,12 +3729,14 @@ RU = {
         "не поток",
     "not assessed":
         "не оценены",
+    "not given":
+        "не указана",
     "not parsed as XML":
         "не разобрано как XML",
     "not set":
         "не задано",
     "not specified":
-        "не указано",
+        "не указан",
     "not verified":
         "не проверено",
     "nothing to remove":
@@ -3989,6 +4001,8 @@ RU = {
         "в архиве %d записей, разобраны первые %d",
     "the archive looks like a zip bomb: %d bytes declared at a compression ratio of %.0f; entry contents are not unpacked":
         "архив похож на zip-бомбу: заявлено %d байт при коэффициенте сжатия %.0f -- содержимое записей не распаковываем",
+    "the author":
+        "автора",
     "the central directory doesn't fit before the end of the archive (data prepended to the ZIP with shifted offsets, or corruption)":
         "центральный каталог не укладывается до конца архива (данные перед ZIP со сдвинутыми смещениями или порча)",
     "the central directory is cut off":
@@ -4207,6 +4221,8 @@ RU = {
         "не убрать",
     "unsafe entry name (escapes the folder, drive letter, special characters)":
         "небезопасное имя записи (выход за каталог, диск, спецсимволы)",
+    "unspecified":
+        "не указана",
     "userId — usually a real email":
         "userId — как правило, реальный email",
     "userName is the name of the user who reserved writing; the password is its hash.":
@@ -4351,7 +4367,7 @@ RU = {
         "📦 <b>Это ZIP-архив: {n}</b>. Бот почистит каждый файл внутри (вложенные архивы не разворачиваются) и пришлёт новый архив <b>только с теми, чья чистота доказана</b> повторной инспекцией. Не очищенное в архив не попадает: его не отдать по ошибке как чистое. Отчёт по каждому файлу -- в чате.\n\n• <b>Stealth</b> / <b>Paranoid</b> -- как для одиночного файла.\n• <b>Пересоздать</b> -- через LibreOffice, файл за файлом: долго.\n• Имена файлов тоже метаданные: «нейтральные» -- doc_0001.docx и т.п. (соответствие номеров именам будет только в чате).\n• «Сохранить»: файл с сохранённым полем не считается чистым и в архив не попадёт -- такие файлы чистите по одному.",
     "📦 Cleaning the archive, profile <b>%s</b>: this may take minutes…":
         "📦 Чищу архив, профиль <b>%s</b>: это может занять минуты…",
-    "🔎 <b>SIGNALS</b>":
+    "🔎 <b>CONCLUSIONS</b>":
         "🔎 <b>ВЫВОДЫ</b>",
     "🔎 Got it, inspecting the metadata…":
         "🔎 Принято, разбираю метаданные…",
@@ -4359,8 +4375,8 @@ RU = {
         "🗑 Автоудаление отчётов: %s",
     "🗑 Delete report from chat":
         "🗑 Удалить отчёт из чата",
-    "🗑 Report messages deleted: %d.\n<i>The bot doesn't remember reports sent before its last restart -- delete those by hand. The bot doesn't touch cleaned files or your own messages.</i>":
-        "🗑 Удалено сообщений с отчётами: %d.\n<i>Отчёты, отправленные до последнего перезапуска бота, он не помнит -- их удалите вручную. Почищенные файлы и ваши собственные сообщения бот не трогает.</i>",
+    "🗑 Report messages deleted: %d.\n<i>The bot doesn't remember reports sent before its last restart -- delete those by hand. The bot doesn't touch cleaned files or the files you sent; it deletes only its own reports and this command.</i>":
+        "🗑 Удалено сообщений с отчётами: %d.\n<i>Отчёты, отправленные до последнего перезапуска бота, он не помнит -- их удалите вручную. Почищенные файлы и файлы, которые вы отправили, бот не трогает; он удаляет только свои отчёты и эту команду.</i>",
     "🧹 <b>Clean the file?</b> The old Office format can't be cleaned in place: the metadata and the deleted text of earlier versions are embedded in the container itself. There is only one honest way -- <b>Regenerate</b>: LibreOffice will save the document anew in a modern format (docx/xlsx/pptx) without the edit history and without your name.\n\n<i>The application will become LibreOffice and the layout may change a little. The original file does not change: the bot will send a new copy.</i>":
         "🧹 <b>Почистить файл?</b> Старый формат Office на месте не чистится: метаданные и удалённый текст прошлых версий вшиты в сам контейнер. Честный путь один -- <b>Пересоздать</b>: LibreOffice сохранит документ заново в современном формате (docx/xlsx/pptx) без истории правок и без вашего имени.\n\n<i>Приложением станет LibreOffice, вёрстка может немного измениться. Исходный файл не меняется: бот пришлёт новую копию.</i>",
     "🧹 <b>Clean the file?</b> The original file will not change: the bot will send a new copy (as a document, not a photo -- otherwise Telegram would recompress it) and a cleaning report.\n\n• <b>Stealth</b> (recommended) -- removes identity and environment: author, paths, printer names, GPS, serial numbers. It keeps the application and its version: empty metadata gives away on its own that the file was cleaned.\n• <b>Paranoid</b> -- removes everything, including the application and dates. Cleaner, but the result looks processed.\n{regen}\n<i>\"Keep\" toggles: the field stays as it was, so the file will NOT be clean -- the report will call this your choice.</i>":

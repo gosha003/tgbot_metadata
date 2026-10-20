@@ -34,7 +34,7 @@ from core import sniff
 from core.cleanmodel import ACT_TITLE, Act
 from core.model import _ABS_PATH, PATH_STUB, clip
 from core.report import spoiler
-from core.i18n import tr
+from core.i18n import N_, both, tr
 
 __all__ = ["render_telegram", "render_plain", "summary_line"]
 
@@ -87,6 +87,11 @@ _E = namedtuple("_E", "act loc label before after note")
 # Verdicts with no cleaned file: action lists aren't shown, otherwise
 # "Removed: Author" would read as something that was done.
 _NOT_OK = ("none", "unsupported", "failed")
+
+# The note the cleaners put on a field kept by the user's keep list. The verdict
+# counts such entries by matching it in either language: the note may have been
+# written under a different language than the one active when the report is drawn.
+_KEEP_NOTE = N_("kept per the user's whitelist (keep)")
 
 
 # --- safe reading of an untrusted result -------------------------------------
@@ -175,6 +180,7 @@ def _snap(result):
     s.verified = False
     s.survived_n = 0
     s.res_old = []
+    s.gaps = []
     try:
         if _g(result, "verified", None) is not None:
             s.has_evidence = True
@@ -183,6 +189,8 @@ def _snap(result):
             s.survived_n = len(list(sv)) if sv is not None else 0
             # residual: (location, field, is the value new). Not new = it was in the source too.
             s.res_old = ["%s %s" % (r[0], r[1]) for r in (_g(result, "residual", None) or []) if not r[2]]
+            # What the inspector could not parse, before or after cleaning.
+            s.gaps = [_scrub(g) for g in (_g(result, "gaps", None) or [])]
     except Exception:
         s.errs.append(tr("dispatcher proof could not be read: verdict by heuristic"))
     s.planned_phase = _num(_g(result, "planned_phase", 0))
@@ -304,7 +312,7 @@ def _verdict(s):
 
     if not s.ok:
         return _V("failed", "bad", tr("FILE NOT CLEANED: cleaning did not finish."),
-                  [tr("Reason: %s") % (reason or tr("not specified")),
+                  [tr("Reason: %s") % (reason or tr("not given")),
                    tr("There is no cleaned copy: don't send anything as cleaned.")] + hidden,
                   tr("NOT cleaned, cleaning did not finish"))
 
@@ -327,22 +335,40 @@ def _verdict(s):
                       [tr("These are values from the original file found in the output: cleaning "
                           "didn't remove them. Don't send this file.")] + cav_line,
                       tr("NOT clean: %d original values survived") % s.survived_n)
+        # No survivors, but part of the file was never read (gaps): the absence of
+        # evidence is not proof, so no "CLEAN:" headline, and no line below may claim
+        # that nothing leaks. The rest of the assessment still applies.
+        gap_lines = []
+        if s.gaps:
+            shown = s.gaps[:5]
+            gap_lines = [tr("The inspector could not fully read the file (%d), so the check is "
+                            "incomplete: something could have remained in the unread part. Do "
+                            "not treat the file as cleaned until you have checked it.") % len(s.gaps)]
+            gap_lines += ["• " + g for g in shown]
+            if len(s.gaps) > len(shown):
+                gap_lines.append(tr("… and %d more") % (len(s.gaps) - len(shown)))
         was = _pair(s.cb, s.ca, " -> ")
-        lines = [tr("Proof: no original sensitive value was found in the output. The comparison "
-                    "uses values, not counters.")]
+        lines = [] if s.gaps else [
+            tr("Proof: no original sensitive value was found in the output. The comparison "
+               "uses values, not counters.")]
         if s.detect == "obvious":
             lines.append(
                 tr("ASSESSMENT: the file looks built by a program rather than saved by an office "
                    "application. For many purposes this is worse than a cleaning trace."))
         elif s.detect == "noticeable":
             lines.append(
+                tr("ASSESSMENT: the file looks scrubbed: the fact of processing is visible.")
+                if s.gaps else
                 tr("ASSESSMENT: the file looks scrubbed. No original values leak, but the fact "
                    "of processing is visible."))
         elif s.detect == "none":
             lines.append(
                 tr("ASSESSMENT: the inspector sees no signs of processing. This is not a "
                    "guarantee: it only sees metadata, not writing style or watermarks."))
-        if s.new_signals:
+        if s.new_signals and s.gaps:
+            lines.append(tr("Cleaning introduced signs of processing that weren't in the "
+                            "original (%s).") % ", ".join(sorted(set(s.new_signals))))
+        elif s.new_signals:
             lines.append(
                 tr("BUT THE FILE IS NOW RECOGNIZABLE AS SCRUBBED. Nothing leaks, but cleaning "
                    "introduced signs of processing (%s) that weren't in the original. If it "
@@ -364,6 +390,11 @@ def _verdict(s):
                             "weren't in the original, e.g. a regenerated trailer /ID. They are "
                             "unrelated to the source file.") % s.ca)
         lines += cav_line
+        if s.gaps:
+            return _V("unverified", "warn",
+                      tr("CLEANLINESS NOT PROVEN: no original values found, but the check could "
+                         "not be completed."),
+                      gap_lines + lines, tr("cleanliness not proven"))
         if f or s.errs:
             return _V("clean", "warn",
                       tr("NO ORIGINAL VALUES LEFT, BUT WITH CAVEATS (critical %s).") % was, lines, "")
@@ -392,7 +423,7 @@ def _verdict(s):
 
     # critical_after > 0: such a file is not called clean.
     regen = _n(s, Act.REGENERATED)
-    wl = sum(1 for e in s.by.get(Act.KEPT, []) if "whitelist" in e.note.lower())
+    wl = sum(1 for e in s.by.get(Act.KEPT, []) if e.note in both(_KEEP_NOTE))
     unexplained = max(0, s.ca - (regen * _PER_REGEN + f + u + wl))
     lines = []
     if regen:
@@ -739,7 +770,7 @@ def summary_line(result) -> str:
                              (tr("failed"), _n(s, Act.FAILED)), (tr("errors"), len(s.errs))):
                 if n:
                     parts.append("%s %d" % (label, n))
-            if v.kind == "residual" and v.short:
+            if v.short and (v.kind == "residual" or s.gaps):
                 parts.append(v.short)
             text = tr("%s, profile %s: %s") % (s.fmt_name, s.profile, ", ".join(parts))
         return " ".join(_c(text, 400).split())
@@ -755,6 +786,7 @@ def _demo():
     from html.parser import HTMLParser
 
     from core.cleanmodel import CleanResult, Profile
+    from core.i18n import RU, use_lang
     from core.model import PATH_STUB
 
     allowed = {"b", "i", "u", "s", "a", "code", "pre", "blockquote", "tg-spoiler"}
@@ -890,6 +922,11 @@ def _demo():
     check("ok=False: NOT CLEANED and the reason", "FILE NOT CLEANED" in m[0] and "password-protected" in m[0])
     check("ok=False: path stripped from the error", "secret" not in "\n".join(m) and html.escape(PATH_STUB) in "\n".join(m))
     check("ok=False: no \"clean\" and no proof numbers", not claims_clean(m[0]) and "No proof" in m[0])
+    with use_lang("ru"):
+        ru_err = mk()
+        ru_err.err("boom C:\\Users\\secret\\x.pdf here")
+    check("CleanResult.err: the path stub follows the language",
+          "<путь скрыт>" in ru_err.errors[0] and "secret" not in ru_err.errors[0], ru_err.errors)
     print("summary:", summary_line(bad))
     check_plain("ok=False", bad)
     bad.act("removed", "/Info", "/Author", "Иванов")
@@ -959,6 +996,44 @@ def _demo():
     check("critical_after=3 = /ID (2) + keep (1): remainder explained, but not \"CLEAN\"",
           "NOT EXPLAINED" not in m[0] and "per your keep list: 1" in m[0] and not claims_clean(m[0]),
           m[0][:500])
+    # The keep note is recognized by its text in either language, not by the Latin
+    # word "whitelist": a Russian wording without that word must still be counted.
+    key = "kept per the user's whitelist (keep)"
+    saved_ru = RU[key]
+    RU[key] = "оставлено по списку пользователя (keep)"
+    try:
+        wl_ru = mk(ca=3)
+        wl_ru.act("regenerated", "trailer", "/ID", "aa", "bb")
+        wl_ru.act("kept", "/Info", "/Author", "Иванов", note=RU[key])
+        m = check_tg("whitelist, note written in Russian", wl_ru)
+    finally:
+        RU[key] = saved_ru
+    check("a keep note written in another language is still counted",
+          "NOT EXPLAINED" not in m[0] and "per your keep list: 1" in m[0], m[0][:500])
+
+    # 5b. The dispatcher found no surviving values, but the inspector couldn't read
+    # part of the file: absence of evidence is not proof, so no "CLEAN:".
+    from core.clean import DispatchResult
+    gp = DispatchResult(src="a", dst="b", fmt="pdf", profile="stealth", ok=True, verified=True,
+                        critical_before=7, critical_after=0, sensitive_before=3, sensitive_after=0,
+                        gaps=["after cleaning: Section \"/Names\": ValueError: bad"])
+    gp.act("removed", "/Info", "/Author", "Иванов")
+    m = check_tg("verified, no survivors, gaps", gp)
+    plain = check_plain("verified, no survivors, gaps", gp)
+    check("gaps: warned, \"CLEAN:\" not claimed, the gap is named",
+          "CLEANLINESS NOT PROVEN" in m[0] and "/Names" in m[0] and not claims_clean(m[0])
+          and not claims_clean(plain), m[0][:500])
+    check("gaps: the one-line summary says so too", "cleanliness not proven" in summary_line(gp),
+          summary_line(gp))
+    gp.detect, gp.new_signals = "noticeable", [("scrubbed", "x")]
+    m = check_tg("verified, no survivors, gaps, detectable", gp)
+    check("gaps: the assessment and the new signs of processing are still shown, without "
+          "claiming that nothing leaks",
+          "ASSESSMENT" in m[0] and "scrubbed" in m[0] and "No original values leak" not in m[0]
+          and "Nothing leaks" not in m[0], m[0][:600])
+    gp.detect, gp.new_signals = "", []
+    gp.gaps = []
+    check("the same result without gaps is CLEAN", claims_clean(render_telegram(gp)[0]))
 
     # 6. Formats without a cleaner: no lying.
     print("\n=== 6. formats without a cleaner ===")
