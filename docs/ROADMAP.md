@@ -47,9 +47,10 @@ We stay inside the original file:
   is true, the file really was made in this application;
 - `dc:creator` and `cp:lastModifiedBy` → empty string (this is exactly how Word
   writes them when the user name is blank — a legitimate, commonly seen state);
-- `TotalTime` → a plausible non-zero value proportional to the document size
-  (optional; by default keep the original);
-- `created`/`modified` → keep a plausible gap rather than zeroing it;
+- `TotalTime` → **kept** as is (a zero in a large document is a cleaning trace,
+  and an invented value would be forged provenance; `Paranoid` removes it);
+- `created`/`modified` → **kept** as they are, neither zeroed nor substituted
+  (`Paranoid` removes them);
 - rsids → **keep** (random session IDs that carry no direct PII; removing them
   is a separate option, because they link documents together);
 - **rebuild the ZIP strictly byte-compatible with the original producer.**

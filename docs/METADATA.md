@@ -63,7 +63,7 @@ A rendered preview. Sometimes of the **previous** version of the document.
   `file:///C:/Users/NAME/...`
 - `w:mailMerge`: paths to the data source
 - `w:documentProtection`: the password hash and salt
-- `w:proofState`, `w:trackChanges`, `w:hdrShapeDefaults`, `w:docVars`
+- `w:proofState`, `w:trackRevisions`, `w:hdrShapeDefaults`, `w:docVars`
   (values in the `w:name`/`w:val` attributes; a variable named like "Owner" or
   its localized equivalent holds a full name from a template or a document
   management system, so it's identity, not provenance)
@@ -113,7 +113,7 @@ of whoever prepared the file, even when `docProps` was scrubbed.
 **32 WCHARs are 64 bytes, not 32.** The field is read as
 `blob[0:64].decode("utf-16le")` up to the first NUL. Reading 32 bytes cuts the
 printer name at the 16th character without anyone noticing:
-`HP LaserJet M404 (BUH-01)` turns into `HP LaserJet M40`, and the office
+`HP LaserJet M404 (BUH-01)` turns into `HP LaserJet M404`, and the office
 location, exactly what's being looked for here, is cut off.
 
 **The paper size is geolocation.** `Letter`/`Legal` means North America, `A4`
@@ -324,9 +324,10 @@ removed without lossy re-encoding (`removable=False`).
 `tEXt`, `zTXt` (zlib), `iTXt` (often a whole XMP packet), `tIME`,
 **`eXIf`** ⚠ (full EXIF in newer PNGs), `iCCP`, `pHYs`, `caBX` (C2PA).
 
-> ⚠ `zTXt`/`iTXt` are a denial vector: a kilobyte of compressed data expands
-> into gigabytes. Decompress with a limit, not with a bare `zlib.decompress()`.
-> The tests have a `png_ztxt_bomb` fixture of 200 MB.
+> ⚠ `zTXt`/`iTXt` are a denial vector: deflate can expand data about a thousand
+> times, so a megabyte of compressed data can inflate to a gigabyte. Decompress
+> with a limit, not with a bare `zlib.decompress()`. The tests have a
+> `png_ztxt_bomb` fixture: a file of about 200 KB that inflates to 200 MB.
 
 ### C2PA / Content Credentials
 A cryptographically signed provenance manifest: a JUMBF box in JPEG/PNG/TIFF,
@@ -356,9 +357,13 @@ empty, and the report showed "Template: (empty)", missing the user name.
 LibreOffice writes **the real time**. Word exporting to `.odt` writes
 `1980-01-01`, the same as in its own OOXML (verified on a file from Word 16;
 its `meta:generator` is `MicrosoftOffice/15.0 MicrosoftWord`). So "ODF has real
-timestamps" is a wrong generalization, and the cleaner has to decide by the
-generator. For a file from Word, real times in the entries would be a sign of
-processing, while for a file from LibreOffice the epoch would be.
+timestamps" is a wrong generalization. The cleaner therefore never rewrites ZIP
+times: it keeps whatever the producer wrote (`core/clean_odf.py` only records a
+KEPT note). Changing them in either direction would leave a fingerprint: for a
+file from Word, real times would be a sign of processing, while for a file from
+LibreOffice the epoch would be. The inspector (`_odf_zip_times` in
+`core/insp_legacy.py`) does not yet take `meta:generator` into account, so a
+Word-made `.odt` is flagged as scrubbed (see [ROADMAP](ROADMAP.md), Phase 2, ODF and RTF).
 
 **RTF**: text with control words. The `\info` group: `\author`, `\operator`
 (who saved last), `\company`, `\creatim`/`\revtim`/`\printim` (like
