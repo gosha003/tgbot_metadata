@@ -69,9 +69,13 @@ _PATH_ANY_RE = re.compile(
 # Names of properties that hold a person. Without this list, full names from
 # EDMS (electronic document management system) properties such as "Executor"
 # or "Signer" would end up in PROVENANCE. The pattern also matches the
-# Russian equivalents that Russian EDMS products write.
+# Russian equivalents that Russian EDMS products write. Only person-role
+# stems are listed: a bare "review" or "approv" would also catch
+# "ReviewDate" and "ApprovalStatus", which hold no name.
 _PERSON_NAME_RE = re.compile(
     r"(author|owner|creator|manager|savedby|lasteditedby|employee|signer"
+    r"|executor|assignee|responsible|approver|reviewer|requester|contact|full[\W_]?name"
+    r"|(approved|reviewed|prepared|checked|signed)[\W_]?by"
     r"|автор|исполнител|ответствен|подписант|согласов|утвердил|разработал"
     r"|руководител|сотрудник|фио|контакт)", re.I)
 
@@ -800,8 +804,10 @@ def _sec_settings(zf, rep, ctx):
                 "; ".join(parts),
                 tr("Shows whether the author finished the spell check."))
 
-    if any(True for _ in _iter_tag(root, "trackChanges")):
-        rep.add(Risk.PROVENANCE, loc, tr("w:trackChanges — change tracking"),
+    # CT_OnOff: a bare element means on, an explicit w:val="0"/"false"/"off" means off.
+    if any((_attr(el, "val") or "").lower() not in ("0", "false", "off")
+           for el in _iter_tag(root, "trackRevisions")):
+        rep.add(Risk.PROVENANCE, loc, tr("w:trackRevisions — change tracking"),
                 tr("enabled"),
                 tr("Change tracking is on: all subsequent edits will be saved together with the "
                    "author's name."))
@@ -960,6 +966,16 @@ def _sec_document(zf, rep, ctx):
 # === comments, authors, presenceInfo ========================================
 
 
+# Legacy Excel comments keep the author as element text (<authors><author>), not
+# as an attribute, so they are read separately from the parts below. Excel,
+# LibreOffice and XlsxWriter write xl/commentsN.xml, openpyxl xl/comments/commentN.xml.
+# The cleaner uses these same patterns (clean_ooxml imports them).
+_XLCOMMENTS_RE = re.compile(r"^xl/(?:comments\d*|comments/[^/]+)\.xml$")
+# Excel's stand-in author of a legacy comment that shadows a threaded one: a random
+# GUID, no person behind it, and it pairs the two comments, so it is left as is.
+_TC_PLACEHOLDER_RE = re.compile(r"^tc=\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}$")
+
+
 def _is_person_part(name):
     if name in ("word/comments.xml", "word/commentsExtended.xml",
                 "word/commentsIds.xml", "word/people.xml",
@@ -1004,6 +1020,62 @@ def _sec_people(zf, rep, ctx):
                     note = (tr("w15:presenceInfo/@userId — in the overwhelming majority of cases "
                                "this is a real work email."))
                 rep.add(risk, name, tr(label), val, note)
+
+    for name in ctx["names"]:
+        if not _XLCOMMENTS_RE.match(name):
+            continue
+        root = _try(rep, name, _read_xml, zf, name)
+        if root is None:
+            continue
+        for el in _iter_tag(root, "author"):
+            val = (el.text or "").strip()
+            if not val or _TC_PLACEHOLDER_RE.match(val) or (name, val) in seen or len(seen) > 400:
+                continue
+            seen.add((name, val))
+            rep.add(Risk.IDENTITY, name, tr("Comment author"), val,
+                    tr("A comment author or discussion participant."))
+
+
+# === digital signature ======================================================
+
+_SIG_FIELDS = (
+    ("X509SubjectName", Risk.IDENTITY, N_("Signer certificate: subject"),
+     N_("Who the certificate was issued to: usually a full name, an organization and an email.")),
+    ("X509IssuerName", Risk.PROVENANCE, N_("Signer certificate: issuer"),
+     N_("A corporate certificate authority reveals the organization.")),
+)
+
+
+def _sec_signature(zf, rep, ctx):
+    # The same test as clean_ooxml._sec_signature: the inspector and the cleaner
+    # must agree on what counts as a signed package.
+    sig = [n for n in ctx["names"] if n.startswith("_xmlsignatures/")]
+    if not sig:
+        return
+    rep.add(Risk.IDENTITY, "_xmlsignatures/", tr("Package digital signature"),
+            tr("%d parts") % len(sig),
+            tr("The signature carries the signer's certificate (name or organization, email, "
+               "validity period). It can be removed only together with the signature: the file "
+               "stops being signed, and cleaning is refused without force_signed."),
+            removable=False)
+    rep.signal("hazard",
+               tr("The package is digitally signed (%d parts in _xmlsignatures/): cleaning the "
+                  "metadata WILL invalidate the signature; the cleaner refuses without "
+                  "force_signed") % len(sig), "high")
+    # The certificate itself is base64 DER and is not decoded here, so the subject is
+    # shown only where the signer wrote it out as text.
+    for name in [n for n in sig if n.endswith(".xml")][:4]:
+        root = _try(rep, name, _read_xml, zf, name, 2 * 1024 * 1024)
+        if root is None:
+            continue
+        for tag, risk, label, note in _SIG_FIELDS:
+            for el in list(_iter_tag(root, tag))[:MAX_LISTED]:
+                rep.add_nonempty(risk, name, tr(label), _text(el), tr(note), removable=False)
+        # SignatureTime holds a Format and a Value; only the Value is the time.
+        for el in list(_iter_tag(root, "SignatureTime"))[:MAX_LISTED]:
+            rep.add_nonempty(Risk.PROVENANCE, name, tr("Signing time"),
+                             _text(next(_iter_tag(el, "Value"), el)),
+                             tr("The exact time the document was signed."), removable=False)
 
 
 # === media, attachments, macros =============================================
@@ -1409,7 +1481,8 @@ def _sec_excel(zf, rep, ctx):
             for el in _iter_tag(root, "sheet"):
                 state = (_attr(el, "state") or "").lower()
                 if state in ("hidden", "veryhidden"):
-                    hidden.append("%s (%s)" % (_attr(el, "name") or "?", state))
+                    hidden.append("%s (%s)" % (_attr(el, "name") or "?",
+                                               tr("very hidden") if state == "veryhidden" else tr("hidden")))
             if hidden:
                 rep.add(Risk.PROVENANCE, "xl/workbook.xml", tr("Hidden sheets"),
                         "; ".join(hidden[:MAX_LISTED]),
@@ -1726,6 +1799,7 @@ def inspect_ooxml(path, fmt="docx") -> Report:
                 _section(rep, "word/settings.xml", _sec_settings, zf, rep, ctx)
                 _section(rep, tr("Document body"), _sec_document, zf, rep, ctx)
                 _section(rep, tr("Comments and authors"), _sec_people, zf, rep, ctx)
+                _section(rep, tr("Package signature"), _sec_signature, zf, rep, ctx)
                 _section(rep, tr("Media and attachments"), _sec_media, zf, rep, ctx)
                 _section(rep, tr("Printer settings"), _sec_printer, zf, rep, ctx)
                 _section(rep, tr("Excel specifics"), _sec_excel, zf, rep, ctx)
@@ -1908,6 +1982,106 @@ def demo():
         "the public OOXML schema address says nothing about the organization")
     assert by_loc["customXml/item3.xml"].risk is Risk.PROVENANCE, (
         "an empty part of unknown origin is provenance, not a leak")
+
+    # Each case below is a minimal package with just the parts under test.
+    from core.i18n import use_lang
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    X = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    probe_n = [0]
+
+    def probe(parts, fmt="docx"):
+        probe_n[0] += 1
+        path = os.path.join(tmp, "probe%d.%s" % (probe_n[0], fmt))
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, body in parts:
+                zf.writestr(name, body)
+        return inspect_ooxml(path, fmt)
+
+    # Properties and document variables named after a person, in English: the name
+    # decides, not the value. A date or a status with "review"/"approval" in its
+    # name holds no person.
+    props = [("Reviewer", "Petr Ivanovich Smirnov"), ("Approved By", "Olga Sergeevna Belova"),
+             ("Executor", "Anna Pavlovna Orlova"), ("ReviewDate", "2024-03-01"),
+             ("ApprovalStatus", "Final")]
+    custom = ('<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats.org/'
+              'officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/'
+              'officeDocument/2006/docPropsVTypes">'
+              + "".join('<property fmtid="{f}" pid="%d" name="%s"><vt:lpwstr>%s</vt:lpwstr>'
+                        '</property>' % (i, n, v) for i, (n, v) in enumerate(props, 2))
+              + "</Properties>")
+    settings = ('<?xml version="1.0"?><w:settings xmlns:w="%s"><w:docVars><w:docVar '
+                'w:name="Reviewer" w:val="Maria Ivanovna Koval"/></w:docVars></w:settings>' % W)
+    pr = probe([("docProps/custom.xml", custom), ("word/settings.xml", settings)])
+    # By location: exiftool, when present, repeats the same properties under its own labels.
+    risk = {f.label: f.risk for f in pr.findings
+            if f.location in ("docProps/custom.xml", "word/settings.xml")}
+    for label in ("Reviewer", "Approved By", "Executor", "w:docVar Reviewer"):
+        assert risk.get(label) is Risk.IDENTITY, (label, risk)
+    for label in ("ReviewDate", "ApprovalStatus"):
+        assert risk.get(label) is Risk.PROVENANCE, (label, risk)
+
+    # Change tracking is <w:trackRevisions>, and an explicit off value means off.
+    def tracking(body):
+        rep_ = probe([("word/settings.xml", '<?xml version="1.0"?><w:settings xmlns:w="%s">%s'
+                                            '</w:settings>' % (W, body))])
+        return (any("trackRevisions" in f.label for f in rep_.findings),
+                any(s.kind == "hazard" and "Change tracking" in s.detail for s in rep_.signals))
+    for body, want in (("<w:trackRevisions/>", (True, True)),
+                       ('<w:trackRevisions w:val="1"/>', (True, True)),
+                       ('<w:trackRevisions w:val="0"/>', (False, False)),
+                       ('<w:trackRevisions w:val="false"/>', (False, False)),
+                       ("", (False, False))):
+        assert tracking(body) == want, (body, tracking(body))
+
+    # Legacy Excel comment authors are element text, not an attribute.
+    comments = ('<?xml version="1.0"?><comments xmlns="%s"><authors><author>Ivan Petrovich '
+                'Sidorov</author><author>tc={1A2B3C4D-0000-1111-2222-333344445555}</author>'
+                '</authors><commentList/></comments>' % X)
+    pr = probe([("xl/comments1.xml", comments)], "xlsx")
+    got = [(f.location, f.value) for f in pr.findings if f.label == "Comment author"]
+    assert got == [("xl/comments1.xml", "Ivan Petrovich Sidorov")], got
+    assert next(f for f in pr.findings if f.label == "Comment author").risk is Risk.IDENTITY
+    # openpyxl's layout, and only a real tc={GUID} counts as the placeholder.
+    pr = probe([("xl/comments/comment1.xml", comments.replace(
+        "</authors>", "<author>tc=Olga Belova</author></authors>"))], "xlsx")
+    got = sorted(f.value for f in pr.findings if f.label == "Comment author")
+    assert got == ["Ivan Petrovich Sidorov", "tc=Olga Belova"], got
+
+    # Hidden and very hidden sheets are named in the language of the report.
+    workbook = ('<?xml version="1.0"?><workbook xmlns="%s"><sheets><sheet name="Data" sheetId="1"/>'
+                '<sheet name="Draft" sheetId="2" state="hidden"/><sheet name="Calc" sheetId="3" '
+                'state="veryHidden"/></sheets></workbook>' % X)
+
+    def hidden_sheets():
+        rep_ = probe([("xl/workbook.xml", workbook)], "xlsx")
+        return next(f.value for f in rep_.findings if f.label == tr("Hidden sheets"))
+    assert hidden_sheets() == "Draft (hidden); Calc (very hidden)", hidden_sheets()
+    with use_lang("ru"):
+        assert hidden_sheets() == "Draft (скрытый); Calc (особо скрытый)", hidden_sheets()
+
+    # A signed package: the signer is reported, and so is the fact that cleaning
+    # will be refused. The package counts as signed by the same test as the cleaner.
+    sigxml = ('<?xml version="1.0"?><Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><KeyInfo>'
+              '<X509Data><X509SubjectName>CN=Ivan Petrov,E=ivan@corp-secret.ru</X509SubjectName>'
+              '<X509IssuerSerial><X509IssuerName>CN=Corp CA</X509IssuerName></X509IssuerSerial>'
+              '</X509Data></KeyInfo><Object><SignatureProperties><SignatureProperty><SignatureTime>'
+              '<Format>YYYY-MM-DDThh:mm:ssTZD</Format><Value>2024-03-01T10:00:00Z</Value>'
+              '</SignatureTime></SignatureProperty></SignatureProperties></Object></Signature>')
+    pr = probe([("_xmlsignatures/origin.sigs", b""), ("_xmlsignatures/sig1.xml", sigxml)])
+    by_label = {f.label: f for f in pr.findings}
+    pkg = by_label["Package digital signature"]
+    assert pkg.risk is Risk.IDENTITY and not pkg.removable and pkg.value == "2 parts", pkg
+    subj = by_label["Signer certificate: subject"]
+    assert subj.risk is Risk.IDENTITY and not subj.removable and "corp-secret.ru" in subj.value, subj
+    assert by_label["Signer certificate: issuer"].value == "CN=Corp CA"
+    assert by_label["Signing time"].value == "2024-03-01T10:00:00Z", by_label["Signing time"]
+    assert any(s.kind == "hazard" and s.confidence == "high" and "digitally signed" in s.detail
+               for s in pr.signals), pr.signals
+    assert not pr.errors, pr.errors
+    pr = probe([("word/settings.xml", settings)])
+    assert not any("signature" in f.label.lower() for f in pr.findings)
+    assert not any("digitally signed" in s.detail for s in pr.signals)
 
     print("File: %s  (%d bytes, fmt=%s)" % (rep.path, rep.size, rep.fmt))
     print("ZIP parts: %d | findings: %d (significant: %d) | signals: %d | errors: %d"
